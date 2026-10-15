@@ -24,7 +24,6 @@ def create_app(test_config: dict | None = None) -> Flask:
     app = Flask(__name__, instance_relative_config=True)
     app.config.from_mapping(
         SECRET_KEY=os.environ.get("SECRET_KEY") or None,
-        DATABASE=os.path.join(app.instance_path, "adventurer.db"),
         DATABASE_URL=os.environ.get("DATABASE_URL", ""),
         INVITE_CODE=os.environ.get("INVITE_CODE", ""),
         MAX_CONTENT_LENGTH=64 * 1024,
@@ -34,6 +33,8 @@ def create_app(test_config: dict | None = None) -> Flask:
     )
     if test_config:
         app.config.update(test_config)
+    if not (app.config.get("DATABASE_URL") or "").strip():
+        raise RuntimeError("Set DATABASE_URL to the Supabase Postgres connection string.")
 
     os.makedirs(app.instance_path, exist_ok=True)
     if not app.config["SECRET_KEY"]:

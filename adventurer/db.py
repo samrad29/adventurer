@@ -1,34 +1,8 @@
-"""SQLite locally, Postgres when DATABASE_URL is set."""
+"""Postgres connection for the climb. The tables live in the adventurer schema."""
 
 from __future__ import annotations
 
-import sqlite3
-
 from flask import current_app, g
-
-SCHEMA = """
-CREATE TABLE IF NOT EXISTS adventurers (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    name_key TEXT NOT NULL UNIQUE,
-    password_hash TEXT NOT NULL,
-    created_at TEXT NOT NULL
-);
-
-CREATE TABLE IF NOT EXISTS logs (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    adventurer_id INTEGER NOT NULL REFERENCES adventurers(id),
-    challenge_slug TEXT NOT NULL,
-    elevation_ft REAL NOT NULL CHECK (elevation_ft > 0),
-    distance_km REAL CHECK (distance_km IS NULL OR distance_km > 0),
-    happened_on TEXT NOT NULL,
-    note TEXT NOT NULL DEFAULT '',
-    created_at TEXT NOT NULL
-);
-
-CREATE INDEX IF NOT EXISTS idx_logs_challenge
-    ON logs (challenge_slug, adventurer_id);
-"""
 
 # Own schema so this climb does not sit on the run-coach tables or the public API.
 POSTGRES_STATEMENTS = (
@@ -67,17 +41,11 @@ POSTGRES_STATEMENTS = (
 
 
 class DB:
-    def __init__(self, raw, postgres: bool) -> None:
+    def __init__(self, raw) -> None:
         self.raw = raw
-        self.postgres = postgres
 
     def execute(self, sql: str, params: tuple = ()):
-        if self.postgres:
-            sql = sql.replace("?", "%s")
-        return self.raw.execute(sql, params)
-
-    def executescript(self, script: str) -> None:
-        self.raw.executescript(script)
+        return self.raw.execute(sql.replace("?", "%s"), params)
 
     def commit(self) -> None:
         self.raw.commit()
@@ -90,15 +58,15 @@ class DB:
 
 
 def is_unique_violation(exc: BaseException) -> bool:
-    if isinstance(exc, sqlite3.IntegrityError):
-        return True
     return getattr(exc, "sqlstate", None) == "23505"
 
 
 def get_db() -> DB:
     if "db" not in g:
         url = (current_app.config.get("DATABASE_URL") or "").strip()
-        g.db = _connect_postgres(url) if url else _connect_sqlite()
+        if not url:
+            raise RuntimeError("Set DATABASE_URL to the Supabase Postgres connection string.")
+        g.db = _connect(url)
     return g.db
 
 
@@ -110,12 +78,9 @@ def close_db(_error=None) -> None:
 
 def init_db() -> None:
     database = get_db()
-    if database.postgres:
-        for statement in POSTGRES_STATEMENTS:
-            database.execute(statement)
-        database.commit()
-        return
-    database.executescript(SCHEMA)
+    for statement in POSTGRES_STATEMENTS:
+        database.execute(statement)
+    database.commit()
 
 
 def init_app(app) -> None:
@@ -124,14 +89,7 @@ def init_app(app) -> None:
         init_db()
 
 
-def _connect_sqlite() -> DB:
-    connection = sqlite3.connect(current_app.config["DATABASE"])
-    connection.row_factory = sqlite3.Row
-    connection.execute("PRAGMA foreign_keys = ON")
-    return DB(connection, postgres=False)
-
-
-def _connect_postgres(url: str) -> DB:
+def _connect(url: str) -> DB:
     import psycopg
     from psycopg.rows import dict_row
 
@@ -144,4 +102,4 @@ def _connect_postgres(url: str) -> DB:
         connect_timeout=15,
     )
     connection.execute("SET search_path TO adventurer")
-    return DB(connection, postgres=True)
+    return DB(connection)

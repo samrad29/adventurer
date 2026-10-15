@@ -6,23 +6,16 @@ This is a Flask app on purpose. A Next.js frontend can sit on the JSON API later
 
 ## Run it
 
-Python 3.11 or newer.
+Accounts and climbs are stored in Supabase Postgres. `DATABASE_URL` is required. The live site is the Render service `adventurer` in Project Smirky.
 
 ```powershell
 cd the_adventurer
 py -3.13 -m venv .venv
 .venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-flask run --debug
 ```
 
-Open http://127.0.0.1:5000
-
-Copy `.env.example` to `.env` if you want a fixed `SECRET_KEY` or an `INVITE_CODE`. With no invite code, anyone who can open the site can join. That is fine on your own machine. If friends will reach it over the network, set an invite code and keep the site off the public internet.
-
-```powershell
-flask run --debug --host=0.0.0.0
-```
+Copy `.env.example` to `.env` and set `DATABASE_URL` to the Supabase session-pooler string, plus `SECRET_KEY` and `INVITE_CODE` if you want them fixed. With no invite code, anyone who can open the site can join.
 
 ## How progress works
 
@@ -36,7 +29,7 @@ Drop a replacement photo in `adventurer/static/photos/` named for the stop, for 
 
 ## Render
 
-The site keeps accounts and climbs in Postgres when `DATABASE_URL` is set, and in a local SQLite file otherwise. On Render, `DATABASE_URL` should be the Supabase session-pooler string for the same project the run coach uses. The climb lives in its own `adventurer` schema, away from the coach tables.
+`DATABASE_URL` is the Supabase session-pooler string for the same project the run coach uses. The climb lives in its own `adventurer` schema, away from the coach tables.
 
 For the web service that is already on Render:
 
@@ -52,6 +45,8 @@ Set an invite code before sharing the public URL. Without one, anyone who can op
 ```powershell
 python -m pytest
 ```
+
+The app tests need `DATABASE_URL`. They create the names Sam and Alex, then delete those accounts.
 
 ## Another route later
 

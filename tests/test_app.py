@@ -75,7 +75,14 @@ def test_approach_checkpoints_open_before_lukla(client):
 
     named = _log(client, "3000")
     trail = next(stop for stop in get_challenge("everest")["stops"] if stop["slug"] == "seven-thousand")
-    expected = display_name(trail, 1, unlocked=True)
+    with client.application.app_context():
+        from adventurer.db import get_db
+
+        account_id = get_db().execute(
+            "SELECT id FROM adventurers WHERE name_key = ?",
+            ("sam",),
+        ).fetchone()["id"]
+    expected = display_name(trail, account_id, unlocked=True)
     named_text = named.get_data(as_text=True)
     assert f"Opened {expected}" in named_text
     assert f"<h1>{expected}</h1>" in named_text
