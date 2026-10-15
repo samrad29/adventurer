@@ -21,6 +21,7 @@ from flask import (
 
 from .challenges import FEATURED_SLUG, all_challenges, get_challenge
 from .progress import clean_entry, format_feet, join_names, opened_between, view_model
+from .photos import credit_for
 from .services import (
     AccountError,
     add_log,
@@ -82,6 +83,7 @@ def stop(slug: str, stop_slug: str):
         model=model,
         stop=chosen,
         photo=_photo(stop_slug) if chosen["unlocked"] else None,
+        photo_credit=credit_for(stop_slug) if chosen["unlocked"] else None,
         place_label=place_label(chosen["place"]),
         **neighbors,
     )

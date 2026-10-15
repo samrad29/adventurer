@@ -12,7 +12,7 @@
   {% if stop.unlocked %}
     <figure class="postcard">
       {% if photo %}
-        <img src="{{ url_for('static', filename=photo) }}" alt="{{ stop.name }}">
+        <img src="{{ url_for('static', filename=photo) }}" alt="{{ photo_credit.alt if photo_credit else stop.name }}">
       {% else %}
         <svg viewBox="0 0 640 360" role="img" aria-label="Illustrated ridge for {{ stop.name }}">
           <rect width="640" height="360" fill="#d5e2e3"/>
@@ -26,6 +26,9 @@
         <span>{{ stop.elevation_ft | feet }}</span>
       </figcaption>
     </figure>
+    {% if photo_credit %}
+      <p class="credit">Photo by {{ photo_credit.author }}, <a href="{{ photo_credit.license_url }}">{{ photo_credit.license }}</a>, via <a href="{{ photo_credit.source_url }}">Wikimedia Commons</a>.</p>
+    {% endif %}
 
     {% for unlock in stop.unlocks %}
       {% if unlock.kind == "scene" %}

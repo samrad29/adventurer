@@ -71,3 +71,20 @@ def test_formatting():
     assert ordinal(3) == "3rd"
     assert ordinal(11) == "11th"
     assert ordinal(22) == "22nd"
+
+
+def test_every_stop_has_a_credited_photo():
+    from pathlib import Path
+
+    from adventurer.photos import photo_credits
+
+    everest = get_challenge("everest")
+    credits = photo_credits()
+    folder = Path(__file__).resolve().parents[1] / "adventurer" / "static" / "photos"
+    for stop in everest["stops"]:
+        assert (folder / f"{stop['slug']}.jpg").is_file()
+        credit = credits[stop["slug"]]
+        assert credit["author"]
+        assert credit["alt"]
+        assert credit["license_url"].startswith("https://creativecommons.org/")
+        assert credit["source_url"].startswith("https://commons.wikimedia.org/")

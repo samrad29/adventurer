@@ -30,7 +30,7 @@ The summit target is **29,032 ft**, the rounded 2020 survey height, and the clim
 
 The route is Lukla (9,383 ft), Namche Bazaar, Tengboche, Dingboche, Lobuche, Gorak Shep, Everest Base Camp, Kala Patthar, then Camps I–III, the South Col, and the summit. Kala Patthar is the viewpoint, not a camp on the climb. Camp heights are the common published elevations, converted to feet. The summit is 29,032 ft.
 
-Drop a photo in `adventurer/static/photos/` named for the stop, for example `namche.jpg` (also `.jpeg`, `.webp`, or `.png`). It shows once that stop is open.
+Drop a replacement photo in `adventurer/static/photos/` named for the stop, for example `namche.jpg` (also `.jpeg`, `.webp`, or `.png`). The bundled pictures are freely licensed photographs from Wikimedia Commons, and the credit sits under the picture once that stop is open.
 
 ## Tests
 

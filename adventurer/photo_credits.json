@@ -1,0 +1,93 @@
+{
+  "lukla": {
+    "author": "Vyacheslav Argenberg",
+    "license": "CC BY 4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Lukla_Airport,_Nepal.jpg",
+    "alt": "The runway at Lukla, with the control tower and the hills beyond"
+  },
+  "namche": {
+    "author": "Vyacheslav Argenberg",
+    "license": "CC BY 4.0",
+    "license_url": "https://creativecommons.org/licenses/by/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Namche_Bazaar_from_above,_Nepal.jpg",
+    "alt": "Namche Bazaar set in its hillside bowl"
+  },
+  "tengboche": {
+    "author": "Gerd Eichmann",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Tengboche-74-Lhotse_und_Ama_Dablam-2007-gje.jpg",
+    "alt": "Tengboche Monastery with Ama Dablam behind it"
+  },
+  "dingboche": {
+    "author": "Nirojsedhai",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Dingboche_settlement.jpg",
+    "alt": "Dingboche in the valley below the peaks"
+  },
+  "lobuche": {
+    "author": "Gerd Eichmann",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Lobuche-64-Lodge-2007-gje.jpg",
+    "alt": "Lodges at Lobuche"
+  },
+  "gorak-shep": {
+    "author": "Gerd Eichmann",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Gorak_Shep-02-2007-gje.jpg",
+    "alt": "Lodges on the dry lakebed at Gorak Shep"
+  },
+  "base-camp": {
+    "author": "Tom Simcock",
+    "license": "CC BY-SA 3.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/3.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Everest_Base_Camp.jpg",
+    "alt": "Tents beside the Khumbu Icefall at Everest Base Camp"
+  },
+  "kala-patthar": {
+    "author": "Bijay Chaurasia",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Close_Up_View_of_Mount_Everest_from_Kala_Patthar_(5644_m)_in_2023-IMG-3485.jpg",
+    "alt": "The summit of Everest from Kala Patthar"
+  },
+  "camp-1": {
+    "author": "Goutam1962",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Khumbu_Icefall_from_Kala_Patther.jpg",
+    "alt": "The Khumbu Icefall, the way up to Camp I"
+  },
+  "camp-2": {
+    "author": "Olaf Rieck",
+    "license": "CC BY 2.5",
+    "license_url": "https://creativecommons.org/licenses/by/2.5",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Western_Cwm_and_Lhotse.jpg",
+    "alt": "The Western Cwm, with the Lhotse Face rising on the left"
+  },
+  "camp-3": {
+    "author": "MustafaAldahabi",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Ahmad_Bani_Hani_Climbing_to_Mount_Lhotse_-_Lhotse_face.jpg",
+    "alt": "Fixed ropes on the Lhotse Face"
+  },
+  "south-col": {
+    "author": "AngeliSherpa",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Cloud_inversion_viewed_from_Everest_Camp_IV_(South_Col),_Mount_Everest.jpg",
+    "alt": "Clouds below the South Col at dawn"
+  },
+  "summit": {
+    "author": "Debasish Biswas, retouched by MagentaGreen",
+    "license": "CC BY-SA 4.0",
+    "license_url": "https://creativecommons.org/licenses/by-sa/4.0",
+    "source_url": "https://commons.wikimedia.org/wiki/File:Hillary_Step_near_Everest_top_(retouched).jpg",
+    "alt": "Climbers on the Hillary Step below the summit"
+  }
+}

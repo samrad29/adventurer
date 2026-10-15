@@ -65,6 +65,9 @@ def test_join_log_and_unlock_lukla(client):
     namche = client.get("/everest/stops/namche")
     assert "Still ahead" in namche.get_data(as_text=True)
     assert "Saturday market" not in namche.get_data(as_text=True)
+    assert "photos/lukla.jpg" in text
+    assert "Vyacheslav Argenberg" in text
+    assert "photos/namche.jpg" not in namche.get_data(as_text=True)
 
 
 def test_notes_stay_off_the_board(client):

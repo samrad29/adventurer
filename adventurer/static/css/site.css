@@ -312,6 +312,13 @@ main { padding: 2.2rem 0 3rem; }
 }
 .postcard figcaption strong { font-family: var(--serif); font-size: 1.6rem; }
 
+.credit {
+  max-width: 42rem;
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
 .field-note, .recipe, .locked-panel, .sheet {
   background: var(--card);
   border: 1px solid var(--line);
