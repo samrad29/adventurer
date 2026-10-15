@@ -19,7 +19,7 @@ CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     adventurer_id INTEGER NOT NULL REFERENCES adventurers(id),
     challenge_slug TEXT NOT NULL,
-    elevation_m REAL NOT NULL CHECK (elevation_m > 0),
+    elevation_ft REAL NOT NULL CHECK (elevation_ft > 0),
     distance_km REAL CHECK (distance_km IS NULL OR distance_km > 0),
     happened_on TEXT NOT NULL,
     note TEXT NOT NULL DEFAULT '',

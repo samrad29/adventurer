@@ -13,7 +13,7 @@ from flask import Flask, jsonify, render_template, request, session
 
 from . import db
 from .challenges import FEATURED_SLUG, get_challenge
-from .progress import format_day, format_km, format_meters, ordinal
+from .progress import format_day, format_km, format_feet, ordinal
 from .services import current_viewer
 
 load_dotenv()
@@ -41,7 +41,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     from . import routes
 
     app.register_blueprint(routes.bp)
-    app.add_template_filter(format_meters, "meters")
+    app.add_template_filter(format_feet, "feet")
     app.add_template_filter(format_km, "km")
     app.add_template_filter(format_day, "day")
     app.add_template_filter(ordinal, "ordinal")

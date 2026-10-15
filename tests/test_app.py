@@ -35,7 +35,7 @@ def _log(client, elevation, note="", when=None):
         "/everest/log",
         data={
             "csrf": token,
-            "elevation_m": str(elevation),
+            "elevation_ft": str(elevation),
             "distance_km": "",
             "happened_on": when or date.today().isoformat(),
             "note": note,
@@ -56,7 +56,7 @@ def test_home_explains_the_climb(client):
 
 def test_join_log_and_unlock_lukla(client):
     _join(client)
-    opened = _log(client, 2860)
+    opened = _log(client, 9383)
     text = opened.get_data(as_text=True)
     assert "Opened Lukla" in text
     assert "Butter tea" in text
@@ -139,14 +139,14 @@ def test_api_hides_unlocks_until_they_are_earned(client):
 
     created = client.post(
         "/api/v1/challenges/everest/logs",
-        json={"elevation_m": 3000, "note": "long hills"},
+        json={"elevation_ft": 10000, "note": "long hills"},
         headers={"X-CSRF-Token": token},
     )
     assert created.status_code == 201
     assert created.get_json()["opened"] == ["lukla"]
     finished = client.post(
         "/api/v1/challenges/everest/logs",
-        json={"elevation_m": 440},
+        json={"elevation_ft": 1286},
         headers={"X-CSRF-Token": token},
     )
     assert finished.status_code == 201

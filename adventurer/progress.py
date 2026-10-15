@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
-MAX_ENTRY_M = 3000
+MAX_ENTRY_FT = 10000
 MAX_DISTANCE_KM = 120
 MAX_NOTE = 280
 
@@ -13,17 +13,17 @@ class EntryError(ValueError):
     pass
 
 
-def view_model(challenge: dict, total_m: float) -> dict:
-    total = max(0.0, float(total_m))
+def view_model(challenge: dict, total_ft: float) -> dict:
+    total = max(0.0, float(total_ft))
     current = None
     nxt = None
     stops = []
     for stop in challenge["stops"]:
-        unlocked = total >= stop["elevation_m"]
+        unlocked = total >= stop["elevation_ft"]
         item = {
             "slug": stop["slug"],
             "name": stop["name"],
-            "elevation_m": stop["elevation_m"],
+            "elevation_ft": stop["elevation_ft"],
             "place": stop["place"],
             "summary": stop["summary"],
             "unlocked": unlocked,
@@ -34,30 +34,30 @@ def view_model(challenge: dict, total_m: float) -> dict:
         elif nxt is None:
             nxt = item
         stops.append(item)
-    summit = challenge["summit_m"]
+    summit = challenge["summit_ft"]
     return {
         "slug": challenge["slug"],
         "name": challenge["name"],
         "local_names": list(challenge["local_names"]),
         "region": challenge["region"],
         "route": challenge["route"],
-        "summit_m": summit,
+        "summit_ft": summit,
         "summary": challenge["summary"],
-        "total_m": total,
+        "total_ft": total,
         "percent": min(100.0, (total / summit) * 100 if summit else 0),
         "summited": total >= summit,
-        "remaining_m": max(0.0, summit - total),
+        "remaining_ft": max(0.0, summit - total),
         "current": current,
         "next": nxt,
-        "to_next_m": None if nxt is None else nxt["elevation_m"] - total,
+        "to_next_ft": None if nxt is None else nxt["elevation_ft"] - total,
         "stops": stops,
     }
 
 
-def opened_between(challenge: dict, before_m: float, after_m: float) -> list[dict]:
+def opened_between(challenge: dict, before_ft: float, after_ft: float) -> list[dict]:
     opened = []
     for stop in challenge["stops"]:
-        if before_m < stop["elevation_m"] <= after_m:
+        if before_ft < stop["elevation_ft"] <= after_ft:
             opened.append(stop)
     return opened
 
@@ -72,9 +72,9 @@ def clean_entry(
     elevation = _parse_number(elevation_raw, "Elevation")
     if elevation <= 0:
         raise EntryError("Elevation has to be more than zero.")
-    if elevation > MAX_ENTRY_M:
+    if elevation > MAX_ENTRY_FT:
         raise EntryError(
-            f"Log one outing at a time, up to {MAX_ENTRY_M:,} m. Split a bigger day."
+            f"Log one outing at a time, up to {MAX_ENTRY_FT:,} ft. Split a bigger day."
         )
 
     distance = None
@@ -100,18 +100,18 @@ def clean_entry(
         raise EntryError(f"Keep the note under {MAX_NOTE} characters.")
 
     return {
-        "elevation_m": elevation,
+        "elevation_ft": elevation,
         "distance_km": distance,
         "happened_on": happened.isoformat(),
         "note": note,
     }
 
 
-def format_meters(value: float) -> str:
+def format_feet(value: float) -> str:
     number = float(value)
     if abs(number - round(number)) < 0.05:
-        return f"{round(number):,} m"
-    return f"{number:,.1f} m"
+        return f"{round(number):,} ft"
+    return f"{number:,.1f} ft"
 
 
 def format_km(value: float | None) -> str:

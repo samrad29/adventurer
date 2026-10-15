@@ -4,13 +4,13 @@
 <header class="page-head">
   <p class="eyebrow">{{ model.region }}</p>
   <h1>The route</h1>
-  <p class="lede">Nepal side to base camp, then the Southeast Ridge. Kala Patthar is the viewpoint off to the side. Locked places keep their names. The writing opens with the meters.</p>
+  <p class="lede">Nepal side to base camp, then the Southeast Ridge. Kala Patthar is the viewpoint off to the side. Locked places keep their names. The writing opens as you reach each height.</p>
 </header>
 <ol class="trail">
   {% for stop in model.stops %}
     <li class="{{ 'is-open' if stop.unlocked else 'is-locked' }} {{ 'is-here' if model.current and stop.slug == model.current.slug else '' }}">
       <article>
-        <p class="stop-meta">{{ stop.place | capitalize }} · {{ stop.elevation_m | meters }}</p>
+        <p class="stop-meta">{{ stop.place | capitalize }} · {{ stop.elevation_ft | feet }}</p>
         <h2><a href="{{ url_for('main.stop', slug=challenge.slug, stop_slug=stop.slug) }}">{{ stop.name }}</a></h2>
         <p>{{ stop.summary }}</p>
         <p class="stop-state">

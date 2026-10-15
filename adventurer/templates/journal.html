@@ -4,7 +4,7 @@
 <header class="page-head">
   <p class="eyebrow">{{ viewer.name }}</p>
   <h1>Journal</h1>
-  <p class="lede">{{ model.total_m | meters }} logged toward Everest. These notes stay off the board.</p>
+  <p class="lede">{{ model.total_ft | feet }} logged toward Everest. These notes stay off the board.</p>
 </header>
 {% if logs %}
   <ul class="journal">
@@ -12,7 +12,7 @@
       <li>
         <div>
           <p class="stop-meta">{{ entry.happened_on | day }}</p>
-          <p class="journal-total">{{ entry.elevation_m | meters }}{% if entry.distance_km %} · {{ entry.distance_km | km }}{% endif %}</p>
+          <p class="journal-total">{{ entry.elevation_ft | feet }}{% if entry.distance_km %} · {{ entry.distance_km | km }}{% endif %}</p>
           {% if entry.note %}<p>{{ entry.note }}</p>{% endif %}
         </div>
         <form method="post" action="{{ url_for('main.remove_log', slug=challenge.slug, log_id=entry.id) }}" onsubmit="return confirm('Remove this entry?');">

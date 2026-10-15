@@ -20,7 +20,7 @@ from flask import (
 )
 
 from .challenges import FEATURED_SLUG, all_challenges, get_challenge
-from .progress import clean_entry, format_meters, join_names, opened_between, view_model
+from .progress import clean_entry, format_feet, join_names, opened_between, view_model
 from .services import (
     AccountError,
     add_log,
@@ -101,7 +101,7 @@ def log_entry(slug: str):
     if viewer is None:
         return redirect(url_for("main.login", next=request.path))
     form = {
-        "elevation_m": "",
+        "elevation_ft": "",
         "distance_km": "",
         "happened_on": date.today().isoformat(),
         "note": "",
@@ -110,7 +110,7 @@ def log_entry(slug: str):
         form = {key: request.form.get(key, "") for key in form}
         try:
             entry = clean_entry(
-                form["elevation_m"],
+                form["elevation_ft"],
                 form["distance_km"],
                 form["happened_on"],
                 form["note"],
@@ -125,11 +125,11 @@ def log_entry(slug: str):
             flash(f"Opened {join_names([item['name'] for item in opened])}.")
             return redirect(url_for("main.stop", slug=slug, stop_slug=opened[-1]["slug"]))
         updated = view_model(challenge, after)
-        logged = format_meters(entry["elevation_m"])
+        logged = format_feet(entry["elevation_ft"])
         if updated["next"] is not None:
-            flash(f"Logged {logged}. {format_meters(updated['to_next_m'])} to {updated['next']['name']}.")
+            flash(f"Logged {logged}. {format_feet(updated['to_next_ft'])} to {updated['next']['name']}.")
         else:
-            flash(f"Logged {logged}. You are on the summit, and extra meters still count.")
+            flash(f"Logged {logged}. You are on the summit, and extra feet still count.")
         return redirect(url_for("main.log_entry", slug=slug))
     return render_template("log.html", model=_model(challenge), form=form, error=None)
 
@@ -250,7 +250,7 @@ def api_challenges():
                 "slug": challenge["slug"],
                 "name": challenge["name"],
                 "region": challenge["region"],
-                "summit_m": challenge["summit_m"],
+                "summit_ft": challenge["summit_ft"],
             }
             for challenge in all_challenges()
         ]
@@ -279,7 +279,7 @@ def api_add_log(slug: str):
     payload = request.get_json(silent=True) or {}
     try:
         entry = clean_entry(
-            _text(payload.get("elevation_m")),
+            _text(payload.get("elevation_ft")),
             _text(payload.get("distance_km")),
             _text(payload.get("happened_on")),
             _text(payload.get("note")),

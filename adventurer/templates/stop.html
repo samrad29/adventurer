@@ -4,7 +4,7 @@
 <article class="stop-page">
   <p class="eyebrow"><a href="{{ url_for('main.trail', slug=challenge.slug) }}">Route</a></p>
   <header class="page-head">
-    <p class="stop-meta">{{ place_label }} · {{ stop.elevation_m | meters }}</p>
+    <p class="stop-meta">{{ place_label }} · {{ stop.elevation_ft | feet }}</p>
     <h1>{{ stop.name }}</h1>
     <p class="lede">{{ stop.summary }}</p>
   </header>
@@ -23,7 +23,7 @@
       {% endif %}
       <figcaption>
         <strong>{{ stop.name }}</strong>
-        <span>{{ stop.elevation_m | meters }}</span>
+        <span>{{ stop.elevation_ft | feet }}</span>
       </figcaption>
     </figure>
 
@@ -66,16 +66,16 @@
   {% else %}
     <section class="locked-panel">
       <h2>Still ahead</h2>
-      <p>This opens at {{ stop.elevation_m | meters }}.</p>
+      <p>This opens at {{ stop.elevation_ft | feet }}.</p>
       {% if viewer %}
-        <p>You have {{ model.total_m | meters }}.
-          {% if model.total_m < stop.elevation_m %}
-            {{ (stop.elevation_m - model.total_m) | meters }} to go.
+        <p>You have {{ model.total_ft | feet }}.
+          {% if model.total_ft < stop.elevation_ft %}
+            {{ (stop.elevation_ft - model.total_ft) | feet }} to go.
           {% endif %}
         </p>
         <a class="button" href="{{ url_for('main.log_entry', slug=challenge.slug) }}">Log a climb</a>
       {% else %}
-        <p>Join the climb to start banking meters.</p>
+        <p>Join the climb to start banking feet.</p>
         <a class="button" href="{{ url_for('main.join') }}">Join</a>
       {% endif %}
     </section>

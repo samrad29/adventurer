@@ -12,16 +12,16 @@ EVEREST = {
     "local_names": ["Sagarmatha", "Chomolungma"],
     "region": "Khumbu, Nepal",
     "route": "Nepal side, then the Southeast Ridge",
-    "summit_m": 8849,
+    "summit_ft": 29032,
     "summary": (
-        "Log the elevation you gain on real outings. A camp opens when "
-        "your total reaches its height above sea level."
+        "Start at sea level and log the elevation you gain on real outings. "
+        "A camp opens when your total reaches that place's height."
     ),
     "stops": [
         {
             "slug": "lukla",
             "name": "Lukla",
-            "elevation_m": 2860,
+            "elevation_ft": 9383,
             "place": "village",
             "summary": "The airstrip where the walk begins.",
             "unlocks": [
@@ -30,7 +30,7 @@ EVEREST = {
                     "title": "A runway aimed at the hillside",
                     "body": (
                         "Lukla sits on a shelf above the Dudh Kosi. The runway "
-                        "is only about 530 meters long, and it slopes uphill on "
+                        "is only about 1,700 feet long, and it slopes uphill on "
                         "purpose: landings run up the slope, takeoffs run down. "
                         "The field is Tenzing-Hillary Airport. It opened in 1964 "
                         "and is still the usual way into the Khumbu. Flights wait "
@@ -65,7 +65,7 @@ EVEREST = {
         {
             "slug": "namche",
             "name": "Namche Bazaar",
-            "elevation_m": 3440,
+            "elevation_ft": 11286,
             "place": "village",
             "summary": "The Sherpa town in the bowl.",
             "unlocks": [
@@ -115,7 +115,7 @@ EVEREST = {
         {
             "slug": "tengboche",
             "name": "Tengboche",
-            "elevation_m": 3860,
+            "elevation_ft": 12664,
             "place": "village",
             "summary": "A monastery terrace, with Ama Dablam in the window.",
             "unlocks": [
@@ -147,7 +147,7 @@ EVEREST = {
         {
             "slug": "dingboche",
             "name": "Dingboche",
-            "elevation_m": 4410,
+            "elevation_ft": 14469,
             "place": "village",
             "summary": "Stone-walled fields, and a rest day.",
             "unlocks": [
@@ -192,7 +192,7 @@ EVEREST = {
         {
             "slug": "lobuche",
             "name": "Lobuche",
-            "elevation_m": 4940,
+            "elevation_ft": 16207,
             "place": "village",
             "summary": "A short string of lodges on the moraine.",
             "unlocks": [
@@ -222,7 +222,7 @@ EVEREST = {
         {
             "slug": "gorak-shep",
             "name": "Gorak Shep",
-            "elevation_m": 5164,
+            "elevation_ft": 16942,
             "place": "village",
             "summary": "The last lodges, on a dry lakebed.",
             "unlocks": [
@@ -252,7 +252,7 @@ EVEREST = {
         {
             "slug": "base-camp",
             "name": "Everest Base Camp",
-            "elevation_m": 5364,
+            "elevation_ft": 17598,
             "place": "camp",
             "summary": "A tent city with a short season.",
             "unlocks": [
@@ -298,7 +298,7 @@ EVEREST = {
         {
             "slug": "kala-patthar",
             "name": "Kala Patthar",
-            "elevation_m": 5645,
+            "elevation_ft": 18520,
             "place": "viewpoint",
             "summary": "The lookout above Gorak Shep.",
             "unlocks": [
@@ -332,7 +332,7 @@ EVEREST = {
         {
             "slug": "camp-1",
             "name": "Camp I",
-            "elevation_m": 6065,
+            "elevation_ft": 19898,
             "place": "camp",
             "summary": "Above the icefall, at the door of the Western Cwm.",
             "unlocks": [
@@ -364,7 +364,7 @@ EVEREST = {
         {
             "slug": "camp-2",
             "name": "Camp II",
-            "elevation_m": 6400,
+            "elevation_ft": 20997,
             "place": "camp",
             "summary": "Advanced base, in a valley of ice.",
             "unlocks": [
@@ -396,7 +396,7 @@ EVEREST = {
         {
             "slug": "camp-3",
             "name": "Camp III",
-            "elevation_m": 7200,
+            "elevation_ft": 23622,
             "place": "camp",
             "summary": "Platforms cut into the Lhotse Face.",
             "unlocks": [
@@ -427,7 +427,7 @@ EVEREST = {
         {
             "slug": "south-col",
             "name": "South Col",
-            "elevation_m": 7950,
+            "elevation_ft": 26083,
             "place": "camp",
             "summary": "The windy saddle between Everest and Lhotse.",
             "unlocks": [
@@ -460,7 +460,7 @@ EVEREST = {
         {
             "slug": "summit",
             "name": "Summit",
-            "elevation_m": 8849,
+            "elevation_ft": 29032,
             "place": "summit",
             "summary": "The crest of the Southeast Ridge.",
             "unlocks": [
@@ -478,13 +478,13 @@ EVEREST = {
                 },
                 {
                     "kind": "tidbit",
-                    "title": "8,848.86 meters",
+                    "title": "29,032 feet",
                     "body": (
                         "In December 2020, Nepal and China jointly announced a "
-                        "height of 8,848.86 meters. This challenge uses 8,849 so "
-                        "the target is a clean number. Everest is Sagarmatha in "
-                        "Nepali, and Chomolungma in Sherpa and Tibetan, usually "
-                        "translated as Goddess Mother of the World."
+                        "height of 8,848.86 meters, which rounds to 29,032 feet. This "
+                        "climb uses that figure and starts at sea level. Everest "
+                        "is Sagarmatha in Nepali, and Chomolungma in Sherpa and "
+                        "Tibetan, usually translated as Goddess Mother of the World."
                     ),
                 },
             ],
@@ -505,11 +505,11 @@ def _validate(challenge: dict) -> None:
     slug = challenge["slug"]
     if slug in RESERVED_SLUGS:
         raise RuntimeError(f"{slug} is a reserved name")
-    elevations = [stop["elevation_m"] for stop in challenge["stops"]]
+    elevations = [stop["elevation_ft"] for stop in challenge["stops"]]
     if elevations != sorted(set(elevations)):
         raise RuntimeError(f"{slug} stops must climb, with no repeated heights")
-    if elevations[-1] != challenge["summit_m"]:
-        raise RuntimeError(f"{slug} summit stop must match summit_m")
+    if elevations[-1] != challenge["summit_ft"]:
+        raise RuntimeError(f"{slug} summit stop must match summit_ft")
     slugs = [stop["slug"] for stop in challenge["stops"]]
     if len(slugs) != len(set(slugs)):
         raise RuntimeError(f"{slug} has a repeated stop slug")

@@ -87,7 +87,7 @@ def get_adventurer(adventurer_id: int) -> dict | None:
 def total_elevation(adventurer_id: int, challenge_slug: str) -> float:
     row = get_db().execute(
         """
-        SELECT COALESCE(SUM(elevation_m), 0) AS total
+        SELECT COALESCE(SUM(elevation_ft), 0) AS total
         FROM logs
         WHERE adventurer_id = ? AND challenge_slug = ?
         """,
@@ -100,7 +100,7 @@ def add_log(adventurer_id: int, challenge_slug: str, entry: dict) -> float:
     get_db().execute(
         """
         INSERT INTO logs (
-            adventurer_id, challenge_slug, elevation_m, distance_km,
+            adventurer_id, challenge_slug, elevation_ft, distance_km,
             happened_on, note, created_at
         )
         VALUES (?, ?, ?, ?, ?, ?, ?)
@@ -108,7 +108,7 @@ def add_log(adventurer_id: int, challenge_slug: str, entry: dict) -> float:
         (
             adventurer_id,
             challenge_slug,
-            entry["elevation_m"],
+            entry["elevation_ft"],
             entry["distance_km"],
             entry["happened_on"],
             entry["note"],
@@ -134,7 +134,7 @@ def delete_log(adventurer_id: int, challenge_slug: str, log_id: int) -> bool:
 def list_logs(adventurer_id: int, challenge_slug: str) -> list[dict]:
     rows = get_db().execute(
         """
-        SELECT id, elevation_m, distance_km, happened_on, note, created_at
+        SELECT id, elevation_ft, distance_km, happened_on, note, created_at
         FROM logs
         WHERE adventurer_id = ? AND challenge_slug = ?
         ORDER BY happened_on DESC, id DESC
@@ -148,19 +148,19 @@ def leaderboard(challenge: dict) -> list[dict]:
     rows = get_db().execute(
         """
         SELECT a.id, a.name,
-               COALESCE(SUM(l.elevation_m), 0) AS total_m,
+               COALESCE(SUM(l.elevation_ft), 0) AS total_ft,
                MAX(l.happened_on) AS last_on,
                MAX(l.created_at) AS last_logged
         FROM adventurers a
         JOIN logs l ON l.adventurer_id = a.id AND l.challenge_slug = ?
         GROUP BY a.id
-        ORDER BY total_m DESC, last_logged ASC, a.name COLLATE NOCASE ASC
+        ORDER BY total_ft DESC, last_logged ASC, a.name COLLATE NOCASE ASC
         """,
         (challenge["slug"],),
     ).fetchall()
     items = []
     for row in rows:
-        model = view_model(challenge, row["total_m"])
+        model = view_model(challenge, row["total_ft"])
         if model["summited"]:
             camp = "Summit"
         elif model["current"] is None:
@@ -171,7 +171,7 @@ def leaderboard(challenge: dict) -> list[dict]:
             {
                 "id": row["id"],
                 "name": row["name"],
-                "total_m": float(row["total_m"]),
+                "total_ft": float(row["total_ft"]),
                 "last_on": row["last_on"],
                 "camp": camp,
                 "percent": model["percent"],

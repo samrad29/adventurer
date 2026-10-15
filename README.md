@@ -1,6 +1,6 @@
 # The Adventurer
 
-A private climb for friends. The first route is Everest, on the Nepal side. You log elevation you actually gain — runs, hikes, stairs, walks — and camps open when the total reaches them. An open camp can hold a picture, a Himalayan recipe, or a short note about that place. Everyone shares a leaderboard. Notes stay in your own journal.
+A private climb for friends. The first route is Everest, on the Nepal side, measured in feet from sea level. You log elevation you actually gain — runs, hikes, stairs, walks — and camps open when the total reaches them. An open camp can hold a picture, a Himalayan recipe, or a short note about that place. Everyone shares a leaderboard. Notes stay in your own journal.
 
 This is a Flask app on purpose. A Next.js frontend can sit on the JSON API later without throwing away the climb.
 
@@ -26,9 +26,9 @@ flask run --debug --host=0.0.0.0
 
 ## How progress works
 
-The summit target is **8,849 m**, a rounded form of the 2020 survey height (8,848.86 m). Log one outing at a time, up to 3,000 m, so a typo cannot finish the mountain. Older dates are allowed when someone is catching up.
+The summit target is **29,032 ft**, the rounded 2020 survey height, and the climb starts at sea level. Log one outing at a time, up to 10,000 ft, so a typo cannot finish the mountain. Older dates are allowed when someone is catching up.
 
-The route is Lukla, Namche Bazaar, Tengboche, Dingboche, Lobuche, Gorak Shep, Everest Base Camp, Kala Patthar, then Camps I–III, the South Col, and the summit. Kala Patthar is the viewpoint, not a camp on the climb. Heights are widely published figures, rounded.
+The route is Lukla (9,383 ft), Namche Bazaar, Tengboche, Dingboche, Lobuche, Gorak Shep, Everest Base Camp, Kala Patthar, then Camps I–III, the South Col, and the summit. Kala Patthar is the viewpoint, not a camp on the climb. Camp heights are the common published elevations, converted to feet. The summit is 29,032 ft.
 
 Drop a photo in `adventurer/static/photos/` named for the stop, for example `namche.jpg` (also `.jpeg`, `.webp`, or `.png`). It shows once that stop is open.
 
@@ -40,7 +40,7 @@ python -m pytest
 
 ## Another route later
 
-Add a challenge dict in `adventurer/challenges.py` and append it to `CHALLENGES`. Logs are stored with a challenge slug, so a second mountain does not reuse Everest's meters. Stops need a slug, a name, an elevation, a place (`village`, `camp`, `viewpoint`, or `summit`), a one-line summary, and unlocks.
+Add a challenge dict in `adventurer/challenges.py` and append it to `CHALLENGES`. Logs are stored with a challenge slug, so a second mountain does not reuse Everest's feet. Stops need a slug, a name, an elevation in feet, a place (`village`, `camp`, `viewpoint`, or `summit`), a one-line summary, and unlocks.
 
 An unlock is one of:
 
@@ -48,7 +48,7 @@ An unlock is one of:
 - `tidbit` — a historical or cultural note
 - `recipe` — `makes`, `ingredients`, `steps`, and an optional `aside`
 
-A `story` kind can be added the same way when you want one. The last stop's elevation has to match `summit_m`.
+A `story` kind can be added the same way when you want one. The last stop's elevation has to match `summit_ft`.
 
 ## JSON, for a later frontend
 
