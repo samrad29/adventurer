@@ -2,9 +2,35 @@
 
 from __future__ import annotations
 
+import zlib
+
 FEATURED_SLUG = "everest"
-RESERVED_SLUGS = {"join", "login", "logout", "api", "static", "favicon.ico"}
+RESERVED_SLUGS = {"join", "login", "logout", "api", "static", "favicon.ico", "health"}
 UNLOCK_KINDS = {"scene", "tidbit", "recipe"}
+
+# Drawn once per account at the 7,000 ft checkpoint. The same id always gets the same name.
+TRAIL_NAMES = (
+    "Cedar Switchback",
+    "Long Grade",
+    "North Fork",
+    "Blue Blaze",
+    "Hemlock Loop",
+    "Old Fire Road",
+    "Pine Saddle",
+    "Stone Steps",
+    "Ridge Cutoff",
+    "Quiet Climb",
+    "Maple Traverse",
+    "Warm-up Ridge",
+    "Lost Lake Trail",
+    "Second Hill",
+    "Gravel Climb",
+    "Evening Loop",
+    "Birch Cutoff",
+    "High Meadow",
+    "Switchback Mile",
+    "Creek Road",
+)
 
 EVEREST = {
     "slug": "everest",
@@ -15,9 +41,104 @@ EVEREST = {
     "summit_ft": 29032,
     "summary": (
         "Start at sea level and log the elevation you gain on real outings. "
-        "A camp opens when your total reaches that place's height."
+        "Wisconsin's high point and two checkpoints come before the Khumbu. "
+        "A place opens when your total reaches its height."
     ),
     "stops": [
+        {
+            "slug": "timms-hill",
+            "name": "Timms Hill",
+            "elevation_ft": 1951.5,
+            "place": "high-point",
+            "summary": "The highest natural point in Wisconsin.",
+            "unlocks": [
+                {
+                    "kind": "tidbit",
+                    "title": "A hill in Price County",
+                    "body": (
+                        "Timms Hill stands in Timms Hill County Park, near Ogema "
+                        "in Price County. The Wisconsin State Cartographer's Office "
+                        "lists it at 1,951.5 feet, the highest natural ground in "
+                        "the state. A short walk in the park reaches an observation "
+                        "tower, and the Ice Age Trail passes through."
+                    ),
+                },
+                {
+                    "kind": "tidbit",
+                    "title": "The first height that counts",
+                    "body": (
+                        "You do not have to stand on that tower for this one to "
+                        "open. A hilly run, a long walk, or a pile of stairs all "
+                        "bank the same feet. This is just the first named stop "
+                        "between sea level and a much bigger mountain."
+                    ),
+                },
+            ],
+        },
+        {
+            "slug": "four-thousand",
+            "name": "4,000 feet",
+            "elevation_ft": 4000,
+            "place": "checkpoint",
+            "summary": "A long day on foot, wherever you found the hills.",
+            "unlocks": [
+                {
+                    "kind": "tidbit",
+                    "title": "Hike, run, or climb",
+                    "body": (
+                        "Four thousand feet of gain is a full day in a lot of "
+                        "places. On a hike it is a steady walk with real climbs "
+                        "in it. On a trail run it is usually more walking than "
+                        "the watch suggests: run the flats and the easy ground, "
+                        "walk the steep pitches, and eat before you are empty. "
+                        "On a climb the same number might be a few pitches or a "
+                        "long approach. Log the elevation you actually gained. "
+                        "The total does not care which sport it came from."
+                    ),
+                },
+                {
+                    "kind": "tidbit",
+                    "title": "Keep the days smaller than the mountain",
+                    "body": (
+                        "Ordinary hills add up faster than waiting for one heroic "
+                        "day. Log an outing when you do it. If a number looks "
+                        "wrong, it probably is."
+                    ),
+                },
+            ],
+        },
+        {
+            "slug": "seven-thousand",
+            "name": "7,000 feet",
+            "names": TRAIL_NAMES,
+            "elevation_ft": 7000,
+            "place": "trail",
+            "summary": "High enough that the approach deserves a trail name.",
+            "unlocks": [
+                {
+                    "kind": "tidbit",
+                    "title": "Your trail",
+                    "body": (
+                        "This stop is not a village on the way to Everest. It is "
+                        "the height where the climb gives your approach a trail "
+                        "name. The draw is tied to your account, so it is the "
+                        "same when you come back. Friends each get a name from "
+                        "the same list. While this is your latest stop, that "
+                        "name is what the board shows."
+                    ),
+                },
+                {
+                    "kind": "tidbit",
+                    "title": "Still below the airplane",
+                    "body": (
+                        "Seven thousand feet is above plenty of trailheads and "
+                        "still well under Lukla, where the walk toward Everest "
+                        "starts. Keep logging the weeks you already have. The "
+                        "next name on the route is a real place."
+                    ),
+                },
+            ],
+        },
         {
             "slug": "lukla",
             "name": "Lukla",
@@ -494,11 +615,23 @@ EVEREST = {
 
 CHALLENGES = [EVEREST]
 PLACE_LABELS = {
+    "high-point": "High point",
+    "checkpoint": "Checkpoint",
+    "trail": "Trail",
     "village": "Village",
     "camp": "Camp",
     "viewpoint": "Viewpoint",
     "summit": "Summit",
 }
+
+
+def display_name(stop: dict, adventurer_id: int | None, *, unlocked: bool) -> str:
+    """Public name, or the account's trail name once that stop is open."""
+    names = stop.get("names")
+    if not names or not unlocked or adventurer_id is None:
+        return stop["name"]
+    key = f"{stop['slug']}:{int(adventurer_id)}".encode()
+    return names[zlib.crc32(key) % len(names)]
 
 
 def _validate(challenge: dict) -> None:
@@ -518,6 +651,9 @@ def _validate(challenge: dict) -> None:
             raise RuntimeError(f"{stop['slug']} has an unknown place type")
         if not stop["unlocks"]:
             raise RuntimeError(f"{stop['slug']} has no unlocks")
+        names = stop.get("names")
+        if names is not None and (len(names) < 2 or len(set(names)) != len(names)):
+            raise RuntimeError(f"{stop['slug']} needs a list of distinct trail names")
         for item in stop["unlocks"]:
             if item["kind"] not in UNLOCK_KINDS:
                 raise RuntimeError(f"{stop['slug']} has an unknown unlock")

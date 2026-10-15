@@ -10,11 +10,12 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 from flask import Flask, jsonify, render_template, request, session
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 from . import db
 from .challenges import FEATURED_SLUG, get_challenge
 from .progress import format_day, format_km, format_feet, ordinal
-from .services import current_viewer
+from .services import current_viewer, place_label
 
 load_dotenv()
 
@@ -24,6 +25,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.config.from_mapping(
         SECRET_KEY=os.environ.get("SECRET_KEY") or None,
         DATABASE=os.path.join(app.instance_path, "adventurer.db"),
+        DATABASE_URL=os.environ.get("DATABASE_URL", ""),
         INVITE_CODE=os.environ.get("INVITE_CODE", ""),
         MAX_CONTENT_LENGTH=64 * 1024,
         PERMANENT_SESSION_LIFETIME=timedelta(days=30),
@@ -36,6 +38,9 @@ def create_app(test_config: dict | None = None) -> Flask:
     os.makedirs(app.instance_path, exist_ok=True)
     if not app.config["SECRET_KEY"]:
         app.config["SECRET_KEY"] = _secret_key(app)
+    if os.environ.get("RENDER"):
+        app.config["SESSION_COOKIE_SECURE"] = True
+        app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
     db.init_app(app)
     from . import routes
@@ -45,6 +50,7 @@ def create_app(test_config: dict | None = None) -> Flask:
     app.add_template_filter(format_km, "km")
     app.add_template_filter(format_day, "day")
     app.add_template_filter(ordinal, "ordinal")
+    app.add_template_filter(place_label, "place_label")
 
     @app.before_request
     def guard_post():

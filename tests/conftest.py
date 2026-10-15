@@ -10,6 +10,7 @@ def app(tmp_path):
             "TESTING": True,
             "SECRET_KEY": "test-secret",
             "DATABASE": str(tmp_path / "test.db"),
+            "DATABASE_URL": "",
             "INVITE_CODE": "",
         }
     )

@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import sqlite3
 from datetime import datetime, timezone
 
 from flask import g, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
 from .challenges import PLACE_LABELS
-from .db import get_db
+from .db import get_db, is_unique_violation
 from .progress import view_model
 
 
@@ -42,13 +41,18 @@ def create_adventurer(name: str, password: str) -> dict:
             """
             INSERT INTO adventurers (name, name_key, password_hash, created_at)
             VALUES (?, ?, ?, ?)
+            RETURNING id
             """,
             (cleaned, cleaned.casefold(), generate_password_hash(password), now),
         )
+        new_id = cursor.fetchone()["id"]
         get_db().commit()
-    except sqlite3.IntegrityError as exc:
+    except Exception as exc:
+        get_db().rollback()
+        if not is_unique_violation(exc):
+            raise
         raise AccountError("That name is already on the mountain. Try logging in.") from exc
-    return get_adventurer(cursor.lastrowid)
+    return get_adventurer(new_id)
 
 
 def authenticate(name: str, password: str) -> dict | None:
@@ -154,13 +158,13 @@ def leaderboard(challenge: dict) -> list[dict]:
         FROM adventurers a
         JOIN logs l ON l.adventurer_id = a.id AND l.challenge_slug = ?
         GROUP BY a.id
-        ORDER BY total_ft DESC, last_logged ASC, a.name COLLATE NOCASE ASC
+        ORDER BY total_ft DESC, last_logged ASC, lower(a.name) ASC
         """,
         (challenge["slug"],),
     ).fetchall()
     items = []
     for row in rows:
-        model = view_model(challenge, row["total_ft"])
+        model = view_model(challenge, row["total_ft"], row["id"])
         if model["summited"]:
             camp = "Summit"
         elif model["current"] is None:

@@ -19,8 +19,9 @@ from flask import (
     url_for,
 )
 
-from .challenges import FEATURED_SLUG, all_challenges, get_challenge
+from .challenges import FEATURED_SLUG, all_challenges, display_name, get_challenge
 from .progress import clean_entry, format_feet, join_names, opened_between, view_model
+from .db import get_db
 from .photos import credit_for
 from .services import (
     AccountError,
@@ -47,6 +48,12 @@ def root():
 @bp.get("/favicon.ico")
 def favicon():
     return redirect(url_for("static", filename="favicon.svg"))
+
+
+@bp.get("/health")
+def health():
+    get_db().execute("SELECT 1")
+    return jsonify(ok=True)
 
 
 @bp.get("/<slug>")
@@ -124,9 +131,12 @@ def log_entry(slug: str):
         after = add_log(viewer["id"], challenge["slug"], entry)
         opened = opened_between(challenge, before, after)
         if opened:
-            flash(f"Opened {join_names([item['name'] for item in opened])}.")
+            opened_names = [
+                display_name(item, viewer["id"], unlocked=True) for item in opened
+            ]
+            flash(f"Opened {join_names(opened_names)}.")
             return redirect(url_for("main.stop", slug=slug, stop_slug=opened[-1]["slug"]))
-        updated = view_model(challenge, after)
+        updated = view_model(challenge, after, viewer["id"])
         logged = format_feet(entry["elevation_ft"])
         if updated["next"] is not None:
             flash(f"Logged {logged}. {format_feet(updated['to_next_ft'])} to {updated['next']['name']}.")
@@ -293,7 +303,7 @@ def api_add_log(slug: str):
     after = add_log(viewer["id"], challenge["slug"], entry)
     opened = opened_between(challenge, before, after)
     return jsonify(
-        progress=view_model(challenge, after),
+        progress=view_model(challenge, after, viewer["id"]),
         opened=[item["slug"] for item in opened],
     ), 201
 
@@ -307,7 +317,7 @@ def api_delete_log(slug: str, log_id: int):
     if not delete_log(viewer["id"], challenge["slug"], log_id):
         return jsonify(error="Not found"), 404
     total = total_elevation(viewer["id"], challenge["slug"])
-    return jsonify(progress=view_model(challenge, total))
+    return jsonify(progress=view_model(challenge, total, viewer["id"]))
 
 
 def _challenge_or_404(slug: str) -> dict:
@@ -320,7 +330,7 @@ def _challenge_or_404(slug: str) -> dict:
 def _model(challenge: dict) -> dict:
     viewer = current_viewer()
     total = total_elevation(viewer["id"], challenge["slug"]) if viewer else 0
-    return view_model(challenge, total)
+    return view_model(challenge, total, viewer["id"] if viewer else None)
 
 
 def _require_viewer():

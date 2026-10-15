@@ -44,6 +44,10 @@ def _log(client, elevation, note="", when=None):
     )
 
 
+def test_health(client):
+    assert client.get("/health").status_code == 200
+
+
 def test_home_explains_the_climb(client):
     page = client.get("/")
     assert page.status_code == 302
@@ -54,11 +58,39 @@ def test_home_explains_the_climb(client):
     assert "The board is empty" in text
 
 
+def test_approach_checkpoints_open_before_lukla(client):
+    from adventurer.challenges import display_name, get_challenge
+
+    _join(client)
+    hill = _log(client, "1951.5")
+    hill_text = hill.get_data(as_text=True)
+    assert "Opened Timms Hill" in hill_text
+    assert "Price County" in hill_text
+    assert "photos/lukla.jpg" not in hill_text
+
+    four = _log(client, "2048.5")
+    four_text = four.get_data(as_text=True)
+    assert "Opened 4,000 feet" in four_text
+    assert "walk the steep pitches" in four_text
+
+    named = _log(client, "3000")
+    trail = next(stop for stop in get_challenge("everest")["stops"] if stop["slug"] == "seven-thousand")
+    expected = display_name(trail, 1, unlocked=True)
+    named_text = named.get_data(as_text=True)
+    assert f"Opened {expected}" in named_text
+    assert f"<h1>{expected}</h1>" in named_text
+    again = client.get("/everest/stops/seven-thousand").get_data(as_text=True)
+    assert f"<h1>{expected}</h1>" in again
+
+    board = client.get("/everest/board").get_data(as_text=True)
+    assert expected in board
+
+
 def test_join_log_and_unlock_lukla(client):
     _join(client)
     opened = _log(client, 9383)
     text = opened.get_data(as_text=True)
-    assert "Opened Lukla" in text
+    assert "and Lukla." in text
     assert "Butter tea" in text
     assert "Dal bhat" not in text
 
@@ -146,7 +178,12 @@ def test_api_hides_unlocks_until_they_are_earned(client):
         headers={"X-CSRF-Token": token},
     )
     assert created.status_code == 201
-    assert created.get_json()["opened"] == ["lukla"]
+    assert created.get_json()["opened"] == [
+        "timms-hill",
+        "four-thousand",
+        "seven-thousand",
+        "lukla",
+    ]
     finished = client.post(
         "/api/v1/challenges/everest/logs",
         json={"elevation_ft": 1286},

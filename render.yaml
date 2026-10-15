@@ -1,0 +1,20 @@
+# Settings for the existing Render web service. Applying this file as a new
+# Blueprint would create a second service, so use it as the checklist instead.
+services:
+  - type: web
+    name: adventurer
+    runtime: python
+    plan: free
+    branch: master
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 1 --timeout 60
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: "3.13.5"
+      - key: SECRET_KEY
+        generateValue: true
+      - key: DATABASE_URL
+        sync: false
+      - key: INVITE_CODE
+        sync: false

@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from datetime import date, datetime
 
+from .challenges import display_name
+
 MAX_ENTRY_FT = 10000
 MAX_DISTANCE_KM = 120
 MAX_NOTE = 280
@@ -13,7 +15,7 @@ class EntryError(ValueError):
     pass
 
 
-def view_model(challenge: dict, total_ft: float) -> dict:
+def view_model(challenge: dict, total_ft: float, adventurer_id: int | None = None) -> dict:
     total = max(0.0, float(total_ft))
     current = None
     nxt = None
@@ -22,7 +24,7 @@ def view_model(challenge: dict, total_ft: float) -> dict:
         unlocked = total >= stop["elevation_ft"]
         item = {
             "slug": stop["slug"],
-            "name": stop["name"],
+            "name": display_name(stop, adventurer_id, unlocked=unlocked),
             "elevation_ft": stop["elevation_ft"],
             "place": stop["place"],
             "summary": stop["summary"],

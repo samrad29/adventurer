@@ -28,9 +28,24 @@ flask run --debug --host=0.0.0.0
 
 The summit target is **29,032 ft**, the rounded 2020 survey height, and the climb starts at sea level. Log one outing at a time, up to 10,000 ft, so a typo cannot finish the mountain. Older dates are allowed when someone is catching up.
 
-The route is Lukla (9,383 ft), Namche Bazaar, Tengboche, Dingboche, Lobuche, Gorak Shep, Everest Base Camp, Kala Patthar, then Camps I–III, the South Col, and the summit. Kala Patthar is the viewpoint, not a camp on the climb. Camp heights are the common published elevations, converted to feet. The summit is 29,032 ft.
+Before Nepal, three checkpoints open on the same climb: Timms Hill in Wisconsin (1,951.5 ft, the state's highest natural point), a generic checkpoint at 4,000 ft, and a trail at 7,000 ft. That trail's name is drawn from a fixed list and stays with the account that opened it. Friends draw their own. Until it opens, the route just says "7,000 feet."
+
+Then the route is Lukla (9,383 ft), Namche Bazaar, Tengboche, Dingboche, Lobuche, Gorak Shep, Everest Base Camp, Kala Patthar, then Camps I–III, the South Col, and the summit. Kala Patthar is the viewpoint, not a camp on the climb. Camp heights are the common published elevations, converted to feet. The summit is 29,032 ft.
 
 Drop a replacement photo in `adventurer/static/photos/` named for the stop, for example `namche.jpg` (also `.jpeg`, `.webp`, or `.png`). The bundled pictures are freely licensed photographs from Wikimedia Commons, and the credit sits under the picture once that stop is open.
+
+## Render
+
+The site keeps accounts and climbs in Postgres when `DATABASE_URL` is set, and in a local SQLite file otherwise. On Render, `DATABASE_URL` should be the Supabase session-pooler string for the same project the run coach uses. The climb lives in its own `adventurer` schema, away from the coach tables.
+
+For the web service that is already on Render:
+
+- Build command: `pip install -r requirements.txt`
+- Start command: `gunicorn wsgi:app --bind 0.0.0.0:$PORT --workers 1 --timeout 60`
+- Health check path: `/health`
+- Environment: `SECRET_KEY`, `DATABASE_URL`, and `INVITE_CODE`
+
+Set an invite code before sharing the public URL. Without one, anyone who can open the site can join.
 
 ## Tests
 
@@ -40,7 +55,7 @@ python -m pytest
 
 ## Another route later
 
-Add a challenge dict in `adventurer/challenges.py` and append it to `CHALLENGES`. Logs are stored with a challenge slug, so a second mountain does not reuse Everest's feet. Stops need a slug, a name, an elevation in feet, a place (`village`, `camp`, `viewpoint`, or `summit`), a one-line summary, and unlocks.
+Add a challenge dict in `adventurer/challenges.py` and append it to `CHALLENGES`. Logs are stored with a challenge slug, so a second mountain does not reuse Everest's feet. Stops need a slug, a name, an elevation in feet, a place (`high-point`, `checkpoint`, `trail`, `village`, `camp`, `viewpoint`, or `summit`), a one-line summary, and unlocks. A stop can also set `names` to a list of trail names. Once that stop is open, each account keeps one of them.
 
 An unlock is one of:
 
