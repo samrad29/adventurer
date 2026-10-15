@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}{{ stop.name }} · Everest{% endblock %}
+{% block content %}
+<article class="stop-page">
+  <p class="eyebrow"><a href="{{ url_for('main.trail', slug=challenge.slug) }}">Route</a></p>
+  <header class="page-head">
+    <p class="stop-meta">{{ place_label }} · {{ stop.elevation_m | meters }}</p>
+    <h1>{{ stop.name }}</h1>
+    <p class="lede">{{ stop.summary }}</p>
+  </header>
+
+  {% if stop.unlocked %}
+    <figure class="postcard">
+      {% if photo %}
+        <img src="{{ url_for('static', filename=photo) }}" alt="{{ stop.name }}">
+      {% else %}
+        <svg viewBox="0 0 640 360" role="img" aria-label="Illustrated ridge for {{ stop.name }}">
+          <rect width="640" height="360" fill="#d5e2e3"/>
+          <path d="M0 230 L90 200 L150 214 L230 150 L300 190 L360 96 L430 176 L500 140 L580 188 L640 160 L640 360 L0 360 Z" fill="#f6f8f7"/>
+          <path d="M0 280 L140 250 L230 292 L340 230 L430 270 L530 246 L640 268 L640 360 L0 360 Z" fill="#24363a"/>
+          <path d="M360 96 L392 150 L338 142 Z" fill="#9c3b2e"/>
+        </svg>
+      {% endif %}
+      <figcaption>
+        <strong>{{ stop.name }}</strong>
+        <span>{{ stop.elevation_m | meters }}</span>
+      </figcaption>
+    </figure>
+
+    {% for unlock in stop.unlocks %}
+      {% if unlock.kind == "scene" %}
+        <section class="field-note">
+          <p class="kicker">The place</p>
+          <h2>{{ unlock.title }}</h2>
+          <p>{{ unlock.body }}</p>
+        </section>
+      {% elif unlock.kind == "tidbit" %}
+        <section class="field-note">
+          <p class="kicker">From the trail</p>
+          <h2>{{ unlock.title }}</h2>
+          <p>{{ unlock.body }}</p>
+        </section>
+      {% elif unlock.kind == "recipe" %}
+        <section class="recipe">
+          <p class="kicker">Kitchen</p>
+          <h2>{{ unlock.title }}</h2>
+          <p class="makes">{{ unlock.makes }}</p>
+          <h3>Ingredients</h3>
+          <ul>
+            {% for item in unlock.ingredients %}
+              <li>{{ item }}</li>
+            {% endfor %}
+          </ul>
+          <h3>Method</h3>
+          <ol>
+            {% for step in unlock.steps %}
+              <li>{{ step }}</li>
+            {% endfor %}
+          </ol>
+          {% if unlock.aside %}
+            <p class="aside">{{ unlock.aside }}</p>
+          {% endif %}
+        </section>
+      {% endif %}
+    {% endfor %}
+  {% else %}
+    <section class="locked-panel">
+      <h2>Still ahead</h2>
+      <p>This opens at {{ stop.elevation_m | meters }}.</p>
+      {% if viewer %}
+        <p>You have {{ model.total_m | meters }}.
+          {% if model.total_m < stop.elevation_m %}
+            {{ (stop.elevation_m - model.total_m) | meters }} to go.
+          {% endif %}
+        </p>
+        <a class="button" href="{{ url_for('main.log_entry', slug=challenge.slug) }}">Log a climb</a>
+      {% else %}
+        <p>Join the climb to start banking meters.</p>
+        <a class="button" href="{{ url_for('main.join') }}">Join</a>
+      {% endif %}
+    </section>
+  {% endif %}
+
+  <nav class="pager" aria-label="Nearby places">
+    {% if previous_stop %}
+      <a href="{{ url_for('main.stop', slug=challenge.slug, stop_slug=previous_stop.slug) }}">← {{ previous_stop.name }}</a>
+    {% else %}
+      <span></span>
+    {% endif %}
+    {% if following_stop %}
+      <a href="{{ url_for('main.stop', slug=challenge.slug, stop_slug=following_stop.slug) }}">{{ following_stop.name }} →</a>
+    {% endif %}
+  </nav>
+</article>
+{% endblock %}

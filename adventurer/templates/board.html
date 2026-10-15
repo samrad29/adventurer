@@ -1,0 +1,27 @@
+{% extends "base.html" %}
+{% block title %}Board · Everest{% endblock %}
+{% block content %}
+<header class="page-head">
+  <p class="eyebrow">Friends</p>
+  <h1>Board</h1>
+  <p class="lede">Ranked by meters climbed toward Everest. Notes from your journal are not on this list.</p>
+  {% if rank %}<p class="standing">You are {{ rank | ordinal }}.</p>{% endif %}
+</header>
+{% if board %}
+  <ol class="board board-full">
+    {% for row in board %}
+      <li class="{{ 'is-you' if viewer and row.id == viewer.id else '' }}">
+        <span class="place">{{ loop.index }}</span>
+        <span class="who-line">
+          <strong>{{ row.name }}</strong>
+          <em>{{ row.camp }}{% if row.last_on %} · {{ row.last_on | day }}{% endif %}</em>
+        </span>
+        <span class="total">{{ row.total_m | meters }}</span>
+        <span class="mini-meter" aria-hidden="true"><span style="width: {{ row.percent }}%"></span></span>
+      </li>
+    {% endfor %}
+  </ol>
+{% else %}
+  <p class="empty">The board is empty. The first logged climb puts a name on it.</p>
+{% endif %}
+{% endblock %}

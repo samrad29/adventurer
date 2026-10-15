@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex">
+  <meta name="csrf-token" content="{{ csrf_token() }}">
+  <title>{% block title %}The Adventurer{% endblock %}</title>
+  <link rel="icon" href="{{ url_for('static', filename='favicon.svg') }}">
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/site.css') }}">
+</head>
+<body>
+  <a class="skip" href="#content">Skip to content</a>
+  <header class="site-header">
+    <div class="wrap header-row">
+      <a class="wordmark" href="{{ url_for('main.home', slug=challenge.slug) }}">
+        <span class="mark" aria-hidden="true"></span>
+        The Adventurer
+      </a>
+      <nav class="nav" aria-label="Challenge">
+        <a href="{{ url_for('main.home', slug=challenge.slug) }}" {% if nav('home') %}aria-current="page"{% endif %}>{{ challenge.name }}</a>
+        <a href="{{ url_for('main.trail', slug=challenge.slug) }}" {% if nav('trail') %}aria-current="page"{% endif %}>Route</a>
+        <a href="{{ url_for('main.board', slug=challenge.slug) }}" {% if nav('board') %}aria-current="page"{% endif %}>Board</a>
+        {% if viewer %}
+          <a href="{{ url_for('main.log_entry', slug=challenge.slug) }}" {% if nav('log') %}aria-current="page"{% endif %}>Log</a>
+          <a href="{{ url_for('main.journal', slug=challenge.slug) }}" {% if nav('journal') %}aria-current="page"{% endif %}>Journal</a>
+        {% endif %}
+      </nav>
+      <div class="who">
+        {% if viewer %}
+          <span class="who-name">{{ viewer.name }}</span>
+          <form method="post" action="{{ url_for('main.logout') }}">
+            <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+            <button class="text-button" type="submit">Log out</button>
+          </form>
+        {% else %}
+          <a href="{{ url_for('main.login') }}">Log in</a>
+          <a class="join-link" href="{{ url_for('main.join') }}">Join</a>
+        {% endif %}
+      </div>
+    </div>
+  </header>
+  <main id="content" class="wrap">
+    {% with messages = get_flashed_messages() %}
+      {% if messages %}
+        <ul class="flashes">
+          {% for message in messages %}
+            <li>{{ message }}</li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    {% endwith %}
+    {% block content %}{% endblock %}
+  </main>
+  <footer class="wrap site-footer">
+    <p>{{ challenge.route }} · Heights are rounded published figures.</p>
+  </footer>
+</body>
+</html>

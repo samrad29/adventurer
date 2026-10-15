@@ -1,0 +1,8 @@
+{% extends "base.html" %}
+{% block title %}Not found · The Adventurer{% endblock %}
+{% block content %}
+<header class="page-head">
+  <h1>That page isn't on the route.</h1>
+  <p class="lede"><a href="{{ url_for('main.home', slug=challenge.slug) }}">Back to Everest</a></p>
+</header>
+{% endblock %}

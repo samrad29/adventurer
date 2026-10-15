@@ -1,0 +1,37 @@
+{% extends "base.html" %}
+{% block title %}Log a climb · Everest{% endblock %}
+{% block content %}
+<header class="page-head">
+  <p class="eyebrow">One outing</p>
+  <h1>Log a climb</h1>
+  <p class="lede">
+    {% if model.next %}
+      {{ model.to_next_m | meters }} to {{ model.next.name }}.
+    {% elif model.summited %}
+      You are on the summit. More meters still move you up the board.
+    {% endif %}
+    Up to 3,000 m in one entry. Older dates are fine if you are catching up.
+  </p>
+</header>
+<form class="sheet" method="post" action="">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+  <label>
+    Elevation gained (meters)
+    <input name="elevation_m" type="number" inputmode="decimal" min="1" max="3000" step="any" required value="{{ form.elevation_m }}">
+  </label>
+  <label>
+    Distance (kilometers, optional)
+    <input name="distance_km" type="number" inputmode="decimal" min="0" step="any" value="{{ form.distance_km }}">
+  </label>
+  <label>
+    Date
+    <input name="happened_on" type="date" required value="{{ form.happened_on }}">
+  </label>
+  <label>
+    Note, just for you
+    <input name="note" type="text" maxlength="280" value="{{ form.note }}" placeholder="Hill repeats, a long walk, stairs at work">
+  </label>
+  <button class="button" type="submit">Add it</button>
+</form>
+{% endblock %}

@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% block title %}Journal · Everest{% endblock %}
+{% block content %}
+<header class="page-head">
+  <p class="eyebrow">{{ viewer.name }}</p>
+  <h1>Journal</h1>
+  <p class="lede">{{ model.total_m | meters }} logged toward Everest. These notes stay off the board.</p>
+</header>
+{% if logs %}
+  <ul class="journal">
+    {% for entry in logs %}
+      <li>
+        <div>
+          <p class="stop-meta">{{ entry.happened_on | day }}</p>
+          <p class="journal-total">{{ entry.elevation_m | meters }}{% if entry.distance_km %} · {{ entry.distance_km | km }}{% endif %}</p>
+          {% if entry.note %}<p>{{ entry.note }}</p>{% endif %}
+        </div>
+        <form method="post" action="{{ url_for('main.remove_log', slug=challenge.slug, log_id=entry.id) }}" onsubmit="return confirm('Remove this entry?');">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+          <button class="text-button" type="submit">Remove</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty">Nothing logged yet. <a href="{{ url_for('main.log_entry', slug=challenge.slug) }}">Add the first outing.</a></p>
+{% endif %}
+{% endblock %}

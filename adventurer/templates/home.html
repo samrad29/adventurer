@@ -1,0 +1,95 @@
+{% extends "base.html" %}
+{% block title %}Everest · The Adventurer{% endblock %}
+{% block content %}
+<section class="hero">
+  <p class="eyebrow">{{ challenge.region }}</p>
+  <h1>Everest</h1>
+  <p class="local-names">{{ challenge.local_names | join(" · ") }}</p>
+  {% if viewer %}
+    <p class="altitude">{{ model.total_m | meters }}</p>
+    <p class="altitude-caption">
+      {% if model.summited %}
+        Summit. Extra meters still count on the board.
+      {% elif model.current %}
+        Through {{ model.current.name }}.
+        {% if model.next %}{{ model.to_next_m | meters }} to {{ model.next.name }}.{% endif %}
+      {% elif model.next %}
+        Still on the approach. {{ model.to_next_m | meters }} to {{ model.next.name }}.
+      {% endif %}
+    </p>
+    <div class="meter" role="img" aria-label="{{ model.percent | round | int }} percent of the way to the summit">
+      <span style="width: {{ model.percent }}%"></span>
+    </div>
+    <p class="meter-label">{{ model.percent | round | int }}% of {{ model.summit_m | meters }}</p>
+    {% if rank %}
+      <p class="standing">You are {{ rank | ordinal }} on the board.</p>
+    {% endif %}
+    <p class="hero-actions">
+      <a class="button" href="{{ url_for('main.log_entry', slug=challenge.slug) }}">Log a climb</a>
+      <a class="button quiet" href="{{ url_for('main.trail', slug=challenge.slug) }}">See the route</a>
+    </p>
+  {% else %}
+    <p class="lede">{{ challenge.summary }} Friends share a board. The notes you attach to a day stay in your journal.</p>
+    <p class="hero-actions">
+      <a class="button" href="{{ url_for('main.join') }}">Join the climb</a>
+      <a class="button quiet" href="{{ url_for('main.login') }}">I already have a name</a>
+    </p>
+  {% endif %}
+</section>
+
+{% if model.total_m == 0 %}
+<section class="steps" aria-label="How it works">
+  <h2>How the climb works</h2>
+  <ol>
+    <li><strong>Make a name.</strong> Your friends will see it on the board. The password only stops someone else from logging climbs as you.</li>
+    <li><strong>Log real climbing.</strong> Runs, hikes, stairs, walks. A hilly 10K might be 150 m. A big day in the hills might be 1,000 m.</li>
+    <li><strong>Camps open on the way up.</strong> Each one holds a picture slot, a recipe, or a note about that place. The summit is {{ model.summit_m | meters }}.</li>
+  </ol>
+</section>
+{% endif %}
+
+<div class="split">
+  <section>
+    <div class="section-head">
+      <h2>The route</h2>
+      <a href="{{ url_for('main.trail', slug=challenge.slug) }}">Full route</a>
+    </div>
+    <ol class="route-list">
+      {% for stop in model.stops %}
+        <li class="{{ 'is-open' if stop.unlocked else '' }} {{ 'is-here' if model.current and stop.slug == model.current.slug else '' }}">
+          <a href="{{ url_for('main.stop', slug=challenge.slug, stop_slug=stop.slug) }}">
+            <span>{{ stop.name }}</span>
+            <span>{{ stop.elevation_m | meters }}</span>
+          </a>
+        </li>
+      {% endfor %}
+    </ol>
+  </section>
+  <section>
+    <div class="section-head">
+      <h2>Board</h2>
+      <a href="{{ url_for('main.board', slug=challenge.slug) }}">Everyone</a>
+    </div>
+    {% if board %}
+      <ol class="board">
+        {% for row in board[:5] %}
+          <li class="{{ 'is-you' if viewer and row.id == viewer.id else '' }}">
+            <span class="place">{{ loop.index }}</span>
+            <span class="who-line">
+              <strong>{{ row.name }}</strong>
+              <em>{{ row.camp }}</em>
+            </span>
+            <span class="total">{{ row.total_m | meters }}</span>
+            <span class="mini-meter" aria-hidden="true"><span style="width: {{ row.percent }}%"></span></span>
+          </li>
+        {% endfor %}
+      </ol>
+      {% if rank and rank > 5 %}
+        <p class="standing">You are {{ rank | ordinal }} of {{ board_count }}.</p>
+      {% endif %}
+    {% else %}
+      <p class="empty">The board is empty. The first logged climb puts a name on it.</p>
+    {% endif %}
+  </section>
+</div>
+{% endblock %}
