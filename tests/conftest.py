@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import psycopg
@@ -25,7 +26,7 @@ def _upgrade() -> None:
     env.pop("DATABASE_URL", None)
     env["TEST_DATABASE_URL"] = TEST_URL
     result = subprocess.run(
-        [str(ROOT / ".venv" / "Scripts" / "python.exe"), "-m", "alembic", "upgrade", "head"],
+        [sys.executable, "-m", "alembic", "upgrade", "head"],
         cwd=ROOT,
         env=env,
         text=True,
