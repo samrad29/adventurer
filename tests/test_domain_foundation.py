@@ -243,6 +243,15 @@ def test_journey_uniqueness_and_status(db):
         """,
         (user_id, other),
     )
+    _expect_error(
+        db,
+        """
+        UPDATE adventurer.route_journeys
+        SET status = 'completed'
+        WHERE id = %s
+        """,
+        (paused,),
+    )
     db.execute(
         """
         UPDATE adventurer.route_journeys
