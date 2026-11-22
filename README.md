@@ -17,6 +17,8 @@ pip install -r requirements.txt
 
 Copy `.env.example` to `.env` and set `DATABASE_URL` to the Supabase session-pooler string, plus `SECRET_KEY` and `INVITE_CODE` if you want them fixed. With no invite code, anyone who can open the site can join.
 
+The application expects the Phase 1 schema and does not create tables on startup. Schema changes go through Alembic, which only runs against the isolated local test database.
+
 ## How progress works
 
 The summit target is **29,032 ft**, the rounded 2020 survey height, and the climb starts at sea level. Log one outing at a time, up to 10,000 ft, so a typo cannot finish the mountain. Older dates are allowed when someone is catching up.
@@ -29,7 +31,7 @@ Drop a replacement photo in `adventurer/static/photos/` named for the stop, for 
 
 ## Render
 
-`DATABASE_URL` is the Supabase session-pooler string for the same project the run coach uses. The climb lives in its own `adventurer` schema, away from the coach tables.
+`DATABASE_URL` is the Supabase session-pooler string for the same project the run coach uses. The climb lives in its own `adventurer` schema, away from the coach tables. This branch expects that database to already have the Phase 1 tables. Do not deploy it to the live service until `DATABASE_URL` points at that schema.
 
 For the web service that is already on Render:
 
@@ -46,11 +48,11 @@ Set an invite code before sharing the public URL. Without one, anyone who can op
 python -m pytest
 ```
 
-The app tests need `DATABASE_URL`. They create the names Sam and Alex, then delete those accounts.
+The app tests use the isolated Postgres database on `127.0.0.1:54329` (`adventurer_migration_test`). They do not read `DATABASE_URL`. Each test clears the Phase 1 user rows and leaves the Everest expedition in place.
 
 ## Another route later
 
-Add a challenge dict in `adventurer/challenges.py` and append it to `CHALLENGES`. Logs are stored with a challenge slug, so a second mountain does not reuse Everest's feet. Stops need a slug, a name, an elevation in feet, a place (`high-point`, `checkpoint`, `trail`, `village`, `camp`, `viewpoint`, or `summit`), a one-line summary, and unlocks. A stop can also set `names` to a list of trail names. Once that stop is open, each account keeps one of them.
+Add a challenge dict in `adventurer/challenges.py` and append it to `CHALLENGES`, and add a matching expedition with the same slug and checkpoint elevations. Feet for one expedition stay on that expedition's credits. Stops need a slug, a name, an elevation in feet, a place (`high-point`, `checkpoint`, `trail`, `village`, `camp`, `viewpoint`, or `summit`), a one-line summary, and unlocks. A stop can also set `names` to a list of trail names. Once that stop is open, each account keeps one of them.
 
 An unlock is one of:
 

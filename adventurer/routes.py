@@ -19,7 +19,7 @@ from flask import (
     url_for,
 )
 
-from .challenges import FEATURED_SLUG, all_challenges, display_name, get_challenge
+from .challenges import FEATURED_SLUG, display_name
 from .progress import clean_entry, format_feet, join_names, opened_between, view_model
 from .db import get_db
 from .photos import credit_for
@@ -32,6 +32,8 @@ from .services import (
     delete_log,
     leaderboard,
     list_logs,
+    list_routes,
+    load_route,
     place_label,
     total_elevation,
 )
@@ -256,17 +258,7 @@ def api_session():
 
 @bp.get("/api/v1/challenges")
 def api_challenges():
-    return jsonify(
-        [
-            {
-                "slug": challenge["slug"],
-                "name": challenge["name"],
-                "region": challenge["region"],
-                "summit_ft": challenge["summit_ft"],
-            }
-            for challenge in all_challenges()
-        ]
-    )
+    return jsonify(list_routes())
 
 
 @bp.get("/api/v1/challenges/<slug>")
@@ -322,7 +314,7 @@ def api_delete_log(slug: str, log_id: int):
 
 def _challenge_or_404(slug: str) -> dict:
     try:
-        return get_challenge(slug)
+        return load_route(slug)
     except KeyError:
         abort(404)
 

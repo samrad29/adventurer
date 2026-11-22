@@ -13,9 +13,9 @@ from flask import Flask, jsonify, render_template, request, session
 from werkzeug.middleware.proxy_fix import ProxyFix
 
 from . import db
-from .challenges import FEATURED_SLUG, get_challenge
+from .challenges import FEATURED_SLUG
 from .progress import format_day, format_km, format_feet, ordinal
-from .services import current_viewer, place_label
+from .services import current_viewer, load_route, place_label
 
 load_dotenv()
 
@@ -71,9 +71,9 @@ def create_app(test_config: dict | None = None) -> Flask:
         if request.view_args and request.view_args.get("slug"):
             slug = request.view_args["slug"]
         try:
-            challenge = get_challenge(slug)
+            challenge = load_route(slug)
         except KeyError:
-            challenge = get_challenge(FEATURED_SLUG)
+            challenge = load_route(FEATURED_SLUG)
         return {
             "challenge": challenge,
             "viewer": current_viewer(),

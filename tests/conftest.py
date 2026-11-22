@@ -1,42 +1,84 @@
-import os
+"""App fixtures against the isolated Phase 1 database.
 
+This module never reads DATABASE_URL. Alembic refuses any host other than
+localhost and any database other than adventurer_migration_test.
+"""
+
+from __future__ import annotations
+
+import os
+import subprocess
+from pathlib import Path
+
+import psycopg
 import pytest
 
 from adventurer import create_app
-from adventurer.db import get_db
 
-_TEST_NAMES = ("sam", "alex")
+ROOT = Path(__file__).resolve().parents[1]
+ADMIN_URL = "postgresql://postgres:postgres@127.0.0.1:54329/postgres"
+TEST_URL = "postgresql://postgres:postgres@127.0.0.1:54329/adventurer_migration_test"
+
+
+def _upgrade() -> None:
+    env = os.environ.copy()
+    env.pop("DATABASE_URL", None)
+    env["TEST_DATABASE_URL"] = TEST_URL
+    result = subprocess.run(
+        [str(ROOT / ".venv" / "Scripts" / "python.exe"), "-m", "alembic", "upgrade", "head"],
+        cwd=ROOT,
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    if result.returncode != 0:
+        pytest.fail(f"alembic upgrade head failed\n{result.stdout}\n{result.stderr}")
+
+
+def _prepare_database() -> None:
+    try:
+        admin = psycopg.connect(ADMIN_URL, autocommit=True, connect_timeout=3)
+    except psycopg.OperationalError as exc:
+        pytest.fail(f"isolated Postgres is not listening on 127.0.0.1:54329: {exc}")
+    exists = admin.execute(
+        "SELECT 1 FROM pg_database WHERE datname = 'adventurer_migration_test'"
+    ).fetchone()
+    if exists is None:
+        admin.execute("CREATE DATABASE adventurer_migration_test")
+    admin.close()
+
+    ready = False
+    try:
+        with psycopg.connect(TEST_URL, connect_timeout=3) as conn:
+            ready = (
+                conn.execute("SELECT to_regclass('adventurer.users') AS name").fetchone()[0]
+                is not None
+            )
+    except psycopg.Error:
+        ready = False
+    if not ready:
+        _upgrade()
 
 
 def _wipe(application) -> None:
     with application.app_context():
+        from adventurer.db import get_db
+
         database = get_db()
-        database.execute(
-            """
-            DELETE FROM logs
-            WHERE adventurer_id IN (
-                SELECT id FROM adventurers WHERE name_key IN (%s, %s)
-            )
-            """,
-            _TEST_NAMES,
-        )
-        database.execute(
-            "DELETE FROM adventurers WHERE name_key IN (%s, %s)",
-            _TEST_NAMES,
-        )
+        database.execute("DELETE FROM users")
+        database.execute("DELETE FROM expeditions WHERE slug <> 'everest'")
         database.commit()
 
 
 @pytest.fixture()
 def app():
-    url = os.environ.get("DATABASE_URL", "").strip()
-    if not url:
-        pytest.skip("DATABASE_URL is required")
+    _prepare_database()
     application = create_app(
         {
             "TESTING": True,
             "SECRET_KEY": "test-secret",
-            "DATABASE_URL": url,
+            "DATABASE_URL": TEST_URL,
             "INVITE_CODE": "",
         }
     )

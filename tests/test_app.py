@@ -79,7 +79,7 @@ def test_approach_checkpoints_open_before_lukla(client):
         from adventurer.db import get_db
 
         account_id = get_db().execute(
-            "SELECT id FROM adventurers WHERE name_key = ?",
+            "SELECT id FROM users WHERE username_key = ?",
             ("sam",),
         ).fetchone()["id"]
     expected = display_name(trail, account_id, unlocked=True)
