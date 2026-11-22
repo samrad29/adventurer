@@ -48,13 +48,15 @@ Set an invite code before sharing the public URL. Without one, anyone who can op
 python -m pytest
 ```
 
-The app tests use the isolated Postgres database on `127.0.0.1:54329` (`adventurer_migration_test`). They do not read `DATABASE_URL`. Each test clears the Phase 1 user rows and leaves the Everest expedition in place.
+The app tests use the isolated Postgres database on `127.0.0.1:54329` (`adventurer_migration_test`). They do not read `DATABASE_URL`. Each test clears user rows and extra expeditions, and leaves the Everest route and the Global Everest Challenge in place.
 
-## Another route later
+## Routes and expeditions
 
-Add a challenge dict in `adventurer/challenges.py` and append it to `CHALLENGES`, and add a matching expedition with the same slug and checkpoint elevations. Feet for one expedition stay on that expedition's credits. Stops need a slug, a name, an elevation in feet, a place (`high-point`, `checkpoint`, `trail`, `village`, `camp`, `viewpoint`, or `summit`), a one-line summary, and unlocks. A stop can also set `names` to a list of trail names. Once that stop is open, each account keeps one of them.
+A route is the curated adventure. An expedition is one group on that route. Route metadata and checkpoints live in the database. The long checkpoint writing stays in `adventurer/challenges.py`, keyed by route slug. See `docs/phase3-schema.md`.
 
-An unlock is one of:
+The Global Everest Challenge is still `/everest`. Account creation does not join it. The `/join` page does, unless the person is signing up from a private invitation. Users can start private expeditions on a published route, invite by username or a 30-day share link, and keep one activity library. A credit always counts the full elevation of an outing toward one expedition.
+
+Checkpoint narrative in `adventurer/challenges.py` still uses the same unlock kinds. An unlock is one of:
 
 - `scene` — what that spot looks like
 - `tidbit` — a historical or cultural note
@@ -67,6 +69,15 @@ A `story` kind can be added the same way when you want one. The last stop's elev
 The pages use a session cookie. These endpoints speak JSON and expect that same cookie, plus the CSRF token from `GET /api/v1/session` on any change.
 
 - `GET /api/v1/session`
+- `GET /api/v1/routes` and `GET /api/v1/routes/<slug>`
+- `GET /api/v1/expeditions` and `GET /api/v1/expeditions/<slug>`
+- `POST /api/v1/expeditions`, `PATCH /api/v1/expeditions/<slug>`, `POST /api/v1/expeditions/<slug>/archive`
+- `POST` and `DELETE /api/v1/expeditions/<slug>/participation`
+- `GET /api/v1/expeditions/<slug>/leaderboard`
+- `POST` and `GET /api/v1/expeditions/<slug>/invitations`, `DELETE /api/v1/expeditions/<slug>/invitations/<id>`
+- `POST /api/v1/invitations/<token>/accept` and `POST /api/v1/invitations/<token>/decline`
+- `GET` and `POST /api/v1/activities`, `PATCH` and `DELETE /api/v1/activities/<id>`
+- `POST /api/v1/activities/<id>/credits` and `DELETE /api/v1/activities/<id>/credits/<expedition_slug>`
 - `GET /api/v1/challenges`
 - `GET /api/v1/challenges/everest`
 - `GET /api/v1/challenges/everest/leaderboard`

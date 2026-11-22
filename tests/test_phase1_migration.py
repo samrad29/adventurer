@@ -139,11 +139,11 @@ def test_phase1_migration_rollback_and_validation():
         stops = conn.execute(
             """
             SELECT checkpoint.slug, checkpoint.position, checkpoint.elevation_m,
-                   expedition.target_elevation_m
-            FROM adventurer.expedition_checkpoints AS checkpoint
-            JOIN adventurer.expeditions AS expedition
-                ON expedition.id = checkpoint.expedition_id
-            WHERE expedition.slug = 'everest'
+                   route.target_elevation_m
+            FROM adventurer.route_checkpoints AS checkpoint
+            JOIN adventurer.routes AS route
+                ON route.id = checkpoint.route_id
+            WHERE route.slug = 'everest'
             ORDER BY checkpoint.position
             """
         ).fetchall()
@@ -276,6 +276,9 @@ def test_phase1_migration_rollback_and_validation():
         everest_id = conn.execute(
             "SELECT id FROM adventurer.expeditions WHERE slug = 'everest'"
         ).fetchone()["id"]
+        route_id = conn.execute(
+            "SELECT id FROM adventurer.routes WHERE slug = 'everest'"
+        ).fetchone()["id"]
         alex_participation = conn.execute(
             """
             SELECT id FROM adventurer.expedition_participations
@@ -287,22 +290,22 @@ def test_phase1_migration_rollback_and_validation():
         _expect_error(
             conn,
             """
-            INSERT INTO adventurer.expedition_checkpoints (
-                expedition_id, slug, name, position, elevation_m
+            INSERT INTO adventurer.route_checkpoints (
+                route_id, slug, name, position, elevation_m
             )
             VALUES (%s, 'negative', 'Negative', -1, 10)
             """,
-            (everest_id,),
+            (route_id,),
         )
         _expect_error(
             conn,
             """
-            INSERT INTO adventurer.expedition_checkpoints (
-                expedition_id, slug, name, position, elevation_m
+            INSERT INTO adventurer.route_checkpoints (
+                route_id, slug, name, position, elevation_m
             )
             VALUES (%s, 'another-start', 'Another', 0, 10)
             """,
-            (everest_id,),
+            (route_id,),
         )
         _expect_error(
             conn,
@@ -378,8 +381,10 @@ def test_phase1_migration_rollback_and_validation():
         conn.execute("SAVEPOINT keep")
         conn.execute(
             """
-            INSERT INTO adventurer.expeditions (slug, name, target_elevation_m, status)
-            VALUES ('kilimanjaro', 'Kilimanjaro', 5895, 'draft')
+            INSERT INTO adventurer.expeditions (slug, name, route_id, visibility, status)
+            SELECT 'kilimanjaro', 'Kilimanjaro', id, 'public', 'active'
+            FROM adventurer.routes
+            WHERE slug = 'everest'
             """
         )
         conn.execute(

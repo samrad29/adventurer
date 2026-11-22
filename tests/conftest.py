@@ -54,6 +54,8 @@ def _prepare_database() -> None:
             ready = (
                 conn.execute("SELECT to_regclass('adventurer.users') AS name").fetchone()[0]
                 is not None
+                and conn.execute("SELECT to_regclass('adventurer.routes') AS name").fetchone()[0]
+                is not None
             )
     except psycopg.Error:
         ready = False
@@ -66,8 +68,33 @@ def _wipe(application) -> None:
         from adventurer.db import get_db
 
         database = get_db()
+        database.execute("DELETE FROM expedition_invitations")
+        database.execute(
+            "UPDATE expeditions SET owner_user_id = NULL WHERE owner_user_id IS NOT NULL"
+        )
         database.execute("DELETE FROM users")
         database.execute("DELETE FROM expeditions WHERE slug <> 'everest'")
+        database.execute("DELETE FROM routes WHERE slug <> 'everest'")
+        database.execute(
+            """
+            UPDATE expeditions
+            SET name = 'Global Everest Challenge',
+                description = 'The public Everest challenge. Everyone who joins shares one board.',
+                visibility = 'public',
+                status = 'active',
+                owner_user_id = NULL,
+                starts_at = NULL,
+                ends_at = NULL
+            WHERE slug = 'everest'
+            """
+        )
+        database.execute(
+            """
+            UPDATE routes
+            SET status = 'published'
+            WHERE slug = 'everest'
+            """
+        )
         database.commit()
 
 

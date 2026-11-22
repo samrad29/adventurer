@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Board · Everest{% endblock %}
+{% block title %}Board · {{ challenge.name }}{% endblock %}
 {% block content %}
 <header class="page-head">
-  <p class="eyebrow">Friends</p>
+  <p class="eyebrow">{{ challenge.route_name }}</p>
   <h1>Board</h1>
-  <p class="lede">Ranked by feet climbed toward Everest, from sea level. Notes from your journal are not on this list.</p>
+  <p class="lede">Ranked by feet climbed toward {{ challenge.route_name }} on {{ challenge.name }}, from sea level. People who have joined and not yet logged still appear. Notes from your journal are not on this list.</p>
   {% if rank %}<p class="standing">You are {{ rank | ordinal }}.</p>{% endif %}
 </header>
 {% if board %}

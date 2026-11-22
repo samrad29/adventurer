@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}{{ route.name }} · The Adventurer{% endblock %}
+{% block content %}
+<header class="page-head">
+  <p class="eyebrow">{{ route.region }}</p>
+  <h1>{{ route.name }}</h1>
+  <p class="lede">{{ route.summary }}</p>
+  <p class="lede">Target elevation {{ route.summit_ft | feet }}, from sea level.</p>
+  {% if viewer %}
+    <p class="hero-actions"><a class="button" href="{{ url_for('main.expedition_new') }}">Start a private expedition</a></p>
+  {% endif %}
+</header>
+<section>
+  <div class="section-head">
+    <h2>Checkpoints</h2>
+  </div>
+  <ol class="route-list">
+    {% for stop in route.stops %}
+      <li>
+        <span>{{ stop.name }}</span>
+        <span>{{ stop.elevation_ft | feet }}</span>
+      </li>
+    {% endfor %}
+  </ol>
+</section>
+<section>
+  <div class="section-head">
+    <h2>Public expeditions</h2>
+  </div>
+  {% if route.expeditions %}
+    <ul class="route-list">
+      {% for expedition in route.expeditions %}
+        <li>
+          <a href="{{ url_for('main.home', slug=expedition.slug) }}">
+            <span>{{ expedition.name }}</span>
+          </a>
+          {% if expedition.description %}<p>{{ expedition.description }}</p>{% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+  {% else %}
+    <p class="empty">No public expeditions are using this route yet.</p>
+  {% endif %}
+</section>
+{% endblock %}

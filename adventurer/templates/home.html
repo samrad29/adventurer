@@ -1,10 +1,14 @@
 {% extends "base.html" %}
-{% block title %}Everest · The Adventurer{% endblock %}
+{% block title %}{{ challenge.name }} · The Adventurer{% endblock %}
 {% block content %}
 <section class="hero">
-  <p class="eyebrow">{{ challenge.region }}</p>
-  <h1>Everest</h1>
+  <p class="eyebrow">{{ challenge.name }} · {{ challenge.region }}</p>
+  <h1>{{ challenge.route_name }}</h1>
   <p class="local-names">{{ challenge.local_names | join(" · ") }}</p>
+  {% if challenge.description %}<p class="lede">{{ challenge.description }}</p>{% endif %}
+  {% if challenge.status == 'archived' %}
+    <p class="lede">This expedition is archived. The record stays. New climbs are closed.</p>
+  {% endif %}
   {% if viewer %}
     <p class="altitude">{{ model.total_ft | feet }}</p>
     <p class="altitude-caption">
@@ -25,19 +29,43 @@
       <p class="standing">You are {{ rank | ordinal }} on the board.</p>
     {% endif %}
     <p class="hero-actions">
-      <a class="button" href="{{ url_for('main.log_entry', slug=challenge.slug) }}">Log a climb</a>
+      {% if challenge.can_log %}
+        <a class="button" href="{{ url_for('main.log_entry', slug=challenge.slug) }}">Log a climb</a>
+      {% endif %}
       <a class="button quiet" href="{{ url_for('main.trail', slug=challenge.slug) }}">See the route</a>
+      {% if challenge.can_manage %}
+        <a class="button quiet" href="{{ url_for('main.expedition_manage', slug=challenge.slug) }}">Manage</a>
+      {% endif %}
     </p>
+    {% if challenge.participation_status == 'active' %}
+      {% if not challenge.can_log and challenge.status == 'active' %}
+        <p>New climbs are closed on this expedition right now.</p>
+      {% endif %}
+      <form method="post" action="{{ url_for('main.leave_expedition', slug=challenge.slug) }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <button class="text-button" type="submit">Leave this expedition</button>
+      </form>
+    {% elif challenge.can_join %}
+      <form method="post" action="{{ url_for('main.join_expedition', slug=challenge.slug) }}">
+        <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+        <button class="button" type="submit">Join this expedition</button>
+      </form>
+    {% endif %}
   {% else %}
     <p class="lede">{{ challenge.summary }} Friends share a board. The notes you attach to a day stay in your journal.</p>
     <p class="hero-actions">
-      <a class="button" href="{{ url_for('main.join') }}">Join the climb</a>
-      <a class="button quiet" href="{{ url_for('main.login') }}">I already have a name</a>
+      {% if challenge.slug == 'everest' %}
+        <a class="button" href="{{ url_for('main.join') }}">Join the climb</a>
+        <a class="button quiet" href="{{ url_for('main.login') }}">I already have a name</a>
+      {% elif challenge.status == 'active' %}
+        <a class="button" href="{{ url_for('main.login', next=request.path) }}">Log in to join</a>
+        <a class="button quiet" href="{{ url_for('main.join') }}">Create an account</a>
+      {% endif %}
     </p>
   {% endif %}
 </section>
 
-{% if model.total_ft == 0 %}
+{% if model.total_ft == 0 and challenge.route_slug == 'everest' %}
 <section class="steps" aria-label="How it works">
   <h2>How the climb works</h2>
   <ol>

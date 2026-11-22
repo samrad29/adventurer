@@ -1,10 +1,10 @@
 {% extends "base.html" %}
-{% block title %}Journal · Everest{% endblock %}
+{% block title %}Journal · {{ challenge.name }}{% endblock %}
 {% block content %}
 <header class="page-head">
-  <p class="eyebrow">{{ viewer.name }}</p>
+  <p class="eyebrow">{{ viewer.name }} · {{ challenge.route_name }}</p>
   <h1>Journal</h1>
-  <p class="lede">{{ model.total_ft | feet }} logged toward Everest. These notes stay off the board.</p>
+  <p class="lede">{{ model.total_ft | feet }} logged toward {{ challenge.route_name }} on {{ challenge.name }}. These notes stay off the board. Removing one here drops that expedition's credit only. The outing stays in <a href="{{ url_for('main.activities') }}">your activities</a>.</p>
 </header>
 {% if logs %}
   <ul class="journal">
@@ -15,9 +15,9 @@
           <p class="journal-total">{{ entry.elevation_ft | feet }}{% if entry.distance_km %} · {{ entry.distance_km | km }}{% endif %}</p>
           {% if entry.note %}<p>{{ entry.note }}</p>{% endif %}
         </div>
-        <form method="post" action="{{ url_for('main.remove_log', slug=challenge.slug, log_id=entry.id) }}" onsubmit="return confirm('Remove this entry?');">
+        <form method="post" action="{{ url_for('main.remove_log', slug=challenge.slug, log_id=entry.id) }}" onsubmit="return confirm('Remove this outing from {{ challenge.name }}? It stays in your activity library.');">
           <input type="hidden" name="csrf" value="{{ csrf_token() }}">
-          <button class="text-button" type="submit">Remove</button>
+          <button class="text-button" type="submit">Remove from this expedition</button>
         </form>
       </li>
     {% endfor %}

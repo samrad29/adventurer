@@ -112,6 +112,8 @@ def _nav(name: str) -> bool:
         "board": {"main.board"},
         "log": {"main.log_entry"},
         "journal": {"main.journal"},
+        "routes": {"main.route_catalog", "main.route_detail"},
+        "activities": {"main.activities"},
     }
     return (request.endpoint or "") in groups.get(name, set())
 

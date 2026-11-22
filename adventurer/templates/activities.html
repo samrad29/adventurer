@@ -1,0 +1,144 @@
+{% extends "base.html" %}
+{% block title %}Activities · The Adventurer{% endblock %}
+{% block content %}
+<header class="page-head">
+  <p class="eyebrow">{{ viewer.name }}</p>
+  <h1>Activities</h1>
+  <p class="lede">An outing is what you did. A credit is that outing counted, in full, on one expedition. Removing a credit leaves the outing here. Deleting an outing removes it and every credit.</p>
+</header>
+
+{% if invitations %}
+  <section>
+    <div class="section-head"><h2>Invitations</h2></div>
+    <ul class="journal">
+      {% for invitation in invitations %}
+        <li>
+          <div>
+            <p class="journal-total">{{ invitation.expedition_name }}</p>
+            <p class="stop-meta">{{ invitation.route_name }}</p>
+          </div>
+          <form method="post" action="{{ url_for('main.accept_named', invitation_id=invitation.id) }}">
+            <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+            <button class="button" type="submit">Accept</button>
+          </form>
+          <form method="post" action="{{ url_for('main.decline_named', invitation_id=invitation.id) }}">
+            <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+            <button class="text-button" type="submit">Decline</button>
+          </form>
+        </li>
+      {% endfor %}
+    </ul>
+  </section>
+{% endif %}
+
+<form class="sheet" method="post" action="">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  <h2>New outing</h2>
+  {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+  <label>
+    Elevation gained (feet)
+    <input name="elevation_ft" type="number" inputmode="decimal" min="1" max="10000" step="any" required value="{{ form.elevation_ft }}">
+  </label>
+  <label>
+    Distance (kilometers, optional)
+    <input name="distance_km" type="number" inputmode="decimal" min="0" step="any" value="{{ form.distance_km }}">
+  </label>
+  <label>
+    Date
+    <input name="happened_on" type="date" required value="{{ form.happened_on }}">
+  </label>
+  <label>
+    Note, just for you
+    <input name="note" type="text" maxlength="280" value="{{ form.note }}">
+  </label>
+  {% if expeditions %}
+    <label>
+      Also count the full elevation on
+      <select name="expedition_slug">
+        <option value="">Don't count it yet</option>
+        {% for expedition in expeditions %}
+          <option value="{{ expedition.slug }}" {% if form.expedition_slug == expedition.slug %}selected{% endif %}>{{ expedition.name }}</option>
+        {% endfor %}
+      </select>
+    </label>
+  {% endif %}
+  <button class="button" type="submit">Save outing</button>
+</form>
+
+{% if activities %}
+  <ul class="journal">
+    {% for activity in activities %}
+      <li>
+        <div>
+          <p class="stop-meta">{{ activity.happened_on | day }}</p>
+          <p class="journal-total">{{ activity.elevation_ft | feet }}{% if activity.distance_km %} · {{ activity.distance_km | km }}{% endif %}</p>
+          {% if activity.note %}<p>{{ activity.note }}</p>{% endif %}
+          {% if activity.credits %}
+            <p>Counted in full on
+              {% for credit in activity.credits %}
+                {{ credit.expedition_name }}{% if not loop.last %}, {% endif %}
+              {% endfor %}
+            </p>
+          {% else %}
+            <p>Not counted on an expedition.</p>
+          {% endif %}
+        </div>
+      </li>
+      <li>
+        <form class="sheet" method="post" action="{{ url_for('main.activity_edit', activity_id=activity.id) }}">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+          <h2>Edit this outing</h2>
+          <p>Changing the elevation updates every expedition credit for this outing.</p>
+          <label>
+            Elevation gained (feet)
+            <input name="elevation_ft" type="number" min="1" max="10000" step="any" required value="{{ activity.elevation_ft }}">
+          </label>
+          <label>
+            Distance (kilometers, optional)
+            <input name="distance_km" type="number" min="0" step="any" value="{{ activity.distance_km or '' }}">
+          </label>
+          <label>
+            Date
+            <input name="happened_on" type="date" required value="{{ activity.happened_on }}">
+          </label>
+          <label>
+            Note
+            <input name="note" type="text" maxlength="280" value="{{ activity.note }}">
+          </label>
+          <button class="button" type="submit">Save changes</button>
+        </form>
+        {% if expeditions %}
+          <form method="post" action="{{ url_for('main.activity_credit', activity_id=activity.id) }}">
+            <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+            <label>
+              Count the full elevation on another expedition
+              <select name="expedition_slug" required>
+                {% for expedition in expeditions %}
+                  <option value="{{ expedition.slug }}">{{ expedition.name }}</option>
+                {% endfor %}
+              </select>
+            </label>
+            <button class="button quiet" type="submit">Add credit</button>
+          </form>
+        {% endif %}
+        {% for credit in activity.credits %}
+          <form method="post" action="{{ url_for('main.activity_uncredit', activity_id=activity.id, expedition_slug=credit.expedition_slug) }}" onsubmit="return confirm('Stop counting this outing on {{ credit.expedition_name }}? The outing stays in your library.');">
+            <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+            <button class="text-button" type="submit">Remove credit from {{ credit.expedition_name }}</button>
+          </form>
+        {% endfor %}
+        <form method="post" action="{{ url_for('main.activity_delete', activity_id=activity.id) }}" onsubmit="return confirm('Delete this outing and every expedition credit? This cannot be undone.');">
+          <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+          <label>
+            <input type="checkbox" name="confirm" value="delete" required>
+            Delete the outing itself, not just one credit
+          </label>
+          <button class="text-button" type="submit">Delete outing</button>
+        </form>
+      </li>
+    {% endfor %}
+  </ul>
+{% else %}
+  <p class="empty">No outings yet.</p>
+{% endif %}
+{% endblock %}

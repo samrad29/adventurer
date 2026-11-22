@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}New expedition · The Adventurer{% endblock %}
+{% block content %}
+<header class="page-head">
+  <p class="eyebrow">Private</p>
+  <h1>Start an expedition</h1>
+  <p class="lede">You become the owner and the first member. This expedition stays private. Pick a published route. You are not changing the route.</p>
+</header>
+<form class="sheet" method="post" action="">
+  <input type="hidden" name="csrf" value="{{ csrf_token() }}">
+  {% if error %}<p class="form-error" role="alert">{{ error }}</p>{% endif %}
+  <label>
+    Route
+    <select name="route_slug" required>
+      {% for route in routes %}
+        <option value="{{ route.slug }}" {% if form.route_slug == route.slug %}selected{% endif %}>{{ route.name }} · {{ route.region }}</option>
+      {% endfor %}
+    </select>
+  </label>
+  <label>
+    Expedition name
+    <input name="name" type="text" required maxlength="80" value="{{ form.name }}">
+  </label>
+  <label>
+    Description
+    <input name="description" type="text" maxlength="500" value="{{ form.description }}">
+  </label>
+  <button class="button" type="submit">Create private expedition</button>
+</form>
+{% endblock %}

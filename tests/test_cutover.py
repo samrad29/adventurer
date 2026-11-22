@@ -177,8 +177,16 @@ def test_journal_lists_only_the_selected_expedition(client):
         ).fetchone()["id"]
         database.execute(
             """
-            INSERT INTO expeditions (slug, name, target_elevation_m)
-            VALUES ('annapurna', 'Annapurna', 8091)
+            INSERT INTO routes (slug, name, region, summary, target_elevation_m, status)
+            VALUES ('annapurna', 'Annapurna', 'Nepal', 'A test route', 8091, 'published')
+            """
+        )
+        database.execute(
+            """
+            INSERT INTO expeditions (slug, name, route_id, visibility, status)
+            SELECT 'annapurna', 'Annapurna', id, 'public', 'active'
+            FROM routes
+            WHERE slug = 'annapurna'
             """
         )
         database.execute(
@@ -249,8 +257,16 @@ def test_deleting_one_credit_keeps_the_activity_and_the_other_expedition(client)
         ).fetchone()["elevation_gain_m"]
         database.execute(
             """
-            INSERT INTO expeditions (slug, name, target_elevation_m)
-            VALUES ('annapurna', 'Annapurna', 8091)
+            INSERT INTO routes (slug, name, region, summary, target_elevation_m, status)
+            VALUES ('annapurna', 'Annapurna', 'Nepal', 'A test route', 8091, 'published')
+            """
+        )
+        database.execute(
+            """
+            INSERT INTO expeditions (slug, name, route_id, visibility, status)
+            SELECT 'annapurna', 'Annapurna', id, 'public', 'active'
+            FROM routes
+            WHERE slug = 'annapurna'
             """
         )
         database.execute(
@@ -332,10 +348,10 @@ def test_static_checkpoints_match_the_database(app):
         rows = get_db().execute(
             """
             SELECT checkpoint.slug, checkpoint.name, checkpoint.position, checkpoint.elevation_m,
-                   expedition.target_elevation_m
-            FROM expedition_checkpoints AS checkpoint
-            JOIN expeditions AS expedition ON expedition.id = checkpoint.expedition_id
-            WHERE expedition.slug = 'everest'
+                   route.target_elevation_m
+            FROM route_checkpoints AS checkpoint
+            JOIN routes AS route ON route.id = checkpoint.route_id
+            WHERE route.slug = 'everest'
             ORDER BY checkpoint.position
             """
         ).fetchall()

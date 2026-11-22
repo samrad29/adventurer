@@ -213,20 +213,19 @@ Re-running the function is a pre-cutover check. It expects the copied rows to st
 
 ## Phase 2 application
 
-Account creation inserts `users`, `user_profiles`, and an active Everest participation in one transaction. Login uses `users.username_key` and `users.password_hash`. The session still stores `adventurer_id`, because the 7,000 ft trail name is a hash of that integer.
+Account creation inserts `users` and `user_profiles`. It does not join an expedition. The website `/join` page then enrolls the new account in the Global Everest Challenge, unless that signup is finishing a private invitation. Login uses `users.username_key` and `users.password_hash`. The session still stores `adventurer_id`, because the 7,000 ft trail name is a hash of that integer.
 
 A manual log inserts an `activities` row (`manual`, `unspecified`, `not_required`), one `activity_credits` row for the full elevation, and the opening verification event. That event is required by the existing deferred constraint, which rejects an activity whose status has no matching event at commit. Elevation and distance are converted with `Decimal` at 0.3048 meters per international foot. Removing a journal entry deletes that expedition's credit and leaves the activity row in place.
 
-Progress and the casual leaderboard sum `activity_credits.credited_elevation_m` for the participation. Checkpoint target, elevations, order, slugs, and names come from `expeditions` and `expedition_checkpoints`. Narrative text stays in `adventurer/challenges.py`.
+Progress and the casual leaderboard sum `activity_credits.credited_elevation_m` for the participation. Checkpoint target, elevations, order, slugs, and names come from the route behind the expedition. See `docs/phase3-schema.md`. Narrative text stays in `adventurer/challenges.py`.
 
 ## Deferred
 
 - Season participation, season credits, prize eligibility, and verified-only rankings.
 - Provider imports, GPS, and an activity-type picker. The log form still has no type, so new rows stay `unspecified`.
 - Dropping `adventurers` and `logs`. The application does not read or write them.
-- An activity library. An activity with no remaining credits stays in the database.
 - Excluding rejected credits from progress. Manual rows are `not_required`, and that rule can wait until review exists.
-- A multi-expedition editor. One activity can hold a second credit, and deleting one credit leaves the other, but the pages still edit a single expedition.
+- The activity library and multiple expeditions are described in `docs/phase3-schema.md`.
 
 ## What this revision does not do
 

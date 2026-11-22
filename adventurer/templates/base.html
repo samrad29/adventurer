@@ -18,12 +18,14 @@
         The Adventurer
       </a>
       <nav class="nav" aria-label="Challenge">
+        <a href="{{ url_for('main.route_catalog') }}" {% if nav('routes') %}aria-current="page"{% endif %}>Routes</a>
         <a href="{{ url_for('main.home', slug=challenge.slug) }}" {% if nav('home') %}aria-current="page"{% endif %}>{{ challenge.name }}</a>
         <a href="{{ url_for('main.trail', slug=challenge.slug) }}" {% if nav('trail') %}aria-current="page"{% endif %}>Route</a>
         <a href="{{ url_for('main.board', slug=challenge.slug) }}" {% if nav('board') %}aria-current="page"{% endif %}>Board</a>
         {% if viewer %}
           <a href="{{ url_for('main.log_entry', slug=challenge.slug) }}" {% if nav('log') %}aria-current="page"{% endif %}>Log</a>
           <a href="{{ url_for('main.journal', slug=challenge.slug) }}" {% if nav('journal') %}aria-current="page"{% endif %}>Journal</a>
+          <a href="{{ url_for('main.activities') }}" {% if nav('activities') %}aria-current="page"{% endif %}>Activities</a>
         {% endif %}
       </nav>
       <div class="who">

@@ -60,6 +60,6 @@ def _connect(url: str) -> DB:
         row_factory=dict_row,
         prepare_threshold=None,
         connect_timeout=15,
+        options="-c search_path=adventurer",
     )
-    connection.execute("SET search_path TO adventurer")
     return DB(connection)
