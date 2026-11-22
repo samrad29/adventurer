@@ -200,7 +200,7 @@ Journey and home progress:
 
 Route requirements and checkpoint thresholds use `target` or `threshold` in that same unit. They do not include `credited`.
 
-Confirmation still previews, then submits `confirmation_token`. `will_complete` is true only when the save would satisfy every required metric. The token is bound to the user, the journey, `progress_version`, and every proposed credit in storage units. A stale token is 409 `confirmation_required` with a fresh preview and no write. An elevation edit, a distance edit, or an edit of both uses that path when it would complete the active journey.
+Create and edit preview, then submit `confirmation_token`, when the proposed credits would satisfy every remaining requirement. The token is bound to the user, the journey, `progress_version`, and every proposed credit in storage units. A stale token is 409 `confirmation_required`, a fresh preview, and no write. An elevation edit, a distance edit, or an edit of both uses that path when it would complete the active journey. Delete does not send a confirmation token. It removes the activity and its credits, increments `progress_version` when a credited total changes, and cannot finish the route. A completed journey still refuses that delete.
 
 Elevation-only route:
 
@@ -332,7 +332,7 @@ Home for that combined route at 500 ft and 1 mile. Elevation is complete and dis
 
 Roster and update payloads use the same metric objects for actual credited progress. `activity_logged` amounts are the credits applied, not the activity's full measurements. One create that crosses two checkpoints appends two `checkpoint_reached` rows. An ordinary edit appends neither `activity_logged` nor `checkpoint_reached`.
 
-A live multi-metric leaderboard distinguishes an actual finish, a projected finish, and insufficient history. `live_rank` is not the snapshot's `final_rank`.
+A live multi-metric leaderboard distinguishes an actual finish, a projected finish, and insufficient history. `live_rank` is not the snapshot's `final_rank`. Sam's elevation target is already met, so the projected date is only the distance estimate. Ada has finished both metrics and is not given a projected date.
 
 ```json
 {

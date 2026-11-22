@@ -322,7 +322,7 @@ Restart. Lock the user, then the active expeditions on the restarted route, then
 
 5.4 Activity credit and route confirmation
 
-Preview, POST /api/v1/activities/preview, and the preview before an update, do not write. For each required metric the preview reports the current credited total, the remaining amount, the proposed credit from this save, and the resulting total. A metric the activity does not supply shows a proposed credit of zero and an unchanged result. will_complete is true only when those results would leave every required metric at its target. It is false when one metric would finish and another would not, and it is false when the activity supplies none of the remaining metrics. When will_complete is true the preview also returns an HMAC and a ten-minute expiry. Creating, editing, and deleting an activity all use this section, including a distance-only activity and an elevation-only activity.
+Preview, POST /api/v1/activities/preview, and the preview before an update, do not write. For each required metric the preview reports the current credited total, the remaining amount, the proposed credit from this save, and the resulting total. A metric the activity does not supply shows a proposed credit of zero and an unchanged result. will_complete is true only when those results would leave every required metric at its target. It is false when one metric would finish and another would not, and it is false when the activity supplies none of the remaining metrics. When will_complete is true the preview also returns an HMAC and a ten-minute expiry. Creating and editing use this preview, including a distance-only activity and an elevation-only activity. Deleting does not. A delete removes credits. It cannot complete a journey, so it never requires a confirmation token.
 
 The signed payload is the string
   v2|{user_id}|{journey_id}|{progress_version}|{canonical_credits}|{exp_unix}
@@ -334,7 +334,7 @@ Under those locks the service recomputes each metric on its own.
   A null measurement is not credited. A stored zero is not credited. Otherwise the credited amount is the smaller of the activity's full value and the remaining target. A journey that needs 500 ft and 2 miles, given an activity of 900 ft and 3 miles, stores 900 ft and 3 miles on the activity and credits 500 ft and 2 miles. The same journey given 500 ft and no distance stores 500 ft, leaves distance null, credits 500 ft, and stays active. Neither leftover moves to another journey, another metric, or a later attempt.
   A metric that is already at its target gets no new credit row. The other required metrics still can.
   The journey stays active until every required metric is at its target. The credit that satisfies the last remaining metric completes it, whether that metric is elevation, distance, or both in one save.
-  If that save would complete the journey, the token must match the locked user, journey, progress_version, and the full canonical credit string, and it must be unexpired. Otherwise the transaction rolls back and the response is 409 confirmation_required with a fresh preview. No activity insert or update is left behind.
+  If a create or an edit would complete the journey, the token must match the locked user, journey, progress_version, and the full canonical credit string, and it must be unexpired. Otherwise the transaction rolls back and the response is 409 confirmation_required with a fresh preview. No activity insert or update is left behind. A delete is not this path.
   progress_version increments on every commit that changes any credited total: a new credit, an edit that changes a credited amount, a delete that removes one, or any other write that changes those totals. A metadata edit that changes no credit does not increment it. The first completing commit increments it as well. A replay then no longer matches, so it writes nothing.
   If there is no active journey, the activity is stored and no assignment is written. No token is required.
   An activity after the journey is already completed is stored with no credit and no token.
@@ -342,7 +342,7 @@ Under those locks the service recomputes each metric on its own.
 
 The credit transaction writes feed rows only for expeditions that are still active and whose active participation points at this journey, and only for a newly created activity, plus the summit case below. One activity_logged row carries the credited amounts, not the activity's full measurements. Each checkpoint that this create newly satisfies gets its own checkpoint_reached row. Completing the journey writes summit_reached. An edit does not write activity_logged or checkpoint_reached. An edit that completes the active journey writes summit_reached only. A delete writes no feed row. An expedition that closed before this transaction took its lock gets no feed row. The personal credit is still written when the journey itself is active.
 
-Edits and deletes of credited amounts are allowed while the credited journey is active, paused, or abandoned. Changing elevation, distance, or both recalculates each metric's credit from the new full value and the other credits already on that journey. Deleting the activity deletes all of its credit rows. If an edit on the active journey would complete every required metric, it uses the same confirmation token. If an edit on a paused or abandoned journey would complete the route, the response is 409 resume_required and nothing is written. Completion happens on the active journey, through the confirmation path.
+Edits and deletes of credited amounts are allowed while the credited journey is active, paused, or abandoned. Changing elevation, distance, or both recalculates each metric's credit from the new full value and the other credits already on that journey. If an edit on the active journey would complete every required metric, it uses the same confirmation token. If an edit on a paused or abandoned journey would complete the route, the response is 409 resume_required and nothing is written. Completion happens on the active journey, through a create or an edit and the confirmation path. Deleting the activity deletes its assignment and every credit row in that transaction. That keeps the one-activity-one-journey rule, and progress_version increments when a credited total changes. The delete does not ask for a token and cannot be the write that completes the journey.
 
 Once the journey is completed, no assignment and no credit may be inserted, updated, or deleted for it. The same trigger rejects an update of elevation_gain_m or distance_m, and rejects delete of the activity, when that change would alter a credit on the completed journey. Both columns are protected. The current trigger watches only elevation_gain_m, and that is not enough. Note, date, activity type, and duration remain editable. A measurement the route did not credit remains editable. Account deletion is the only delete bypass, and it is the bypass in section 5.10.
 
@@ -543,6 +543,9 @@ Activities
   PATCH /api/v1/activities/<id>
     metadata, and any credited metric, under the rules in 5.4
   DELETE /api/v1/activities/<id>
+    deletes the activity, its assignment, and its credits when the journey is not completed
+    no confirmation token, because a delete cannot complete the journey
+    increments progress_version when a credited total changes
     rejected when that activity credits a completed journey, except inside account deletion
 
 Routes
@@ -917,7 +920,7 @@ Single-metric routes, including Everest, rank on actual credit, not on a forecas
 
 Multi-metric live order:
   Completed participants come first, ordered by completed_at, then display name. That place is an actual finish. The entry says so. It is not a projection.
-  Unfinished participants who have a projected completion date come next, earliest date first, then display name. The date is the latest of the per-metric projected dates. Each required metric is estimated on its own from credited history and the amount still left. The route is not projected to be finished until every required metric is. The entry carries that date and says the place is projected.
+  Unfinished participants who have a projected completion date come next, earliest date first, then display name. The date is the one from section 16.6: the latest estimate among required metrics that are not already satisfied. A satisfied metric is not estimated. The entry carries that date and says the place is projected.
   Unfinished participants with insufficient history stay on the board, after the projected rows, ordered by display name. They have no live rank and no projected date. The board says the forecast data is insufficient. It does not invent either value.
 
 Multi-metric final order uses only actual results. Finishers are ordered by completed_at, then display name, and that place is final_rank. Participants who did not finish keep their per-metric totals and a null final_rank. They do not receive a performance rank. Single-metric final order is the same order as the single-metric live board, with the place stored as final_rank. No final row stores a projected date.
@@ -926,7 +929,9 @@ The live API uses live_rank, rank_basis, and projected_completion_at. rank_basis
 
 16.6 Forecast read model
 
-The live board and, later, the pace dot call a read model. It is not a table, not a credit, and not a journey column. It reads credit history and the remaining amount of each required metric. It returns, per metric, either an estimated completion time or insufficient data. The route projection is the latest of those times when every required metric has one. Otherwise the route result is insufficient data.
+The live board and, later, the pace dot call a read model. It is not a table, not a credit, and not a journey column. A required metric whose credited total already meets its target is satisfied. It needs no forecast. Its projected completion is the evaluation time, already passed, and its history is not used to move the route date. Only an incomplete required metric is estimated, from its own credit history and the amount still left. The route's projected completion date is the latest of those incomplete-metric estimates. If any incomplete required metric lacks sufficient data, the route result is insufficient data. If every required metric is already complete, the journey is an actual finisher. The read model does not return a projected finish for that person.
+
+A route that needs 500 ft and 2 miles, with 500 ft credited and 1 mile credited, estimates only the remaining mile. An estimate of ten days makes the route projection ten days after the evaluation time. Elevation is not given another date.
 
 That result must not change credited totals, checkpoint unlocks, the reached checkpoint, journey completion, progress_version, or final_rank. A cache, if a later decision adds one, is disposable and is recomputed from those inputs. This revision does not add the cache.
 
