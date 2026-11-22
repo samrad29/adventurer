@@ -159,40 +159,87 @@ def restart_journey(user_id: int, route_id: int) -> dict:
         _require_user(database, user_id, lock=True)
         route = _require_route(database, route_id)
         _lock_active_expeditions(database, route["id"])
-        _lock_journeys(database, user_id, route["id"])
-        current = _current(database, user_id, route["id"])
-        if current is None:
-            raise JourneyError("not_found", "This route does not have a journey.")
-        paused = _pause_other(database, user_id, route["id"])
+        return _restart_locked(database, user_id, route["id"]), True
+
+    return _commit(write)
+
+
+def _restart_locked(database, user_id: int, route_id: int) -> dict:
+    """Restart one route. The user and this route's active expeditions are locked."""
+    route = _require_route(database, route_id)
+    _lock_journeys(database, user_id, route["id"])
+    current = _current(database, user_id, route["id"])
+    if current is None:
+        raise JourneyError("not_found", "This route does not have a journey.")
+    paused = _pause_other(database, user_id, route["id"])
+    database.execute(
+        """
+        UPDATE route_journeys
+        SET is_current = false,
+            status = CASE
+                WHEN status IN ('active', 'paused') THEN 'abandoned'
+                ELSE status
+            END,
+            abandoned_at = CASE
+                WHEN status IN ('active', 'paused') THEN now()
+                ELSE abandoned_at
+            END
+        WHERE id = ?
+        """,
+        (current["id"],),
+    )
+    attempt = _next_attempt(database, user_id, route["id"])
+    created = _insert_attempt(database, user_id, route["id"], attempt)
+    reset = _repoint_active_participations(database, user_id, route["id"], created["id"])
+    return {
+        "journey": created,
+        "paused_journey": None if paused is None else _load(database, paused["id"]),
+        "reset_expedition_slugs": reset,
+    }
+
+
+def activate_for_participation(
+    database,
+    user_id: int,
+    route_id: int,
+    *,
+    confirm_new_attempt: bool,
+) -> dict:
+    """Choose the journey a participation should point at.
+
+    The caller is inside an open transaction and has already locked the user
+    and the active expeditions on this route. This locks that user's journeys
+    and, on a confirmed restart, the participations restart repoints. It does
+    not commit. A completed or abandoned current journey raises restart_required
+    unless confirm_new_attempt is true.
+    """
+    route = _require_route(database, route_id)
+    _lock_journeys(database, user_id, route["id"])
+    current = _current(database, user_id, route["id"])
+    if current is None:
+        if route["status"] != "published":
+            raise JourneyError("not_found", "That route does not exist.")
+        _pause_other(database, user_id, route["id"])
+        return _insert_attempt(database, user_id, route["id"], 1)
+    if current["status"] == "active":
+        return current
+    if current["status"] == "paused":
+        _pause_other(database, user_id, route["id"])
         database.execute(
             """
             UPDATE route_journeys
-            SET is_current = false,
-                status = CASE
-                    WHEN status IN ('active', 'paused') THEN 'abandoned'
-                    ELSE status
-                END,
-                abandoned_at = CASE
-                    WHEN status IN ('active', 'paused') THEN now()
-                    ELSE abandoned_at
-                END
-            WHERE id = ?
+            SET status = 'active'
+            WHERE id = ? AND status = 'paused'
             """,
             (current["id"],),
         )
-        attempt = _next_attempt(database, user_id, route["id"])
-        created = _insert_attempt(database, user_id, route["id"], attempt)
-        reset = _repoint_active_participations(database, user_id, route["id"], created["id"])
-        return (
-            {
-                "journey": created,
-                "paused_journey": None if paused is None else _load(database, paused["id"]),
-                "reset_expedition_slugs": reset,
-            },
-            True,
-        )
-
-    return _commit(write)
+        return _load(database, current["id"])
+    if current["status"] in ("completed", "abandoned"):
+        if not confirm_new_attempt:
+            raise _restart_required(database, user_id, route, current["status"])
+        restarted = _restart_locked(database, user_id, route["id"])
+        return restarted["journey"]
+    raise JourneyError("invalid_state", "That journey transition is not allowed.")
 
 
 def _activate(database, user_id: int, route_id: int, allow_first: bool) -> tuple[dict, bool]:
