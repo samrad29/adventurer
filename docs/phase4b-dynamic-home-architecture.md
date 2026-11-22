@@ -583,16 +583,37 @@ Relationship to Phase 4A
 
 Combined route
 
-  A route that requires 500 ft and 2 miles, with 500 ft credited and 1 mile credited, is still active. The scene stays on the last checkpoint whose elevation and distance thresholds are both met. focus only names the active journey. Nothing on this payload adds the feet to the miles.
+  A route that requires 500 ft and 2 miles, with 500 ft credited and 1 mile credited, is still active. Elevation is complete. Distance is not. The route is not complete, and status stays active. The gate checkpoint requires 200 ft and 1 mile, so it is reached. The finish checkpoint requires 500 ft and 2 miles, so it is next and locked. The scene stays on the gate. focus only names the active journey. Nothing on this payload adds the feet to the miles.
 
   {
     "journey": {
       "id": 10,
       "status": "active",
       "metrics": [
-        {"metric": "elevation", "unit": "ft", "target": "500", "credited": "500", "remaining": "0", "complete": true},
-        {"metric": "distance", "unit": "mi", "target": "2", "credited": "1", "remaining": "1", "complete": false}
-      ]
+        {"metric": "distance", "unit": "mi", "target": "2", "credited": "1", "remaining": "1", "complete": false},
+        {"metric": "elevation", "unit": "ft", "target": "500", "credited": "500", "remaining": "0", "complete": true}
+      ],
+      "checkpoint": {
+        "current": {
+          "slug": "gate",
+          "name": "Gate",
+          "position": 1,
+          "requirements": [
+            {"metric": "distance", "unit": "mi", "threshold": "1"},
+            {"metric": "elevation", "unit": "ft", "threshold": "200"}
+          ]
+        },
+        "next": {
+          "slug": "finish",
+          "name": "Finish",
+          "position": 2,
+          "requirements": [
+            {"metric": "distance", "unit": "mi", "threshold": "2"},
+            {"metric": "elevation", "unit": "ft", "threshold": "500"}
+          ]
+        }
+      },
+      "scene": {"role": "checkpoint", "checkpoint_slug": "gate"}
     },
     "focus": {"journey_id": 10, "status": "active"}
   }
@@ -601,7 +622,7 @@ Pace
 
   A later picture may draw a dot on the route. The dot is the highest checkpoint this payload already selected, or the approach when checkpoint.current is null. It does not move because a forecast says the person would be farther along.
 
-  A ring or color around that dot may be on_track, behind, insufficient_data, or no_deadline. Phase 4A section 16.6 lists the inputs and the decisions that are still open. Home does not return a forecast until those decisions exist, and it never stores one on the journey. If a response later adds forecast, it is a sibling of scene, derived from credit history and the expedition deadline, and safe to omit or recompute.
+  A ring or color around that dot may be on_track, behind, insufficient_data, or no_deadline. Those labels are not chosen yet. Home does not return them and does not store them on the journey. The live leaderboard's projected date is a separate field on that board, from the same read model, and it is not copied into this payload. If a response later adds a ring, it is a sibling of scene and safe to omit or recompute. It cannot move the dot or change the metrics.
 
 Open questions
 

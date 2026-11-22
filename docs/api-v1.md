@@ -268,6 +268,15 @@ Combined route:
         {"metric": "distance", "unit": "mi", "threshold": "1"},
         {"metric": "elevation", "unit": "ft", "threshold": "200"}
       ]
+    },
+    {
+      "slug": "finish",
+      "name": "Finish",
+      "position": 2,
+      "requirements": [
+        {"metric": "distance", "unit": "mi", "threshold": "2"},
+        {"metric": "elevation", "unit": "ft", "threshold": "500"}
+      ]
     }
   ]
 }
@@ -286,15 +295,15 @@ POST /api/v1/activities/preview
     "will_complete": true,
     "confirmation_token": "<hmac>",
     "confirmation_expires_at": 1768000000,
-    "credits": [
-      {"metric": "distance", "unit": "mi", "credited": "2"},
-      {"metric": "elevation", "unit": "ft", "credited": "500"}
+    "metrics": [
+      {"metric": "distance", "unit": "mi", "current": "0", "remaining": "2", "proposed": "2", "resulting": "2"},
+      {"metric": "elevation", "unit": "ft", "current": "0", "remaining": "500", "proposed": "500", "resulting": "500"}
     ]
   }
 }
 ```
 
-Home for that same combined route, after only the elevation requirement is met. `focus` does not repeat the metrics. The scene is the last checkpoint both of whose thresholds are already met, not the next one.
+Home for that combined route at 500 ft and 1 mile. Elevation is complete and distance is not, so the journey stays active. The gate is reached because both of its thresholds are met. The finish checkpoint is next because its 2 mile threshold is not. `focus` does not repeat the metrics.
 
 ```json
 {
@@ -308,6 +317,10 @@ Home for that same combined route, after only the elevation requirement is met. 
       {"metric": "distance", "unit": "mi", "target": "2", "credited": "1", "remaining": "1", "complete": false},
       {"metric": "elevation", "unit": "ft", "target": "500", "credited": "500", "remaining": "0", "complete": true}
     ],
+    "checkpoint": {
+      "current": {"slug": "gate", "name": "Gate", "position": 1},
+      "next": {"slug": "finish", "name": "Finish", "position": 2}
+    },
     "scene": {"role": "checkpoint", "checkpoint_slug": "gate"}
   },
   "focus": {"journey_id": 10, "status": "active"},
@@ -317,9 +330,54 @@ Home for that same combined route, after only the elevation requirement is met. 
 }
 ```
 
-Roster, leaderboard, and update payloads use the same metric objects for live progress. A final leaderboard returns the snapshotted amounts and does not recompute them. On a multi-metric route, finishers are ordered by completion time. Participants who have not finished are listed after them without a performance rank. A single-metric board still orders by credited amount, then earlier last credit, then display name.
+Roster and update payloads use the same metric objects for actual credited progress. `activity_logged` amounts are the credits applied, not the activity's full measurements. One create that crosses two checkpoints appends two `checkpoint_reached` rows. An ordinary edit appends neither `activity_logged` nor `checkpoint_reached`.
 
-An activity update payload may include `elevation_ft`, `distance_mi`, or both. Omitted progress fields stay as they are. The preview and the token describe the whole resulting credit, not only the field that changed.
+A live multi-metric leaderboard distinguishes an actual finish, a projected finish, and insufficient history. `live_rank` is not the snapshot's `final_rank`.
+
+```json
+{
+  "mode": "live",
+  "entries": [
+    {
+      "display_name": "Ada",
+      "rank_basis": "actual_completion",
+      "live_rank": 1,
+      "completed_at": "2026-06-01T15:00:00+00:00",
+      "projected_completion_at": null,
+      "metrics": [
+        {"metric": "distance", "unit": "mi", "credited": "2", "complete": true},
+        {"metric": "elevation", "unit": "ft", "credited": "500", "complete": true}
+      ]
+    },
+    {
+      "display_name": "Sam",
+      "rank_basis": "projected_completion",
+      "live_rank": 2,
+      "completed_at": null,
+      "projected_completion_at": "2026-06-20T00:00:00+00:00",
+      "metrics": [
+        {"metric": "distance", "unit": "mi", "credited": "1", "complete": false},
+        {"metric": "elevation", "unit": "ft", "credited": "500", "complete": true}
+      ]
+    },
+    {
+      "display_name": "Lee",
+      "rank_basis": "insufficient_data",
+      "live_rank": null,
+      "completed_at": null,
+      "projected_completion_at": null,
+      "metrics": [
+        {"metric": "distance", "unit": "mi", "credited": "0.2", "complete": false},
+        {"metric": "elevation", "unit": "ft", "credited": "40", "complete": false}
+      ]
+    }
+  ]
+}
+```
+
+A final leaderboard returns the snapshotted amounts and `final_rank`. It does not recompute them and it has no projected date. On a multi-metric route, finishers are ordered by completion time. Participants who did not finish keep their metric totals and a null `final_rank`. A single-metric board, live or final, still orders completed participants first and then ranks unfinished participants by credited amount, then earlier last credit, then display name. It does not use a forecast.
+
+An activity may send `elevation_ft`, `distance_mi`, or both. Omit a metric that was not measured. Do not send zero to mean "unknown." Zero is a measured zero and does not by itself earn credit. A negative is rejected. An update may change either metric or both. Omitted progress fields stay as they are. The preview lists, for each required metric, the current total, the remaining amount, the proposed credit, and the resulting total. The token covers that whole result. A distance-only body is valid. An elevation-only body is valid.
 
 ## What the Expo client needs first
 

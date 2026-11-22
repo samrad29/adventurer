@@ -94,21 +94,38 @@ route_journeys
     one row per user and route with status active or paused
     one row per user and route with is_current true
 
-journey_credits
+activities, for progress measurements
+  elevation_gain_m numeric(16, 6) null
+  distance_m numeric(16, 6) null
+  Null means that metric was not measured. Zero means it was measured and the value is zero. Those are different, and neither is a negative.
+  A check rejects a negative. Zero is allowed. The current elevation_gain_m NOT NULL and the current checks that both amounts are greater than zero do not survive. distance_m is numeric(14, 3) today and elevation_gain_m is numeric(12, 5). Both widen to numeric(16, 6) so a foot and a mile convert without rounding away a place the client was allowed to send.
+  Section 16 states which of those values can become a credit.
+
+activity_journey_assignments
   id
-  activity_id, metric_code, unique together
+  activity_id unique
   journey_id, user_id
-  credited_amount > 0, stored in that metric's storage unit
   created_at
+  Unique (id, journey_id)
   Foreign key (activity_id, user_id) to activities (id, user_id)
   Foreign key (journey_id, user_id) to route_journeys (id, user_id)
+  One activity has at most one row, so it has at most one journey. The service is not the thing that enforces that.
+
+journey_credits
+  id
+  assignment_id, journey_id
+  metric_code
+  credited_amount > 0, stored in meters at numeric(16, 6)
+  created_at
+  Unique (assignment_id, metric_code)
+  Foreign key (assignment_id, journey_id) to activity_journey_assignments (id, journey_id)
   Foreign key metric_code to progress_metrics
-  One activity still credits one journey. It may have one row per required metric.
-  A trigger rejects a credit larger than the activity's stored value for that metric.
+  The journey on a credit row is the journey on its assignment. A credit cannot name a different journey, because the foreign key includes both columns.
+  A trigger rejects a credit larger than the activity's stored value for that metric, and rejects a metric the activity left null.
   A trigger rejects a metric the journey's route does not require.
-  A trigger rejects updates, and rejects deletes, when the journey is completed.
+  A trigger rejects inserts, updates, and deletes of assignments and credits when the journey is completed.
   Delete is allowed only during account deletion, and only when users.deletion_state is deleting and the transaction has set adventurer.account_deletion to on. Privacy removal does not delete credits.
-  The shape above is the section 16 contract. The implemented table still has a single credited_elevation_m column and a unique activity_id. That column is replaced, not kept beside the metric rows.
+  The implemented journey_credits table still has a single credited_elevation_m column and a unique activity_id. That table is replaced by the assignment and these child rows. The old column is not kept beside them.
 
 expedition_participations, altered
   Existing unique (user_id, expedition_id) and unique (id, user_id) stay.
@@ -128,7 +145,8 @@ expedition_result_entries
   id
   expedition_id, participation_id, unique pair
   user_id, journey_id
-  display_name, rank, checkpoint_name, captured_at
+  display_name, final_rank, checkpoint_name, captured_at
+  final_rank is the official place. It is null when section 16 gives that person no performance rank. It is not a live projected place, and the live board does not read it.
   Per-metric totals live on expedition_result_metrics, not in a single total_m.
   Written only by the close transaction.
   Ordinary progress cannot update or delete a row.
@@ -141,7 +159,7 @@ expedition_updates
   activity_id nullable, checkpoint_name nullable, created_at
   Credited amounts for an activity_logged row live on expedition_update_metrics.
   summit_reached means every required route metric is satisfied. It does not mean the last increment was elevation.
-  Append-only for ordinary requests. An activity edit does not rewrite a feed row. The live board re-sums credits. The same deletion settings that release result rows allow delete. New kinds can be added later as new allowed values. No comment, post, or announcement kind is added now.
+  Append-only for ordinary requests. Creating an activity may append activity_logged, one checkpoint_reached per newly reached checkpoint, and summit_reached when the journey completes. An edit or a delete does not append activity_logged or checkpoint_reached. An edit that completes the active journey appends summit_reached and nothing else. Feed rows are not rewritten. The live board re-sums credits. The same deletion settings that release result rows allow delete. New kinds can be added later as new allowed values. No comment, post, or announcement kind is added now.
 
 expedition_privacy_removals
   expedition_id, user_id, primary key
@@ -304,7 +322,7 @@ Restart. Lock the user, then the active expeditions on the restarted route, then
 
 5.4 Activity credit and route confirmation
 
-Preview, POST /api/v1/activities/preview, and the preview before an update, do not write. The preview reports every required metric: the journey's credited total, the remaining amount, the activity's full value, the amount that would be credited, and the resulting total. will_complete is true only when those proposed credits would leave every required metric at its target. It is false when one metric would finish and another would not. When will_complete is true the preview also returns an HMAC and a ten-minute expiry.
+Preview, POST /api/v1/activities/preview, and the preview before an update, do not write. For each required metric the preview reports the current credited total, the remaining amount, the proposed credit from this save, and the resulting total. A metric the activity does not supply shows a proposed credit of zero and an unchanged result. will_complete is true only when those results would leave every required metric at its target. It is false when one metric would finish and another would not, and it is false when the activity supplies none of the remaining metrics. When will_complete is true the preview also returns an HMAC and a ten-minute expiry. Creating, editing, and deleting an activity all use this section, including a distance-only activity and an elevation-only activity.
 
 The signed payload is the string
   v2|{user_id}|{journey_id}|{progress_version}|{canonical_credits}|{exp_unix}
@@ -313,20 +331,20 @@ canonical_credits lists every metric that would be credited, sorted by metric co
 Save and update lock the user, the active expeditions on that route for which this user has an active participation, the journey being credited, those participations, and the activity when one already exists.
 
 Under those locks the service recomputes each metric on its own.
-  The credited amount for a metric is the smaller of the activity's full value and the remaining target. A journey that needs 500 ft and 2 miles, given an activity of 900 ft and 3 miles, stores 900 ft and 3 miles on the activity and credits 500 ft and 2 miles. Neither leftover moves to another journey, another metric, or a later attempt.
+  A null measurement is not credited. A stored zero is not credited. Otherwise the credited amount is the smaller of the activity's full value and the remaining target. A journey that needs 500 ft and 2 miles, given an activity of 900 ft and 3 miles, stores 900 ft and 3 miles on the activity and credits 500 ft and 2 miles. The same journey given 500 ft and no distance stores 500 ft, leaves distance null, credits 500 ft, and stays active. Neither leftover moves to another journey, another metric, or a later attempt.
   A metric that is already at its target gets no new credit row. The other required metrics still can.
   The journey stays active until every required metric is at its target. The credit that satisfies the last remaining metric completes it, whether that metric is elevation, distance, or both in one save.
   If that save would complete the journey, the token must match the locked user, journey, progress_version, and the full canonical credit string, and it must be unexpired. Otherwise the transaction rolls back and the response is 409 confirmation_required with a fresh preview. No activity insert or update is left behind.
-  The first completing commit increments progress_version. A replay no longer matches, so it writes nothing.
-  If there is no active journey, the activity is stored and no credit is written. No token is required.
+  progress_version increments on every commit that changes any credited total: a new credit, an edit that changes a credited amount, a delete that removes one, or any other write that changes those totals. A metadata edit that changes no credit does not increment it. The first completing commit increments it as well. A replay then no longer matches, so it writes nothing.
+  If there is no active journey, the activity is stored and no assignment is written. No token is required.
   An activity after the journey is already completed is stored with no credit and no token.
-  Creating, updating, or deleting a credit increments progress_version when any credited amount changes. A metadata edit that changes no credit does not.
+  An activity whose supplied amounts are all null or zero writes no assignment. Zero is a real measurement. It is not, by itself, a credit.
 
-The credit transaction writes feed rows only for expeditions that are still active and whose active participation points at this journey. Newly satisfying a checkpoint writes checkpoint_reached. Completing the journey writes summit_reached. An expedition that closed before this transaction took its lock gets no feed row. The personal credit is still written when the journey itself is active.
+The credit transaction writes feed rows only for expeditions that are still active and whose active participation points at this journey, and only for a newly created activity, plus the summit case below. One activity_logged row carries the credited amounts, not the activity's full measurements. Each checkpoint that this create newly satisfies gets its own checkpoint_reached row. Completing the journey writes summit_reached. An edit does not write activity_logged or checkpoint_reached. An edit that completes the active journey writes summit_reached only. A delete writes no feed row. An expedition that closed before this transaction took its lock gets no feed row. The personal credit is still written when the journey itself is active.
 
 Edits and deletes of credited amounts are allowed while the credited journey is active, paused, or abandoned. Changing elevation, distance, or both recalculates each metric's credit from the new full value and the other credits already on that journey. Deleting the activity deletes all of its credit rows. If an edit on the active journey would complete every required metric, it uses the same confirmation token. If an edit on a paused or abandoned journey would complete the route, the response is 409 resume_required and nothing is written. Completion happens on the active journey, through the confirmation path.
 
-Once the journey is completed, the immutability trigger rejects changes to any credited metric and rejects deletes for every credit on that journey, including credits from earlier activities. Note, date, activity type, and duration remain editable. A metric the route did not require, and that therefore has no credit row, remains editable too. Account deletion is the only delete bypass, and it is the bypass in section 5.10.
+Once the journey is completed, no assignment and no credit may be inserted, updated, or deleted for it. The same trigger rejects an update of elevation_gain_m or distance_m, and rejects delete of the activity, when that change would alter a credit on the completed journey. Both columns are protected. The current trigger watches only elevation_gain_m, and that is not enough. Note, date, activity type, and duration remain editable. A measurement the route did not credit remains editable. Account deletion is the only delete bypass, and it is the bypass in section 5.10.
 
 5.5 Leave
 
@@ -340,7 +358,7 @@ Used when an organization expedition reaches ends_at, when an admin ends it earl
 
 Lock the candidate users in id order. Candidates are participations that are active, plus participations that are withdrawn and final_standings_eligible. Lock the expedition. Read the candidate set again. If the set of participation ids changed, roll back and retry. Lock their journeys and participations in id order.
 
-Set the expedition completed or archived. For each remaining candidate, insert one result row: display name, journey id, rank, checkpoint name, captured_at, plus one expedition_result_metrics row per required metric. Each metric total is the sum of that journey's credits for that metric, capped at the route target, and when display_credits_after is set, only credits created at or after that time. Rank follows section 16. Active participants with zero credit on every metric are included. Withdrawn people who did not finish are not candidates. People whose participation was deleted are not candidates. The checkpoint name is the highest checkpoint that journey had actually reached.
+Set the expedition completed or archived. For each remaining candidate, insert one result row: display name, journey id, final_rank, checkpoint name, captured_at, plus one expedition_result_metrics row per required metric. Each metric total is the sum of that journey's credits for that metric, capped at the route target, and when display_credits_after is set, only credits created at or after that time. final_rank follows section 16 and never uses a projected date. Active participants with zero credit on every metric are included. Withdrawn people who did not finish are not candidates. People whose participation was deleted are not candidates. The checkpoint name is the highest checkpoint that journey had actually reached.
 
 The slot releases because the expedition is no longer active. Journeys are not modified. A later restart does not repoint this expedition and does not update the result rows.
 
@@ -598,7 +616,7 @@ Deadlock is avoided because a later resource is never locked before an earlier o
 
 Retryable failures are limited and specific.
   Close retries when the candidate participation set changes between the user-lock step and the reread. Bound of three, then 409.
-  A duplicate active journey, a duplicate in-progress journey, a duplicate current journey, a second credit for the same activity and metric, or a second organization slot raises a constraint failure and returns 409. The application does not catch those and try a second winner.
+  A duplicate active journey, a duplicate in-progress journey, a duplicate current journey, a second assignment for one activity, a second credit for the same assignment and metric, or a second organization slot raises a constraint failure and returns 409. The application does not catch those and try a second winner.
   Route confirmation does not retry a stale token. The client asks for a new preview.
 
 Final snapshot contents are the candidate set at the successful close commit: active participants, including zeros, and withdrawn participants whose final_standings_eligible flag is true. Departed finishers are in that set because leave set the flag while their participation still pointed at the completed journey. A restart after that leave does not move a withdrawn pointer, so the closed per-metric totals remain the totals from that completed attempt.
@@ -705,7 +723,7 @@ Phase 10. Home
 Run on the isolated local database only. Do not point tests at hosted Supabase. Do not treat a run of the current suite as evidence that journeys exist.
 
 Database constraints
-  Second active journey, second in-progress journey on one route, second current journey on one route, second credit for one activity and metric, credit whose user does not own the activity, participation aimed at another user's journey, participation aimed at another route, second active organization expedition.
+  Second active journey, second in-progress journey on one route, second current journey on one route, second assignment for one activity, a credit whose journey differs from its assignment, credit whose user does not own the activity, participation aimed at another user's journey, participation aimed at another route, second active organization expedition.
 
 Journey flows
   Resume does not move pointers and restores the same total.
@@ -809,9 +827,7 @@ One lock order covers every multi-row flow in section 5.
 
 3. The failure-limit numbers. A limit is part of the auth phase. Five failures in fifteen minutes is the default written into that phase, and it can change without a domain change.
 
-4. How to order participants who have not finished a multi-metric route. Section 16 decides the finisher order and forbids combining units. It does not choose a performance order among people who are ahead on different metrics.
-
-5. The pace forecast in section 16. The dot's meaning is decided. The calculation, the history window, and the choice between the labels at_risk and behind are not.
+4. How the forecast read model turns credit history into a projected completion date. Section 16 decides what the live board does with that date, and it forbids inventing one. It does not decide the history window, the minimum history, inactivity and pauses, pre-expedition credits, deadline changes, confidence labels, or how to keep small new activities from shuffling the board. The pace dot's place is decided. Its on_track and behind labels are part of this same open calculation.
 
 
 16. Multi-metric route progress
@@ -822,8 +838,16 @@ This section is the progress contract. Elevation-only wording earlier in this do
 
 A route does not have a type such as climb, walk, or mixed. It has requirement rows. Initially the catalog contains two metrics.
 
-  elevation. Storage is meters, numeric(12, 5). Display is international feet, 0.3048 meters per foot. The activity value is the existing elevation_gain_m column.
-  distance. Storage is meters, numeric(12, 5). Display is the statute mile, 1609.344 meters. The activity value is the existing distance_m column. The target API asks for miles. The implemented distance_km field is metadata only until that API change, and it is not a second stored distance.
+  elevation. Storage is meters. Display is international feet. 1 ft = 0.3048 m exactly. The activity column is elevation_gain_m.
+  distance. Storage is meters. Display is the statute mile. 1 mi = 1609.344 m exactly. The activity column is distance_m. The target API asks for miles. The implemented distance_km field is not a second stored distance and is removed rather than kept beside distance_mi.
+
+Both measurements, route targets, checkpoint thresholds, and credits use numeric(16, 6) meters. One scale is enough. Elevation does not keep numeric(12, 5) while distance keeps numeric(14, 3), because those scales do not both hold the conversions below. Metric-specific scales would only be worth it if a later metric could not share six decimal places. These two can.
+
+Accepted input is a decimal string, not a binary float. Elevation is accepted to 0.01 ft. Distance is accepted to 0.001 mi. Anything finer is rejected. Those steps convert exactly into numeric(16, 6): 0.01 ft is 0.003048 m, and 0.001 mi is 1.609344 m. The service does that conversion with Decimal. It does not use binary floating point, and it does not round away a place the client was allowed to send.
+
+A null measurement is not supplied. Zero is supplied and is stored. A negative is rejected. Journey credit requires a supplied amount greater than zero for a metric the route requires. Zero alone, or a null, does not create an assignment. A distance-only activity leaves elevation null and can credit a distance-only route. An elevation-only activity leaves distance null and can credit an elevation-only route. A combined activity may supply both. A supplied metric the route does not require stays on the activity and is not credited.
+
+Completion, caps, and checkpoint checks compare the stored meters to the stored target. The complete flag is that comparison. Display strings are Decimal conversions of those stored meters, quantized to the input step only for presentation. If that quantization would show a remaining amount of zero, or a credited amount equal to the target, while the stored target is not met, the response still says complete false and shows a remaining amount that is not zero. Display rounding never finishes a route, and it never hides a finish the stored values already reached.
 
 progress_metrics
   code primary key
@@ -832,7 +856,7 @@ progress_metrics
 
 route_requirements
   route_id, metric_code, primary key
-  target_amount numeric(12, 5), check greater than zero
+  target_amount numeric(16, 6), check greater than zero
   Foreign key metric_code
   A published route has at least one row.
   No row means the metric is absent. The route does not show it, credit it, or wait for it.
@@ -841,7 +865,7 @@ route_requirements
 
 checkpoint_requirements
   checkpoint_id, metric_code, primary key
-  threshold_amount numeric(12, 5), check greater than zero
+  threshold_amount numeric(16, 6), check greater than zero
   The metric must be one the route requires.
   The threshold must be less than or equal to that route requirement's target.
   A checkpoint with no rows is invalid.
@@ -863,7 +887,7 @@ Completion compares storage amounts. Display rounding cannot finish a route or u
 
 One journey tracks every metric its route requires. The total for a metric is the sum of journey_credits.credited_amount for that journey and metric, capped at the requirement target. Credits from before an expedition's starts_at still count. display_credits_after limits an expedition board and does not limit the personal journey.
 
-An activity with an active journey writes at most one credit row per required metric, all pointing at that same journey. A metric the activity omits, or whose remaining target is already zero, gets no row, because credited_amount must be greater than zero. The other metrics are still written. An activity with no active journey writes no credit rows and stays in personal history. An activity never writes a credit for a route it is not on.
+An activity with an active journey and at least one positive supplied amount for a required metric gets one activity_journey_assignments row. Each such metric gets a child credit row on that assignment. A metric left null, a metric stored as zero, and a metric whose remaining target is already zero get no child row. The other metrics are still written. All of those rows share the assignment's journey. The unique activity_id and the child foreign key are what stop a second journey, not a check in the service. An activity with no active journey, or with nothing positive to credit, writes no assignment and stays in personal history. An activity never writes a credit for a route it is not on.
 
 Paused and abandoned journeys keep the credits they already have. New activities do not credit them, because they are not the active journey. An edit of an activity that already credits a paused or abandoned journey recalculates those rows. If the recalculation would complete that journey, the response is 409 resume_required and the edit is not written.
 
@@ -879,43 +903,40 @@ Missing photography does not change totals, unlocks, or authorization. Scene sel
 
 An expedition still has one route. Each participant's live progress is that route's required metrics on the pointed journey. The board shows every metric. It does not collapse them.
 
-activity_logged carries the activity id and one expedition_update_metrics row for each metric this credit actually applied. checkpoint_reached names the checkpoint that this credit newly satisfied. summit_reached is written when the journey transitions to completed, whichever metric was last. Feed rows stay append-only.
+A newly created activity appends one activity_logged row and one expedition_update_metrics row for each metric actually credited. It appends one checkpoint_reached row for each checkpoint that create newly satisfied, including when one activity crosses several. It appends summit_reached when that create completes the journey, whichever metric was last. An edit or a delete appends nothing, except that an edit which completes the active journey appends summit_reached and no checkpoint rows. Amounts on those rows are the credited amounts. Feed rows stay append-only.
 
 Restart behavior is unchanged: active expeditions on that route follow the new zeroed attempt, and a final snapshot does not.
 
 16.5 Leaderboards
 
-Live standings and final standings are still different objects. A live read sums current credits under the board rules. A final read returns expedition_result_metrics and does not sum the journey again. Eligibility is unchanged: active participants at close, including zeros; departed participants whose journey was completed when they left; not departed non-finishers; privacy removal deletes that person's result and leaves the other ranks in place. Account deletion does the same. Snapshots are not otherwise rewritten.
+Live standings and final standings are different results. A live read sums current credits under the board rules and may ask the forecast read model for a projected date. A final read returns expedition_result_metrics and final_rank. It does not sum the journey again and it does not store or consult a projected date. Eligibility is unchanged: active participants at close, including zeros; departed participants whose journey was completed when they left; not departed non-finishers; privacy removal deletes that person's result and leaves the other final ranks in place. Account deletion does the same. Snapshots are not otherwise rewritten.
 
-A per-metric ratio of credited amount to target may be shown beside that metric. It is display only. It is not a score, and ratios are not averaged, weighted, or added.
+A per-metric ratio of credited amount to target may be shown beside that metric. It is display only. It is not a score, and ratios are not averaged, weighted, or added. Feet and miles are never added.
 
-Single-metric routes, including Everest, keep a total order. Greater credited amount ranks first. The earlier credit that last changed that amount breaks a tie. Display name breaks the rest. Zero is a real total and stays on the board.
+Single-metric routes, including Everest, rank on actual credit, not on a forecast. Completed participants come first, ordered by completed_at, then display name. Unfinished participants follow, ordered by credited amount descending, then by the earlier time that amount was reached, then display name. Zero is a real total and stays on the board.
 
-Multi-metric routes do not rank by adding feet to miles. Finishers rank ahead of people who have not finished. Finishers order by journey completed_at ascending, then display name. That uses time, not a mix of units. Their final rank is that place.
+Multi-metric live order:
+  Completed participants come first, ordered by completed_at, then display name. That place is an actual finish. The entry says so. It is not a projection.
+  Unfinished participants who have a projected completion date come next, earliest date first, then display name. The date is the latest of the per-metric projected dates. Each required metric is estimated on its own from credited history and the amount still left. The route is not projected to be finished until every required metric is. The entry carries that date and says the place is projected.
+  Unfinished participants with insufficient history stay on the board, after the projected rows, ordered by display name. They have no live rank and no projected date. The board says the forecast data is insufficient. It does not invent either value.
 
-People who have not finished a multi-metric route are not given a performance rank. The live list places them after the finishers, ordered by display name, so the list is stable. That order is not a claim that one of them is ahead. The final snapshot stores their per-metric totals and a null rank. Open question 4 is the only place a later decision can replace that holding rule. Until then the implementation must not invent a weighted score.
+Multi-metric final order uses only actual results. Finishers are ordered by completed_at, then display name, and that place is final_rank. Participants who did not finish keep their per-metric totals and a null final_rank. They do not receive a performance rank. Single-metric final order is the same order as the single-metric live board, with the place stored as final_rank. No final row stores a projected date.
 
-16.6 Pace, later
+The live API uses live_rank, rank_basis, and projected_completion_at. rank_basis is actual_completion, projected_completion, or insufficient_data. live_rank is null for insufficient_data. The snapshot column is final_rank. The two are not one field reused for both meanings.
 
-A future route picture may show whether the person is on pace to finish before the expedition ends. This is derived presentation. It is not a column on the journey, not a credit, and not a leaderboard key.
+16.6 Forecast read model
 
-The dot is the highest checkpoint actually reached, or the approach when none is reached. Its position is that fact. A ring or color around it may say on_track, behind, insufficient_data, or no_deadline. The word at_risk is another name for behind and is not chosen yet. The treatment must not move the dot past achieved progress, including when the forecast says the person would finish early.
+The live board and, later, the pace dot call a read model. It is not a table, not a credit, and not a journey column. It reads credit history and the remaining amount of each required metric. It returns, per metric, either an estimated completion time or insufficient data. The route projection is the latest of those times when every required metric has one. Otherwise the route result is insufficient data.
 
-The derivation, when it exists, reads journey credit history and the expedition ends_at. It may be cached only as disposable data that can be dropped and recomputed. It is not written into journey progress.
+That result must not change credited totals, checkpoint unlocks, the reached checkpoint, journey completion, progress_version, or final_rank. A cache, if a later decision adds one, is disposable and is recomputed from those inputs. This revision does not add the cache.
 
-Unresolved, and not to be filled in by an implementation guess:
-  Which history window counts.
-  How much history is enough before the state leaves insufficient_data.
-  How a pause, a gap with no credits, or a switch to another route affects the rate. Credits from the other route do not count.
-  A person who joins with a journey that is already partly complete. The forecast must not treat credits from before the join as if they were earned against this deadline, unless a later decision says they do.
-  An extended or shortened ends_at. The next derivation uses the new deadline. Old forecast output is not stored.
-  A person with little history stays on insufficient_data rather than on_track.
+The pace dot stays the highest checkpoint actually reached, or the approach when none is reached. A ring around it may later say on_track, behind, insufficient_data, or no_deadline. It must not move the dot. Those labels are not chosen here. Open question 4 is the calculation, shared by the board's date and the dot's ring. Until that calculation exists, the read model returns insufficient data rather than a guessed date, and the live board still lists those people without a rank.
 
 16.7 Implementation sequence
 
 No migration in this revision. The sequence below is the order that avoids a second progress source. There is no dual read, no elevation-only runtime left beside the new rules, and no journey backfill. Accounts, the Everest route identity, the Global Everest expedition row, curated narrative, and photographs stay. Everest receives an elevation requirement equal to its current target. Existing activity rows keep their elevation_gain_m and distance_m values. Existing journey and expedition progress rows may be discarded with the progress cutover. There are no live users whose attempts must survive.
 
-1. Schema. Add progress_metrics, route_requirements, checkpoint_requirements, expedition_result_metrics, and expedition_update_metrics. Replace journey_credits.credited_elevation_m and unique activity_id with the metric rows in section 3. Drop routes.target_elevation_m and route_checkpoints.elevation_m in that same migration after the requirement rows exist. Make result rank nullable. Add the immutability trigger for requirements. Do not add a forecast table.
+1. Schema. Add progress_metrics, route_requirements, checkpoint_requirements, activity_journey_assignments, expedition_result_metrics, and expedition_update_metrics. Replace journey_credits with the child rows in section 3. Drop the elevation NOT NULL and the greater-than-zero checks, allow null and zero on both measurement columns, and widen both to numeric(16, 6). Extend the completed-journey trigger to distance_m and to the assignment. Drop routes.target_elevation_m and route_checkpoints.elevation_m in that same migration after the requirement rows exist. Name the snapshot place final_rank and allow it to be null. Add the immutability trigger for requirements. Do not add a forecast table.
 
 2. Services. adventurer/activities.py credits and confirms each metric, including distance edits that complete a route. adventurer/expeditions.py sums, ranks, snapshots, and writes feed amounts per metric. adventurer/scene.py and adventurer/home.py select the checkpoint from requirements and return the metrics array. adventurer/journeys.py keeps the lifecycle and still inserts an empty attempt on restart. Lock order and transaction boundaries stay as they are.
 
