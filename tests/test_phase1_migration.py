@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import os
 import subprocess
+import sys
 from decimal import Decimal
 from pathlib import Path
 
@@ -29,7 +30,7 @@ def _alembic(*args: str, url: str | None = TEST_URL) -> subprocess.CompletedProc
     else:
         env["TEST_DATABASE_URL"] = url
     return subprocess.run(
-        [str(ROOT / ".venv" / "Scripts" / "python.exe"), "-m", "alembic", *args],
+        [sys.executable, "-m", "alembic", *args],
         cwd=ROOT,
         env=env,
         text=True,
@@ -200,19 +201,38 @@ def test_phase1_migration_rollback_and_validation():
         assert _legacy_snapshot(conn) == original
         assert conn.execute("SELECT COUNT(*) AS n FROM adventurer.users").fetchone()["n"] == 3
         assert conn.execute("SELECT COUNT(*) AS n FROM adventurer.activities").fetchone()["n"] == 4
-        assert conn.execute("SELECT COUNT(*) AS n FROM adventurer.activity_credits").fetchone()["n"] == 4
+        assert conn.execute(
+            "SELECT to_regclass('adventurer.activity_credits') AS name"
+        ).fetchone()["name"] is None
+        assert conn.execute("SELECT COUNT(*) AS n FROM adventurer.journey_credits").fetchone()["n"] == 0
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM adventurer.expedition_participations"
+        ).fetchone()["n"] == 0
+        assert conn.execute("SELECT COUNT(*) AS n FROM adventurer.route_journeys").fetchone()["n"] == 0
+        everest = conn.execute(
+            """
+            SELECT name, visibility, status, owner_user_id, kind
+            FROM adventurer.expeditions
+            WHERE slug = 'everest'
+            """
+        ).fetchone()
+        assert everest["name"] == "Global Everest Challenge"
+        assert everest["visibility"] == "public"
+        assert everest["status"] == "active"
+        assert everest["owner_user_id"] is None
+        assert everest["kind"] == "global"
         assert conn.execute(
             "SELECT COUNT(*) AS n FROM adventurer.competition_seasons"
         ).fetchone()["n"] == 0
         totals = conn.execute(
             """
-            SELECT credit.user_id,
+            SELECT activity.user_id,
                    SUM(legacy_log.elevation_ft::numeric) AS legacy_ft,
-                   SUM(credit.credited_elevation_m) / 0.3048 AS new_ft
-            FROM adventurer.activity_credits AS credit
-            JOIN adventurer.logs AS legacy_log ON legacy_log.id = credit.activity_id
-            GROUP BY credit.user_id
-            ORDER BY credit.user_id
+                   SUM(activity.elevation_gain_m) / 0.3048 AS new_ft
+            FROM adventurer.activities AS activity
+            JOIN adventurer.logs AS legacy_log ON legacy_log.id = activity.id
+            GROUP BY activity.user_id
+            ORDER BY activity.user_id
             """
         ).fetchall()
         assert [(row["user_id"], row["legacy_ft"]) for row in totals] == [
@@ -231,18 +251,6 @@ def test_phase1_migration_rollback_and_validation():
         assert (users_seq["last_value"], users_seq["is_called"]) == (9, True)
         assert (activities_seq["last_value"], activities_seq["is_called"]) == (16, True)
 
-        columns = {
-            row["column_name"]
-            for row in conn.execute(
-                """
-                SELECT column_name
-                FROM information_schema.columns
-                WHERE table_schema = 'adventurer' AND table_name = 'activity_credits'
-                """
-            ).fetchall()
-        }
-        assert "competition_eligibility" not in columns
-        assert "eligibility_reason" not in columns
         source = conn.execute(
             """
             SELECT is_nullable, column_default
@@ -273,18 +281,8 @@ def test_phase1_migration_rollback_and_validation():
             """
         ).fetchone()["relrowsecurity"] is True
 
-        everest_id = conn.execute(
-            "SELECT id FROM adventurer.expeditions WHERE slug = 'everest'"
-        ).fetchone()["id"]
         route_id = conn.execute(
             "SELECT id FROM adventurer.routes WHERE slug = 'everest'"
-        ).fetchone()["id"]
-        alex_participation = conn.execute(
-            """
-            SELECT id FROM adventurer.expedition_participations
-            WHERE user_id = 8 AND expedition_id = %s
-            """,
-            (everest_id,),
         ).fetchone()["id"]
 
         _expect_error(
@@ -367,51 +365,6 @@ def test_phase1_migration_rollback_and_validation():
             conn,
             "DELETE FROM adventurer.activity_verification_events WHERE activity_id = 4",
         )
-        _expect_error(
-            conn,
-            """
-            INSERT INTO adventurer.activity_credits (
-                activity_id, participation_id, user_id, credited_elevation_m
-            )
-            VALUES (4, %s, 3, 10)
-            """,
-            (alex_participation,),
-        )
-
-        conn.execute("SAVEPOINT keep")
-        conn.execute(
-            """
-            INSERT INTO adventurer.expeditions (slug, name, route_id, visibility, status)
-            SELECT 'kilimanjaro', 'Kilimanjaro', id, 'public', 'active'
-            FROM adventurer.routes
-            WHERE slug = 'everest'
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO adventurer.expedition_participations (user_id, expedition_id)
-            SELECT 3, id FROM adventurer.expeditions WHERE slug = 'kilimanjaro'
-            """
-        )
-        conn.execute(
-            """
-            INSERT INTO adventurer.activity_credits (
-                activity_id, participation_id, user_id, credited_elevation_m
-            )
-            SELECT 4, participation.id, 3, activity.elevation_gain_m
-            FROM adventurer.activities AS activity
-            JOIN adventurer.expedition_participations AS participation
-                ON participation.user_id = 3
-            JOIN adventurer.expeditions AS expedition
-                ON expedition.id = participation.expedition_id
-            WHERE activity.id = 4 AND expedition.slug = 'kilimanjaro'
-            """
-        )
-        assert conn.execute(
-            "SELECT COUNT(*) AS n FROM adventurer.activity_credits WHERE activity_id = 4"
-        ).fetchone()["n"] == 2
-        conn.execute("ROLLBACK TO SAVEPOINT keep")
-
         conn.execute("SAVEPOINT keep")
         deleted = conn.execute("DELETE FROM adventurer.activities WHERE id = 4")
         assert deleted.rowcount == 1
@@ -492,9 +445,6 @@ def test_phase1_migration_rollback_and_validation():
     _ok("upgrade", "head")
     with _connect() as conn:
         conn.execute("SELECT adventurer.assert_phase1_legacy_match()")
-        everest_id = conn.execute(
-            "SELECT id FROM adventurer.expeditions WHERE slug = 'everest'"
-        ).fetchone()["id"]
         conn.execute(
             """
             INSERT INTO adventurer.users (username, username_key, password_hash)
@@ -511,13 +461,6 @@ def test_phase1_migration_rollback_and_validation():
             VALUES (%s, 'Jo')
             """,
             (user_id,),
-        )
-        conn.execute(
-            """
-            INSERT INTO adventurer.expedition_participations (user_id, expedition_id)
-            VALUES (%s, %s)
-            """,
-            (user_id, everest_id),
         )
         conn.execute(
             """
@@ -544,30 +487,23 @@ def test_phase1_migration_rollback_and_validation():
             """,
             (activity_id,),
         )
-        conn.execute(
-            """
-            INSERT INTO adventurer.activity_credits (
-                activity_id, participation_id, user_id, credited_elevation_m
-            )
-            SELECT %s, participation.id, %s, 30.48
-            FROM adventurer.expedition_participations AS participation
-            WHERE participation.user_id = %s AND participation.expedition_id = %s
-            """,
-            (activity_id, user_id, user_id, everest_id),
-        )
+        assert conn.execute(
+            "SELECT COUNT(*) AS n FROM adventurer.journey_credits WHERE activity_id = %s",
+            (activity_id,),
+        ).fetchone()["n"] == 0
         conn.execute("SELECT adventurer.reverse_sync_new_rows_to_legacy()")
         conn.commit()
-        synced = conn.execute(
+        assert conn.execute(
+            "SELECT id FROM adventurer.adventurers WHERE name = 'Jo'"
+        ).fetchone() is not None
+        assert conn.execute(
             """
-            SELECT name, challenge_slug, elevation_ft, note
-            FROM adventurer.adventurers AS account
-            JOIN adventurer.logs AS legacy_log ON legacy_log.adventurer_id = account.id
+            SELECT legacy_log.id
+            FROM adventurer.logs AS legacy_log
+            JOIN adventurer.adventurers AS account ON account.id = legacy_log.adventurer_id
             WHERE account.name = 'Jo'
             """
-        ).fetchone()
-        assert synced["challenge_slug"] == "everest"
-        assert synced["note"] == "after cutover"
-        assert synced["elevation_ft"] == pytest.approx(100.0)
+        ).fetchone() is None
         assert _rows_include(conn, original)
 
     _ok("downgrade", "0001_legacy_baseline")
@@ -575,16 +511,13 @@ def test_phase1_migration_rollback_and_validation():
         assert conn.execute("SELECT to_regclass('adventurer.users') AS name").fetchone()["name"] is None
         assert conn.execute("SELECT to_regclass('adventurer.expeditions') AS name").fetchone()["name"] is None
         jo = conn.execute(
-            """
-            SELECT legacy_log.elevation_ft, legacy_log.note, legacy_log.challenge_slug
-            FROM adventurer.logs AS legacy_log
-            JOIN adventurer.adventurers AS account ON account.id = legacy_log.adventurer_id
-            WHERE account.name = 'Jo'
-            """
+            "SELECT id FROM adventurer.adventurers WHERE name = 'Jo'"
         ).fetchone()
-        assert jo["challenge_slug"] == "everest"
-        assert jo["note"] == "after cutover"
-        assert jo["elevation_ft"] == pytest.approx(100.0)
+        assert jo is not None
+        assert conn.execute(
+            "SELECT id FROM adventurer.logs WHERE adventurer_id = %s",
+            (jo["id"],),
+        ).fetchone() is None
         kept = conn.execute(
             "SELECT id FROM adventurer.adventurers ORDER BY id"
         ).fetchall()

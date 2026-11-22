@@ -64,6 +64,14 @@ def _prepare_database() -> None:
                 is not None
                 and conn.execute("SELECT to_regclass('adventurer.routes') AS name").fetchone()[0]
                 is not None
+                and conn.execute(
+                    "SELECT to_regclass('adventurer.route_journeys') AS name"
+                ).fetchone()[0]
+                is not None
+                and conn.execute(
+                    "SELECT to_regclass('adventurer.activity_credits') AS name"
+                ).fetchone()[0]
+                is None
                 and constraint is not None
                 and "expired" in constraint[0]
             )
@@ -78,12 +86,21 @@ def _wipe(application) -> None:
         from adventurer.db import get_db
 
         database = get_db()
-        database.execute("DELETE FROM expedition_invitations")
+        database.execute("SELECT set_config('adventurer.account_deletion', 'on', true)")
         database.execute(
-            "UPDATE expeditions SET owner_user_id = NULL WHERE owner_user_id IS NOT NULL"
+            "UPDATE users SET deletion_state = 'deleting' WHERE deletion_state IS NULL"
         )
-        database.execute("DELETE FROM users")
+        database.execute("DELETE FROM expedition_updates")
+        database.execute("DELETE FROM expedition_result_entries")
+        database.execute("DELETE FROM journey_credits")
+        database.execute("DELETE FROM expedition_invitations")
+        database.execute("DELETE FROM expedition_participations")
+        database.execute("DELETE FROM route_journeys")
+        database.execute("DELETE FROM api_tokens")
+        database.execute("DELETE FROM organization_memberships")
         database.execute("DELETE FROM expeditions WHERE slug <> 'everest'")
+        database.execute("DELETE FROM organizations")
+        database.execute("DELETE FROM users")
         database.execute("DELETE FROM routes WHERE slug <> 'everest'")
         database.execute(
             """
@@ -94,7 +111,15 @@ def _wipe(application) -> None:
                 status = 'active',
                 owner_user_id = NULL,
                 starts_at = NULL,
-                ends_at = NULL
+                ends_at = NULL,
+                kind = 'global',
+                organization_id = NULL,
+                enrollment = NULL,
+                enrollment_opens_at = NULL,
+                enrollment_closes_at = NULL,
+                accent_color = NULL,
+                welcome_override = NULL,
+                image_ref = NULL
             WHERE slug = 'everest'
             """
         )
