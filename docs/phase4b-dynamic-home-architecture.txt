@@ -59,7 +59,7 @@ Selection, in order:
 
 The next checkpoint is reported separately. Its image is not the scene. A locked place stays locked, which is the current site rule that a stop photo is available only once the stop is unlocked. Between checkpoints the scene stays on the place already reached until the total meets the next elevation. Reaching an elevation exactly selects that checkpoint.
 
-The route hero is the picture of the approach, before the first checkpoint opens. On Everest the first checkpoint is Timms Hill. photo_credits.json begins at Lukla, so the early stops have no credited photograph. The hero is how the opening of the route can show the lower mountain without pretending the journey has reached Lukla. A missing hero is a valid response. The selector must not substitute Lukla, or any later file, to fill that gap.
+The route hero is the picture of the approach, before the first checkpoint opens. Everest has one. It shows the broader Everest and Khumbu setting, and it is not a photograph of Lukla, Timms Hill, or any later checkpoint. The opening of the journey then has its own scene without implying the person has reached a place they have not. photo_credits.json currently begins at Lukla, and the hero file is not in the repository yet. Adding that file and its credit entry is curated route content for the route-aware resolver. Until the file exists, the selector returns image null rather than borrowing a checkpoint photograph.
 
 The choice is deterministic. The same route files and the same total always return the same scene. There is no per-user scene row, no viewed-at marker, and no priority column.
 
@@ -74,7 +74,7 @@ What already exists
   photo_credits.json is keyed by stop slug and already stores author, license, license_url, source_url, and alt. It is curated content, like challenges.py.
   expeditions already has accent_color, welcome_override, and image_ref.
   organizations already has logo_ref, image_ref, colors, and welcome_message.
-  Phase 4A left the storage of organization and expedition image bytes unresolved. This design does not choose it.
+  Organization and expedition image bytes stay unresolved on purpose. The nullable logo_ref and image_ref columns are enough for journey and activity work. Storage is chosen later, when organization branding and image upload or display are implemented. This design does not add an asset-management system.
 
 Required migration
 
@@ -542,7 +542,7 @@ Not required first
   Close, leave flags, and privacy removal. displayed_total_ft uses the board rules once those writes exist. Until then the composer sums the pointed journey and applies display_credits_after when the column is set.
 
 Sequence
-  1. Route-aware image resolver and the pure scene function, in route presentation: reached checkpoint, between checkpoints, below the first checkpoint, missing checkpoint file, missing hero, summit. No HTTP, no migration, and no import from activity or journey services. Image misses do not change progress, unlocks, or authorization.
+  1. Route-aware image resolver and the pure scene function, in route presentation: reached checkpoint, between checkpoints, below the first checkpoint, missing checkpoint file, route hero, summit. Include the Everest hero file and its photo_credits.json entry: a broader Everest and Khumbu photograph, not a checkpoint. No HTTP, no migration, and no import from activity or journey services. Image misses do not change progress, unlocks, or authorization.
   2. Home composer, after credit totals are readable. It calls the journey service, route reads, view_model, the scene function, participation reads, and invitations.
   3. GET /api/v1/home in the Phase 4A home phase, including the scene fields from the first version of the payload so a later visual pass does not change the contract.
   4. One method on the existing mobile API client. No screen in that phase.
@@ -560,10 +560,10 @@ Settled
   An active journey is the center whenever one exists. Paused and finished journeys on other routes stay visible as their own actions.
   With no active journey, paused journeys leave focus null. Each paused journey has its own resume_journey target. With neither active nor paused journeys, the latest finished current attempt is focus, and every finished current attempt still has start_new_attempt.
   next_actions is an array of eligible journey actions. Invitation accept and decline live once, on the invitation row. Home returns every eligible action and does not pick a winner. The client chooses prominence. Reading home performs none of them.
-  Scene selection is the reached checkpoint, then the nearest lower image, then the route hero, then null. It never uses a locked checkpoint's image.
+  Scene selection is the reached checkpoint, then the nearest lower image, then the route hero, then null. It never uses a locked checkpoint's image. Everest's hero is a broader Everest and Khumbu photograph, not Lukla or another checkpoint. The file is added with the route-aware resolver.
   The personal scene uses the full capped journey total. Expedition cards use the board total. Those numbers can differ after privacy rejoin, and the scene follows the personal total.
   No migration and no media table. Files stay curated static assets. Credits and alt text stay in photo_credits.json.
-  Organization branding and expedition image_ref are card fields. They do not own or override route imagery. Participation does not require organization membership.
+  Organization branding and expedition image_ref are card fields. They do not own or override route imagery. Participation does not require organization membership. Where those image bytes live is deferred until branding and image display are implemented. The nullable refs stay as they are.
   The home module is a composer. Journey lifecycle, route content, and expedition rules stay in their own services. Activity writes do not select images.
 
 Relationship to Phase 4A
@@ -578,13 +578,12 @@ Relationship to Phase 4A
 
 Open questions
 
-  1. Whether a route hero photograph should be produced for the Everest approach below Lukla. The contract already allows image null. The missing piece is the curated file, not a schema decision. photo_credits.json has no entry for Timms Hill, the four-thousand-foot stop, the seven-thousand-foot stop, or a route hero.
-
-  2. Where organization logo and expedition image bytes live. Unresolved in Phase 4A. Home returns the existing refs and does not interpret them. A URL field waits on that choice.
+  None. The two product choices that were open are settled above.
 
 Deferred
 
   More than one photograph per checkpoint, user photographs, a CMS, and a general asset library.
+  Where organization logo and expedition image bytes are stored. The nullable refs remain. Journey and activity services do not depend on that choice. It is made when branding and image upload or display are implemented.
   Image paths that do not match the slug convention, until a route actually needs the optional ref columns.
   Screen layout, navigation, and interaction. The payload names the place and the file. It does not describe how they are drawn.
   Caching headers on the static files themselves. The path contract is enough for the client to cache.
