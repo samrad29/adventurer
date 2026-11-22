@@ -135,6 +135,19 @@ expedition_updates
   activity_id nullable, checkpoint_name nullable, elevation_m, created_at
   Append-only for ordinary requests. The same deletion settings that release result rows allow delete. New kinds can be added later as new allowed values. No comment, post, or announcement kind is added now.
 
+expedition_privacy_removals
+  expedition_id, user_id, primary key
+  removed_at
+  Foreign key expedition_id to expeditions, ON DELETE CASCADE
+  Foreign key user_id to users, ON DELETE CASCADE
+  One row per user and expedition. It records that this person removed their participation and has not rejoined since.
+  It stores no token, display name, elevation, activity, journey, or result.
+  Written in the privacy-removal transaction after that person's participation, feed rows, and result row are deleted.
+  The next new participation for that pair consumes the row and sets display_credits_after to the insert time.
+  A repeated removal before rejoin updates removed_at on the same row.
+  After rejoin the row is gone. An ordinary leave and rejoin does not create one and does not read one.
+  Deleting the expedition or the user removes the row through the foreign keys. Owner release that deletes the expedition therefore leaves nothing behind. Account deletion does not need a separate copy of this table's contents.
+
 api_tokens
   id, user_id
   token_hash unique, SHA-256 hex of a secrets.token_urlsafe(32) value
@@ -147,7 +160,7 @@ deletion_log
   id, completed_at
   No user id, name, token, or journey id.
 
-expedition_invitations stays, including the expired status from migration 0006, the hashed share link, and the partial unique indexes for one pending username invite and one pending share link. Organization admins become allowed inviters in the service. The table does not need a second invitation system.
+expedition_invitations stays, including the expired status from migration 0006, the hashed share link, and the partial unique indexes for one pending username invite and one pending share link. Organization admins become allowed inviters in the service. The table does not need a second invitation system. A privacy removal is not an invitation and is not stored in this table.
 
 activity_credits is dropped in the progress cutover. Nothing is copied out of it.
 
@@ -363,7 +376,11 @@ For everyone else, one transaction:
   Do not delete activities, journey credits, or journeys.
   Do not insert a substitute anonymous total.
 
-Rejoin inserts a new participation because the old row is gone. Journey activation runs. display_credits_after is the insert time. The live board sums only credits created at or after that time, so the removed total does not reappear. Home and the personal journey still show the full journey. A later restart still resets active expeditions, including this new participation. retained_read_access and final_standings_eligible do not survive, because the row that held them was deleted. New credits after the rejoin count normally.
+Rejoin inserts a new participation because the old row is gone. Journey activation runs. The same transaction finds this user and expedition in expedition_privacy_removals, deletes that row, and sets display_credits_after to the participation's insert time. The live board sums only credits created at or after that time, so the removed total does not reappear. Home and the personal journey still show the full journey. A later restart still resets active expeditions, including this new participation. retained_read_access and final_standings_eligible do not survive, because the row that held them was deleted. New credits after the rejoin count normally.
+
+The privacy-removal row is kept only until that rejoin, or until the expedition or the user is deleted. It is not a log of past removals after the person has rejoined. An ordinary leave keeps the participation, so the later rejoin updates that same row, leaves display_credits_after unchanged, and does not consult expedition_privacy_removals. A second privacy removal writes the pair again. The following rejoin starts a new board clock and does not restore the previous one.
+
+If the owner-release path deletes the expedition, it does not insert a privacy-removal row. The expedition is gone, and there is no rejoin. If the expedition stays, the row is inserted after the caller's participation is deleted.
 
 5.10 Account deletion
 
@@ -375,7 +392,7 @@ Refuse when the user owns a private expedition that still has another active par
 
 When those refusals do not apply, a short transaction sets deletion_state to deleting, revokes every API token, and commits. Cookie and bearer authentication both fail from then on. That commit is the point of no return.
 
-Later transactions are idempotent deletes by user id. They may be retried by the same request and by the lazy pass that also completes due expeditions. Each batch sets adventurer.account_deletion and locks in the global order, then deletes feed rows, result rows, participations, journey credits, verification events, activities, journeys, invitations where they are the inviter or the invitee, memberships, and tokens. Share links they created are deleted, so the hash stops matching. invited_by_user_id is ON DELETE RESTRICT, so those invitation rows are removed rather than left in place.
+Later transactions are idempotent deletes by user id. They may be retried by the same request and by the lazy pass that also completes due expeditions. Each batch sets adventurer.account_deletion and locks in the global order, then deletes feed rows, result rows, participations, journey credits, verification events, activities, journeys, invitations where they are the inviter or the invitee, memberships, and tokens. expedition_privacy_removals for that user disappear when the user row is deleted, because the foreign key cascades. Share links they created are deleted, so the hash stops matching. invited_by_user_id is ON DELETE RESTRICT, so those invitation rows are removed rather than left in place.
 
 For a private expedition they still own, with no other active participant, the batch uses the owner-release path from 5.9 before the user row can go. The owner column is null, or the expedition is gone. It does not keep a foreign key to the deleted user.
 
@@ -611,7 +628,7 @@ The cutover migration is destructive on purpose, and only because there is no me
 
 Tests that describe per-expedition credit copies are rewritten in the cutover phase. They are not preserved by a compatibility layer. The current suite is expected to fail against the new progress model until those tests are replaced. A green run of today's suite is evidence of the old model only.
 
-Migrations 0001 through 0006 are not edited. The new work is the next revision files, applied in order, on the isolated test database first.
+Migrations 0001 through 0007 are not edited. Migration 0008 adds expedition_privacy_removals only. It does not copy invitations, participations, or progress into that table.
 
 
 10. Implementation phases
@@ -710,6 +727,9 @@ Authorization
 
 Privacy and deletion
   Privacy removal deletes the result row and the feed rows, keeps the journey, frees the slot, and a rejoin does not show the old total.
+  The rejoin clock comes from expedition_privacy_removals. That row is consumed by the rejoin. A second removal starts a new clock. An ordinary leave and rejoin does not.
+  Invitation lists and accepts are unchanged by a privacy removal.
+  A privacy-removal transaction that rolls back leaves the participation and writes no privacy-removal row.
   A private owner with another active member is refused.
   A sole owner with a departed finisher leaves an archived expedition, a null owner, and the finisher's result row.
   A sole owner with nobody else leaves no expedition.

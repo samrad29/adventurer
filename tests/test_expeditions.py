@@ -2,11 +2,15 @@
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
+import psycopg
 
 from adventurer.activities import create_activity, preview_activity
 from adventurer.db import DB, get_db
@@ -29,6 +33,7 @@ from adventurer.expeditions import (
     get_updates,
     join_expedition,
     leave_expedition,
+    list_expedition_invitations,
     list_organization_members,
     remove_participation_privacy,
     suspend_organization,
@@ -118,6 +123,7 @@ def _count(table: str, where: str = "TRUE", params: tuple = ()) -> int:
         "expeditions",
         "organization_memberships",
         "expedition_invitations",
+        "expedition_privacy_removals",
     }:
         raise AssertionError(table)
     row = get_db().execute(
@@ -1090,3 +1096,170 @@ def test_concurrent_organization_joins_take_one_slot(app):
             (sam_id,),
         ) == 1
         assert len([row for row in _journeys(sam_id) if row["status"] == "active"]) == 1
+
+
+def _board_total(viewer_id: int, slug: str, user_id: int) -> Decimal:
+    board = get_leaderboard(viewer_id, slug)
+    return next(row["total_m"] for row in board["entries"] if row["user_id"] == user_id)
+
+
+def test_ordinary_leave_and_rejoin_does_not_reset_the_board(app):
+    with app.app_context():
+        user_id = _user("Sam")
+        _route("kili", "1000")
+        create_private_expedition(user_id, slug="sam-kili", name="Sam Kili", route_slug="kili")
+        _log(user_id, "100")
+        leave_expedition(user_id, "sam-kili")
+        assert _count("expedition_privacy_removals", "user_id = ?", (user_id,)) == 0
+        rejoined = join_expedition(user_id, "sam-kili")
+        assert rejoined["participation"]["display_credits_after"] is None
+        assert _board_total(user_id, "sam-kili", user_id) == feet_to_meters(Decimal("100"))
+        assert _count("expedition_invitations", "TRUE") == 0
+
+
+def test_privacy_removal_rejoin_can_repeat_without_touching_invitations(app):
+    with app.app_context():
+        owner_id = _user("Owen")
+        sam_id = _user("Sam")
+        rita_id = _user("Rita")
+        _route("kili", "1000")
+        create_private_expedition(owner_id, slug="owen-kili", name="Owen Kili", route_slug="kili")
+        link = create_share_link(owner_id, "owen-kili")
+        named = create_username_invitation(owner_id, "owen-kili", "Rita")
+        accept_invitation(sam_id, token=link["token"])
+        invites_before = _count("expedition_invitations", "expedition_id = (SELECT id FROM expeditions WHERE slug = 'owen-kili')")
+        personal = Decimal("0")
+        for _cycle in range(2):
+            _log(sam_id, "100")
+            personal += feet_to_meters(Decimal("100"))
+            assert _journey_total(_participation(sam_id, "owen-kili")["journey_id"]) == personal
+            remove_participation_privacy(sam_id, "owen-kili", confirm=True)
+            assert _participation(sam_id, "owen-kili") is None
+            assert _count(
+                "expedition_privacy_removals",
+                "user_id = ? AND expedition_id = (SELECT id FROM expeditions WHERE slug = 'owen-kili')",
+                (sam_id,),
+            ) == 1
+            rejoined = accept_invitation(sam_id, token=link["token"])
+            assert rejoined["participation"]["display_credits_after"] is not None
+            assert _count("expedition_privacy_removals", "user_id = ?", (sam_id,)) == 0
+            assert _board_total(owner_id, "owen-kili", sam_id) == 0
+            assert _journey_total(rejoined["journey"]["id"]) == personal
+        cutoff = rejoined["participation"]["display_credits_after"]
+        _log(sam_id, "100")
+        leave_expedition(sam_id, "owen-kili")
+        again = accept_invitation(sam_id, token=link["token"])
+        assert again["participation"]["display_credits_after"] == cutoff
+        assert _board_total(owner_id, "owen-kili", sam_id) == feet_to_meters(Decimal("100"))
+        listed = list_expedition_invitations(owner_id, "owen-kili")
+        assert {row["id"] for row in listed} == {link["id"], named["id"]}
+        assert _count(
+            "expedition_invitations",
+            "expedition_id = (SELECT id FROM expeditions WHERE slug = 'owen-kili')",
+        ) == invites_before
+        accepted = accept_invitation(rita_id, invitation_id=named["id"])
+        assert accepted["participation"]["display_credits_after"] is None
+        assert get_db().execute(
+            "SELECT status FROM expedition_invitations WHERE id = ?",
+            (named["id"],),
+        ).fetchone()["status"] == "accepted"
+
+
+def test_a_failed_privacy_removal_leaves_no_marker(app, monkeypatch):
+    with app.app_context():
+        owner_id = _user("Owen")
+        user_id = _user("Sam")
+        _route("kili", "1000")
+        create_private_expedition(owner_id, slug="owen-kili", name="Owen Kili", route_slug="kili")
+        link = create_share_link(owner_id, "owen-kili")
+        accept_invitation(user_id, token=link["token"])
+        logged = _log(user_id, "100")
+        invites_before = _count("expedition_invitations", "TRUE")
+        original = DB.execute
+
+        def wrapped(self, sql, params=()):
+            outcome = original(self, sql, params)
+            normalized = " ".join(sql.split()).lower()
+            if "insert into expedition_privacy_removals" in normalized:
+                raise RuntimeError("privacy removal stopped")
+            return outcome
+
+        monkeypatch.setattr(DB, "execute", wrapped)
+        with pytest.raises(RuntimeError, match="privacy removal stopped"):
+            remove_participation_privacy(user_id, "owen-kili", confirm=True)
+        monkeypatch.undo()
+        assert _participation(user_id, "owen-kili")["status"] == "active"
+        assert _participation(user_id, "owen-kili")["display_credits_after"] is None
+        assert _count("expedition_privacy_removals", "user_id = ?", (user_id,)) == 0
+        assert _count("expedition_invitations", "TRUE") == invites_before
+        assert get_db().execute(
+            "SELECT status FROM expedition_invitations WHERE id = ?",
+            (link["id"],),
+        ).fetchone()["status"] == "pending"
+        assert _journey_total(logged["journey"]["id"]) == feet_to_meters(Decimal("100"))
+        assert _board_total(user_id, "owen-kili", user_id) == feet_to_meters(Decimal("100"))
+
+
+def test_privacy_removal_migration_upgrades_and_downgrades():
+    url = "postgresql://postgres:postgres@127.0.0.1:54329/adventurer_migration_test"
+    root = os.path.dirname(os.path.dirname(__file__))
+
+    def alembic(*args: str) -> None:
+        env = os.environ.copy()
+        env.pop("DATABASE_URL", None)
+        env["TEST_DATABASE_URL"] = url
+        result = subprocess.run(
+            [sys.executable, "-m", "alembic", *args],
+            cwd=root,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        if result.returncode != 0:
+            raise AssertionError(
+                f"alembic {' '.join(args)} failed\n{result.stdout}\n{result.stderr}"
+            )
+
+    def relation() -> str | None:
+        with psycopg.connect(url, connect_timeout=3) as conn:
+            row = conn.execute(
+                "SELECT to_regclass('adventurer.expedition_privacy_removals') AS name"
+            ).fetchone()
+            return row[0]
+
+    try:
+        alembic("upgrade", "head")
+        with psycopg.connect(url, connect_timeout=3) as conn:
+            columns = {
+                row[0]
+                for row in conn.execute(
+                    """
+                    SELECT column_name
+                    FROM information_schema.columns
+                    WHERE table_schema = 'adventurer'
+                      AND table_name = 'expedition_privacy_removals'
+                    """
+                ).fetchall()
+            }
+            constraints = {
+                row[0]: row[1]
+                for row in conn.execute(
+                    """
+                    SELECT conname, pg_get_constraintdef(oid)
+                    FROM pg_constraint
+                    WHERE conrelid = 'adventurer.expedition_privacy_removals'::regclass
+                    """
+                ).fetchall()
+            }
+        assert columns == {"expedition_id", "user_id", "removed_at"}
+        assert "PRIMARY KEY (expedition_id, user_id)" in constraints[
+            "expedition_privacy_removals_pkey"
+        ]
+        assert "ON DELETE CASCADE" in constraints["expedition_privacy_removals_expedition_id_fkey"]
+        assert "ON DELETE CASCADE" in constraints["expedition_privacy_removals_user_id_fkey"]
+        alembic("downgrade", "0007_domain_foundation")
+        assert relation() is None
+    finally:
+        alembic("upgrade", "head")
+        assert relation() is not None

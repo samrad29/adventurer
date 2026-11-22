@@ -346,7 +346,7 @@ def accept_invitation(
         preview = _peek_invitation(database, located, user_id)
         expedition = _lock_target_route(database, preview["expedition_id"])
         invitation = _lock_invitation_row(database, preview["id"])
-        if invitation["invited_user_id"] not in (None, user_id) or _is_privacy_marker(invitation):
+        if invitation["invited_user_id"] not in (None, user_id):
             raise ExpeditionError("not_found", "That invitation does not exist.", status=404)
         if invitation["status"] != "pending":
             raise ExpeditionError("invalid_state", "That invitation is no longer pending.", status=409)
@@ -421,7 +421,7 @@ def revoke_invitation(user_id: int, invitation_id: int) -> dict:
             """,
             (invitation_id,),
         ).fetchone()
-        if preview is None or _is_privacy_marker(preview):
+        if preview is None:
             raise ExpeditionError("not_found", "That invitation does not exist.", status=404)
         expedition = _lock_expedition(database, preview["expedition_id"])
         invitation = _lock_invitation_row(database, preview["id"])
@@ -457,11 +457,7 @@ def list_received_invitations(user_id: int) -> list[dict]:
             """,
             (user_id,),
         ).fetchall()
-        return [
-            _invitation_body(database, row, token=None)
-            for row in rows
-            if not _is_privacy_marker(row)
-        ]
+        return [_invitation_body(database, row, token=None) for row in rows]
     finally:
         database.rollback()
 
@@ -486,11 +482,7 @@ def list_expedition_invitations(user_id: int, slug: str) -> list[dict]:
             """,
             (expedition["id"],),
         ).fetchall()
-        return [
-            _invitation_body(database, row, token=None)
-            for row in rows
-            if not _is_privacy_marker(row)
-        ]
+        return [_invitation_body(database, row, token=None) for row in rows]
     except ExpeditionError:
         database.rollback()
         raise
@@ -1604,9 +1596,8 @@ def _save_participation(database, user_id: int, expedition, journey_id: int) -> 
             (journey_id, expedition["route_id"], existing["id"]),
         )
         return _participation(database, existing["id"])
-    # The deleted participation cannot mark itself. An expired invitation with
-    # a deterministic hash is the durable signal that this insert is a rejoin
-    # after privacy removal, which is when the board clock starts.
+    # A deleted participation cannot mark itself. The privacy-removal row is
+    # the signal that this insert is a rejoin, which is when the board clock starts.
     after_privacy = _consume_privacy(database, expedition["id"], user_id)
     row = database.execute(
         """
@@ -1637,40 +1628,27 @@ def _activate(database, user_id: int, route_id: int, confirm_new_attempt: bool) 
 
 
 def _remember_privacy(database, expedition_id: int, user_id: int) -> None:
-    digest = _privacy_token_hash(expedition_id, user_id)
     database.execute(
         """
-        INSERT INTO expedition_invitations (
-            expedition_id, invited_by_user_id, invited_user_id,
-            token_hash, status, expires_at
-        )
-        VALUES (?, ?, ?, ?, 'expired', now())
-        ON CONFLICT (token_hash) DO NOTHING
+        INSERT INTO expedition_privacy_removals (expedition_id, user_id)
+        VALUES (?, ?)
+        ON CONFLICT (expedition_id, user_id)
+        DO UPDATE SET removed_at = now()
         """,
-        (expedition_id, user_id, user_id, digest),
+        (expedition_id, user_id),
     )
 
 
 def _consume_privacy(database, expedition_id: int, user_id: int) -> bool:
     row = database.execute(
         """
-        DELETE FROM expedition_invitations
-        WHERE token_hash = ? AND status = 'expired'
-        RETURNING id
+        DELETE FROM expedition_privacy_removals
+        WHERE expedition_id = ? AND user_id = ?
+        RETURNING expedition_id
         """,
-        (_privacy_token_hash(expedition_id, user_id),),
+        (expedition_id, user_id),
     ).fetchone()
     return row is not None
-
-
-def _privacy_token_hash(expedition_id: int, user_id: int) -> str:
-    return hashlib.sha256(f"privacy-removal\n{expedition_id}\n{user_id}".encode()).hexdigest()
-
-
-def _is_privacy_marker(row) -> bool:
-    if row["invited_user_id"] is None or row["invited_by_user_id"] != row["invited_user_id"]:
-        return False
-    return row["token_hash"] == _privacy_token_hash(row["expedition_id"], row["invited_user_id"])
 
 
 def _set_privacy(database, user_id: int) -> None:
@@ -1719,7 +1697,7 @@ def _locate_invitation(invitation_id, token):
 
 def _peek_invitation(database, located, user_id: int):
     row = _select_invitation(database, located, lock=False)
-    if row is None or _is_privacy_marker(row):
+    if row is None:
         raise ExpeditionError("not_found", "That invitation does not exist.", status=404)
     if row["invited_user_id"] is not None and row["invited_user_id"] != user_id:
         raise ExpeditionError("not_found", "That invitation does not exist.", status=404)
