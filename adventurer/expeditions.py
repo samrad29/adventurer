@@ -965,6 +965,35 @@ def get_updates(user_id: int, slug: str) -> list[dict]:
         database.rollback()
 
 
+def list_organizations(user_id: int) -> list[dict]:
+    database = get_db()
+    try:
+        _require_account(database, user_id)
+        rows = database.execute(
+            """
+            SELECT organization.id, organization.slug, organization.name,
+                   organization.description, organization.status,
+                   organization.logo_ref, organization.image_ref,
+                   organization.colors, organization.welcome_message,
+                   membership.role
+            FROM organizations AS organization
+            JOIN organization_memberships AS membership
+              ON membership.organization_id = organization.id
+             AND membership.user_id = ?
+             AND membership.status = 'active'
+            WHERE organization.status IN ('active', 'suspended')
+            ORDER BY organization.slug
+            """,
+            (user_id,),
+        ).fetchall()
+        return [dict(row) for row in rows]
+    except ExpeditionError:
+        database.rollback()
+        raise
+    finally:
+        database.rollback()
+
+
 def get_organization(user_id: int, slug: str) -> dict:
     database = get_db()
     try:
