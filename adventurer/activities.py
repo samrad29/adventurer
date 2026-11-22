@@ -201,7 +201,12 @@ def update_activity(
 
     def write(database):
         _require_user(database, user_id, lock=True)
-        loaded = _lock_owned(database, user_id, activity_id)
+        loaded = _lock_owned(
+            database,
+            user_id,
+            activity_id,
+            lock_feed="elevation_m" in changes,
+        )
         credit = loaded["credit"]
         journey = loaded["journey"]
         elevation_changed = (
@@ -248,6 +253,14 @@ def update_activity(
                     journey["id"],
                     credit_changed=proposal["credit_changed"],
                     complete=proposal["will_complete"],
+                )
+            if proposal is not None and proposal["will_complete"]:
+                _write_summit_updates(
+                    database,
+                    user_id,
+                    activity_id,
+                    journey,
+                    proposal["resulting_total_m"],
                 )
         credited, journey_id = _credit_link(database, activity_id)
         return _saved(database, activity_id, credited, journey_id), True
@@ -525,11 +538,13 @@ def _describe_journey(database, locked: dict) -> dict:
     }
 
 
-def _lock_owned(database, user_id: int, activity_id: int) -> dict:
+def _lock_owned(database, user_id: int, activity_id: int, *, lock_feed: bool = False) -> dict:
     """Lock the user, then its journey, then the activity. Re-read after the locks.
 
     The caller has already locked the user. A non-locking read discovers the
-    journey so the activity row is not locked before that journey.
+    journey so the activity row is not locked before that journey. An elevation
+    edit also locks the expeditions and participations that could receive a
+    summit update, and it locks those before the journey.
     """
     owner = database.execute(
         "SELECT id, user_id FROM activities WHERE id = ?",
@@ -544,7 +559,30 @@ def _lock_owned(database, user_id: int, activity_id: int) -> dict:
             status=403,
         )
     hinted = _credit_journey_id(database, activity_id)
-    if hinted is not None:
+    participations: list[dict] = []
+    if hinted is not None and lock_feed:
+        route = database.execute(
+            "SELECT route_id FROM route_journeys WHERE id = ?",
+            (hinted,),
+        ).fetchone()
+        if route is None:
+            raise ActivityError(
+                "conflict",
+                "The activity changed during this update. Try again.",
+                status=409,
+            )
+        expedition_ids = _lock_expeditions(database, user_id, hinted, route["route_id"])
+        database.execute(
+            """
+            SELECT id
+            FROM route_journeys
+            WHERE id = ?
+            FOR UPDATE
+            """,
+            (hinted,),
+        )
+        participations = _lock_participations(database, user_id, hinted, expedition_ids)
+    elif hinted is not None:
         database.execute(
             """
             SELECT id
@@ -566,6 +604,8 @@ def _lock_owned(database, user_id: int, activity_id: int) -> dict:
             "The activity changed during this update. Try again.",
             status=409,
         )
+    if loaded["journey"] is not None:
+        loaded["journey"]["participations"] = participations
     return loaded
 
 
@@ -926,6 +966,29 @@ def _write_feed(database, user_id: int, activity_id: int, journey: dict, proposa
                 None,
                 resulting,
             )
+
+
+def _write_summit_updates(
+    database,
+    user_id: int,
+    activity_id: int,
+    journey: dict,
+    resulting_total_m: Decimal,
+) -> None:
+    """Summit rows for an elevation edit that completes the active journey.
+
+    Edits do not log the activity again and do not announce checkpoints.
+    """
+    for participation in journey.get("participations") or []:
+        _feed_row(
+            database,
+            participation,
+            user_id,
+            "summit_reached",
+            activity_id,
+            None,
+            resulting_total_m,
+        )
 
 
 def _feed_row(
@@ -1313,11 +1376,22 @@ def _timestamp(value, label: str) -> datetime | None:
     raise ActivityError("invalid", f"Use a real {label}.", status=400)
 
 
+def _is_aware(value: datetime) -> bool:
+    tzinfo = value.tzinfo
+    return tzinfo is not None and tzinfo.utcoffset(value) is not None
+
+
 def _check_times(started, ended) -> None:
     if (started is None) != (ended is None):
         raise ActivityError(
             "invalid",
             "Start and end times have to be set together.",
+            status=400,
+        )
+    if started is not None and _is_aware(started) != _is_aware(ended):
+        raise ActivityError(
+            "invalid",
+            "Start and end times have to be both timezone-aware or both timezone-naive.",
             status=400,
         )
     if started is not None and ended < started:

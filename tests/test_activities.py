@@ -780,7 +780,132 @@ def test_raising_elevation_stops_at_the_remaining_journey_capacity(app):
         assert saved["credited_elevation_m"] == _ft("300")
         assert saved["journey"]["status"] == "completed"
         assert saved["journey"]["total_m"] == _ft("1000")
-        assert len(_updates(user_id)) == feed_count
+        rows = _updates(user_id)
+        assert len(rows) == feed_count + 1
+        summit = rows[-1]
+        assert summit["kind"] == "summit_reached"
+        assert summit["checkpoint_name"] is None
+        assert Decimal(summit["elevation_m"]) == _ft("1000")
+        assert summit["activity_id"] == second["activity"]["id"]
+        assert summit["expedition_id"] == expedition_id
+        assert [row["kind"] for row in rows[:-1]] == ["activity_logged", "activity_logged"]
+
+
+def test_mixed_timezone_times_are_rejected_on_create_and_update(app):
+    with app.app_context():
+        user_id = _user("Sam")
+        naive_start = datetime(2024, 6, 1, 12, 0)
+        naive_end = datetime(2024, 6, 1, 13, 0)
+        aware_start = datetime(2024, 6, 1, 12, 0, tzinfo=timezone.utc)
+        aware_end = datetime(2024, 6, 1, 13, 0, tzinfo=timezone.utc)
+        for started, ended in (
+            (aware_start, naive_end),
+            (naive_start, aware_end),
+        ):
+            with pytest.raises(ActivityError) as caught:
+                create_activity(
+                    user_id,
+                    _fields("10", started_at=started, ended_at=ended),
+                )
+            assert caught.value.code == "invalid"
+            assert caught.value.status == 400
+            assert "timezone" in str(caught.value)
+            assert _count("activities") == 0
+        saved = create_activity(
+            user_id,
+            _fields("10", started_at=aware_start, ended_at=aware_end),
+        )
+        assert saved["activity"]["started_at"] == aware_start
+        assert saved["activity"]["ended_at"] == aware_end
+        for fields in (
+            {"started_at": naive_start},
+            {"ended_at": naive_end},
+            {"started_at": aware_start, "ended_at": naive_end},
+        ):
+            with pytest.raises(ActivityError) as caught:
+                update_activity(user_id, saved["activity"]["id"], fields)
+            assert caught.value.code == "invalid"
+            assert caught.value.status == 400
+            assert "timezone" in str(caught.value)
+            current = get_activity(user_id, saved["activity"]["id"])
+            assert current["started_at"] == aware_start
+            assert current["ended_at"] == aware_end
+        updated = update_activity(
+            user_id,
+            saved["activity"]["id"],
+            {
+                "started_at": datetime(2024, 6, 1, 14, 0, tzinfo=timezone.utc),
+                "ended_at": datetime(2024, 6, 1, 15, 0, tzinfo=timezone.utc),
+            },
+        )
+        assert updated["activity"]["started_at"] == datetime(2024, 6, 1, 14, 0, tzinfo=timezone.utc)
+        assert updated["activity"]["ended_at"] == datetime(2024, 6, 1, 15, 0, tzinfo=timezone.utc)
+
+
+def test_a_completing_elevation_edit_writes_summit_updates_only(app):
+    with app.app_context():
+        user_id = _user("Sam")
+        ridge = _route("ridge", "1000")
+        kili = _route("kili", "2000")
+        _checkpoint(ridge, "camp", "Camp", 1, "600")
+        journey = start_journey(user_id, ridge)
+        live = _private_expedition("live", ridge, user_id)
+        also_live = _private_expedition("also-live", ridge, user_id)
+        left = _private_expedition("left", ridge, user_id)
+        closed = _private_expedition("closed", ridge, user_id, status="archived")
+        finished = _completed_expedition("finished", ridge)
+        _participation(user_id, live, ridge, journey["id"])
+        _participation(user_id, also_live, ridge, journey["id"])
+        _participation(user_id, left, ridge, journey["id"], status="withdrawn")
+        _participation(user_id, closed, ridge, journey["id"])
+        _participation(user_id, finished, ridge, journey["id"])
+        saved = create_activity(user_id, _fields("400"))
+        before = _updates(user_id)
+        assert [row["kind"] for row in before] == ["activity_logged", "activity_logged"]
+        assert {row["expedition_id"] for row in before} == {live, also_live}
+        with pytest.raises(ActivityError) as caught:
+            update_activity(user_id, saved["activity"]["id"], {"elevation_ft": "1000"})
+        assert caught.value.code == "confirmation_required"
+        assert _updates(user_id) == before
+        ordinary = update_activity(user_id, saved["activity"]["id"], {"elevation_ft": "450"})
+        assert ordinary["journey"]["status"] == "active"
+        assert ordinary["credited_elevation_m"] == _ft("450")
+        assert _updates(user_id) == before
+        switch_journey(user_id, kili)
+        with pytest.raises(ActivityError) as caught:
+            update_activity(user_id, saved["activity"]["id"], {"elevation_ft": "1000"})
+        assert caught.value.code == "resume_required"
+        assert _updates(user_id) == before
+        switch_journey(user_id, ridge)
+        preview = preview_activity_update(
+            user_id,
+            saved["activity"]["id"],
+            {"elevation_ft": "1000"},
+        )
+        completed = update_activity(
+            user_id,
+            saved["activity"]["id"],
+            {"elevation_ft": "1000"},
+            confirmation_token=preview["confirmation_token"],
+        )
+        assert completed["journey"]["status"] == "completed"
+        assert completed["journey"]["total_m"] == _ft("1000")
+        rows = _updates(user_id)
+        added = rows[len(before):]
+        assert [(row["kind"], row["expedition_id"], Decimal(row["elevation_m"])) for row in added] == [
+            ("summit_reached", live, _ft("1000")),
+            ("summit_reached", also_live, _ft("1000")),
+        ]
+        assert all(row["activity_id"] == saved["activity"]["id"] for row in added)
+        assert all(row["checkpoint_name"] is None for row in added)
+        assert [row["kind"] for row in rows if row["kind"] != "summit_reached"] == [
+            "activity_logged",
+            "activity_logged",
+        ]
+        extra = create_activity(user_id, _fields("20", happened_on=date(2024, 6, 2)))
+        assert extra["credited_elevation_m"] is None
+        delete_activity(user_id, extra["activity"]["id"])
+        assert _updates(user_id) == rows
 
 
 def test_editing_an_uncredited_activity_does_not_create_a_credit(app):
