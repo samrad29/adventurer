@@ -51,11 +51,20 @@ def _prepare_database() -> None:
     ready = False
     try:
         with psycopg.connect(TEST_URL, connect_timeout=3) as conn:
+            constraint = conn.execute(
+                """
+                SELECT pg_get_constraintdef(oid)
+                FROM pg_constraint
+                WHERE conname = 'expedition_invitations_status_chk'
+                """
+            ).fetchone()
             ready = (
                 conn.execute("SELECT to_regclass('adventurer.users') AS name").fetchone()[0]
                 is not None
                 and conn.execute("SELECT to_regclass('adventurer.routes') AS name").fetchone()[0]
                 is not None
+                and constraint is not None
+                and "expired" in constraint[0]
             )
     except psycopg.Error:
         ready = False

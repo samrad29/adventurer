@@ -26,11 +26,15 @@ def can_manage(expedition: dict, user_id: int | None) -> bool:
     return is_owner(expedition, user_id)
 
 
+def route_is_published(expedition: dict) -> bool:
+    return expedition.get("route_status") == "published"
+
+
 def can_join(expedition: dict) -> bool:
     return (
         expedition["visibility"] == "public"
         and expedition["status"] == "active"
-        and expedition["route_status"] == "published"
+        and route_is_published(expedition)
     )
 
 
@@ -39,7 +43,7 @@ def can_owner_rejoin(expedition: dict, user_id: int | None) -> bool:
     return (
         is_owner(expedition, user_id)
         and expedition["status"] == "active"
-        and expedition["route_status"] == "published"
+        and route_is_published(expedition)
     )
 
 
@@ -50,7 +54,7 @@ def can_add_credit(
 ) -> bool:
     if participation_status != "active" or expedition["status"] != "active":
         return False
-    if expedition["route_status"] != "published":
+    if not route_is_published(expedition):
         return False
     moment = moment or datetime.now(timezone.utc)
     starts = expedition.get("starts_at")

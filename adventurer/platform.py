@@ -16,6 +16,7 @@ from .access import (
     can_owner_rejoin,
     can_read,
     is_owner,
+    route_is_published,
 )
 from .challenges import get_challenge
 from .db import get_db, is_unique_violation
@@ -383,7 +384,9 @@ def create_username_invitation(user_id: int, slug: str, username: str) -> dict:
         raise PlatformError("No account uses that name.", 404)
     if invited["id"] == user_id:
         raise PlatformError("You already belong to this expedition.", 400)
-    existing = get_db().execute(
+    database = get_db()
+    _expire_pending(database, expedition["id"])
+    existing = database.execute(
         """
         SELECT id, status, expires_at
         FROM expedition_invitations
@@ -392,11 +395,12 @@ def create_username_invitation(user_id: int, slug: str, username: str) -> dict:
         (expedition["id"], invited["id"]),
     ).fetchone()
     if existing is not None:
+        database.commit()
         return _invitation_public(existing, invited["username"], link=False)
     _raw, digest = _new_token()
     expires = datetime.now(timezone.utc) + timedelta(days=INVITE_DAYS)
     try:
-        created = get_db().execute(
+        created = database.execute(
             """
             INSERT INTO expedition_invitations (
                 expedition_id, invited_by_user_id, invited_user_id,
@@ -407,9 +411,9 @@ def create_username_invitation(user_id: int, slug: str, username: str) -> dict:
             """,
             (expedition["id"], user_id, invited["id"], digest, expires),
         ).fetchone()
-        get_db().commit()
+        database.commit()
     except Exception as exc:
-        get_db().rollback()
+        database.rollback()
         if not is_unique_violation(exc):
             raise
         existing = get_db().execute(
@@ -428,7 +432,9 @@ def create_share_link(user_id: int, slug: str) -> dict:
     expedition = _managed(slug, user_id)
     if expedition["status"] != "active":
         raise PlatformError("This expedition is archived.", 400)
-    existing = get_db().execute(
+    database = get_db()
+    _expire_pending(database, expedition["id"])
+    existing = database.execute(
         """
         SELECT id FROM expedition_invitations
         WHERE expedition_id = ? AND invited_user_id IS NULL AND status = 'pending'
@@ -436,11 +442,12 @@ def create_share_link(user_id: int, slug: str) -> dict:
         (expedition["id"],),
     ).fetchone()
     if existing is not None:
+        database.commit()
         raise PlatformError("Revoke the current link before creating another.", 409)
     raw, digest = _new_token()
     expires = datetime.now(timezone.utc) + timedelta(days=INVITE_DAYS)
     try:
-        created = get_db().execute(
+        created = database.execute(
             """
             INSERT INTO expedition_invitations (
                 expedition_id, invited_by_user_id, invited_user_id,
@@ -451,9 +458,9 @@ def create_share_link(user_id: int, slug: str) -> dict:
             """,
             (expedition["id"], user_id, digest, expires),
         ).fetchone()
-        get_db().commit()
+        database.commit()
     except Exception as exc:
-        get_db().rollback()
+        database.rollback()
         if is_unique_violation(exc):
             raise PlatformError("Revoke the current link before creating another.", 409) from exc
         raise
@@ -467,7 +474,10 @@ def create_share_link(user_id: int, slug: str) -> dict:
 
 def list_invitations(user_id: int, slug: str) -> list[dict]:
     expedition = _managed(slug, user_id)
-    rows = get_db().execute(
+    database = get_db()
+    _expire_pending(database, expedition["id"])
+    database.commit()
+    rows = database.execute(
         """
         SELECT invitation.id, invitation.status, invitation.expires_at,
                invitation.invited_user_id, account.username
@@ -514,54 +524,32 @@ def preview_invitation(raw_token: str) -> dict | None:
 
 def accept_token(user_id: int, raw_token: str) -> str:
     row = _pending_token(raw_token)
-    if row is None:
+    if row is None or (row["invited_user_id"] is not None and row["invited_user_id"] != user_id):
         raise PlatformError("This invitation is not available.", 404)
-    if row["invited_user_id"] is not None and row["invited_user_id"] != user_id:
-        raise PlatformError("This invitation is not available.", 404)
-    if row["status_expedition"] != "active":
-        raise PlatformError("This invitation is not available.", 404)
-    _activate_participation(user_id, row["expedition_id"])
-    if row["invited_user_id"] is not None:
-        get_db().execute(
-            """
-            UPDATE expedition_invitations
-            SET status = 'accepted'
-            WHERE id = ? AND status = 'pending'
-            """,
-            (row["id"],),
-        )
-        get_db().commit()
-    return row["slug"]
+    return _accept_invitation(user_id, row)
 
 
 def accept_username_invitation(user_id: int, invitation_id: int) -> str:
-    row = get_db().execute(
+    database = get_db()
+    row = database.execute(
         """
-        SELECT invitation.id, invitation.expires_at, expedition.id AS expedition_id,
-               expedition.slug, expedition.status AS status_expedition
+        SELECT invitation.id, invitation.invited_user_id, invitation.expires_at,
+               expedition.id AS expedition_id, expedition.slug,
+               expedition.status AS status_expedition, route.status AS route_status
         FROM expedition_invitations AS invitation
         JOIN expeditions AS expedition ON expedition.id = invitation.expedition_id
+        JOIN routes AS route ON route.id = expedition.route_id
         WHERE invitation.id = ?
           AND invitation.invited_user_id = ?
           AND invitation.status = 'pending'
         """,
         (invitation_id, user_id),
     ).fetchone()
-    if row is None or row["expires_at"] <= datetime.now(timezone.utc):
+    if row is None:
         raise PlatformError("This invitation is not available.", 404)
-    if row["status_expedition"] != "active":
+    if _mark_expired(database, row["id"]):
         raise PlatformError("This invitation is not available.", 404)
-    _activate_participation(user_id, row["expedition_id"])
-    get_db().execute(
-        """
-        UPDATE expedition_invitations
-        SET status = 'accepted'
-        WHERE id = ? AND status = 'pending'
-        """,
-        (row["id"],),
-    )
-    get_db().commit()
-    return row["slug"]
+    return _accept_invitation(user_id, row)
 
 
 def decline_token(user_id: int, raw_token: str) -> None:
@@ -595,7 +583,10 @@ def decline_username_invitation(user_id: int, invitation_id: int) -> None:
 
 
 def incoming_invitations(user_id: int) -> list[dict]:
-    rows = get_db().execute(
+    database = get_db()
+    _expire_pending(database)
+    database.commit()
+    rows = database.execute(
         """
         SELECT invitation.id, expedition.name AS expedition_name,
                route.name AS route_name, invitation.expires_at
@@ -631,6 +622,9 @@ def list_activities(user_id: int) -> list[dict]:
                        json_build_object(
                            'expedition_slug', expedition.slug,
                            'expedition_name', expedition.name,
+                           'visibility', expedition.visibility,
+                           'owner_user_id', expedition.owner_user_id,
+                           'participation_status', participation.status,
                            'credited_elevation_m', credit.credited_elevation_m::text
                        )
                        ORDER BY expedition.slug
@@ -652,7 +646,7 @@ def list_activities(user_id: int) -> list[dict]:
         """,
         (user_id,),
     ).fetchall()
-    return [_activity_public(row) for row in rows]
+    return [_activity_public(row, user_id) for row in rows]
 
 
 def activity_for_user(user_id: int, activity_id: int) -> dict:
@@ -880,7 +874,7 @@ def _participation(user_id: int, expedition_id: int):
     ).fetchone()
 
 
-def _activate_participation(user_id: int, expedition_id: int) -> None:
+def _activate_participation(user_id: int, expedition_id: int, *, commit: bool = True) -> None:
     database = get_db()
     existing = _participation(user_id, expedition_id)
     if existing is None:
@@ -900,7 +894,8 @@ def _activate_participation(user_id: int, expedition_id: int) -> None:
             """,
             (existing["id"], user_id),
         )
-    database.commit()
+    if commit:
+        database.commit()
 
 
 def _credit_target(user_id: int, slug: str):
@@ -958,24 +953,89 @@ def _active_member_id(expedition_id: int, username: str) -> int:
     return row["id"]
 
 
+def _expire_pending(database, expedition_id: int | None = None) -> None:
+    if expedition_id is None:
+        database.execute(
+            """
+            UPDATE expedition_invitations
+            SET status = 'expired'
+            WHERE status = 'pending' AND expires_at <= now()
+            """
+        )
+        return
+    database.execute(
+        """
+        UPDATE expedition_invitations
+        SET status = 'expired'
+        WHERE expedition_id = ? AND status = 'pending' AND expires_at <= now()
+        """,
+        (expedition_id,),
+    )
+
+
+def _mark_expired(database, invitation_id: int) -> bool:
+    expired = database.execute(
+        """
+        UPDATE expedition_invitations
+        SET status = 'expired'
+        WHERE id = ? AND status = 'pending' AND expires_at <= now()
+        RETURNING id
+        """,
+        (invitation_id,),
+    ).fetchone()
+    if expired is None:
+        return False
+    database.commit()
+    return True
+
+
+def _accept_invitation(user_id: int, row) -> str:
+    if row["status_expedition"] != "active" or not route_is_published(row):
+        raise PlatformError("This invitation is not available.", 404)
+    database = get_db()
+    try:
+        _activate_participation(user_id, row["expedition_id"], commit=False)
+        if row["invited_user_id"] is not None:
+            updated = database.execute(
+                """
+                UPDATE expedition_invitations
+                SET status = 'accepted'
+                WHERE id = ? AND status = 'pending'
+                RETURNING id
+                """,
+                (row["id"],),
+            ).fetchone()
+            if updated is None:
+                raise PlatformError("This invitation is not available.", 404)
+        database.commit()
+    except Exception:
+        database.rollback()
+        raise
+    return row["slug"]
+
+
 def _pending_token(raw_token: str):
     if not raw_token:
         return None
     digest = hashlib.sha256(raw_token.encode("utf-8")).hexdigest()
-    return get_db().execute(
+    database = get_db()
+    row = database.execute(
         """
         SELECT invitation.id, invitation.invited_user_id, invitation.expires_at,
                invitation.expedition_id, expedition.slug, expedition.name,
-               expedition.status AS status_expedition, route.name AS route_name
+               expedition.status AS status_expedition,
+               route.name AS route_name, route.status AS route_status
         FROM expedition_invitations AS invitation
         JOIN expeditions AS expedition ON expedition.id = invitation.expedition_id
         JOIN routes AS route ON route.id = expedition.route_id
         WHERE invitation.token_hash = ?
           AND invitation.status = 'pending'
-          AND invitation.expires_at > now()
         """,
         (digest,),
     ).fetchone()
+    if row is None or _mark_expired(database, row["id"]):
+        return None
+    return row
 
 
 def _checkpoint_rows(route_id: int):
@@ -1026,10 +1086,29 @@ def _route_summary(row) -> dict:
     }
 
 
-def _activity_public(row) -> dict:
+def _visible_credit(item: dict, user_id: int) -> dict | None:
+    expedition = {
+        "visibility": item["visibility"],
+        "owner_user_id": item["owner_user_id"],
+    }
+    if not can_read(expedition, user_id, item["participation_status"]):
+        return None
+    return {
+        "expedition_slug": item["expedition_slug"],
+        "expedition_name": item["expedition_name"],
+        "elevation_ft": feet_number(item["credited_elevation_m"]),
+    }
+
+
+def _activity_public(row, user_id: int) -> dict:
     credits = row["credits"] or []
     if isinstance(credits, str):
         credits = json.loads(credits)
+    visible = []
+    for item in credits:
+        credit = _visible_credit(item, user_id)
+        if credit is not None:
+            visible.append(credit)
     return {
         "id": row["id"],
         "activity_date": _date_text(row["activity_date"]),
@@ -1041,14 +1120,7 @@ def _activity_public(row) -> dict:
         "source": row["source"],
         "activity_type": row["activity_type"],
         "verification_status": row["verification_status"],
-        "credits": [
-            {
-                "expedition_slug": item["expedition_slug"],
-                "expedition_name": item["expedition_name"],
-                "elevation_ft": feet_number(item["credited_elevation_m"]),
-            }
-            for item in credits
-        ],
+        "credits": visible,
     }
 
 

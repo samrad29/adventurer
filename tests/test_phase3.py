@@ -7,6 +7,8 @@ import re
 from datetime import date
 from decimal import Decimal
 
+import pytest
+
 from adventurer.db import DB, get_db
 from adventurer.measures import feet_to_meters
 from adventurer.services import create_adventurer
@@ -760,3 +762,280 @@ def test_withdrawn_private_member_must_be_invited_again(app):
     assert after["id"] == before
     assert after["status"] == "active"
     assert after["credited_elevation_m"] == feet_to_meters(Decimal("250"))
+
+
+def test_activity_library_hides_private_expeditions_the_viewer_cannot_read(app):
+    owner, member, slug = _private_pair(app)
+    assert _api(
+        member,
+        "POST",
+        "/api/v1/activities",
+        {
+            "elevation_ft": 40,
+            "note": "library day",
+            "happened_on": "2026-11-04",
+            "expedition_slug": "everest",
+        },
+    ).status_code == 201
+    with app.app_context():
+        activity_id = get_db().execute(
+            "SELECT id FROM activities WHERE note = 'library day'"
+        ).fetchone()["id"]
+    assert _api(
+        member,
+        "POST",
+        f"/api/v1/activities/{activity_id}/credits",
+        {"expedition_slug": slug},
+    ).status_code == 200
+    visible = _api(member, "GET", "/api/v1/activities").get_json()
+    credited = {item["expedition_slug"] for item in visible["activities"][0]["credits"]}
+    assert credited == {"everest", slug}
+    assert "Rank Camp" in str(visible)
+    assert _api(
+        owner,
+        "POST",
+        "/api/v1/activities",
+        {
+            "elevation_ft": 55,
+            "note": "owner library",
+            "happened_on": "2026-11-04",
+            "expedition_slug": slug,
+        },
+    ).status_code == 201
+    assert _api(owner, "DELETE", f"/api/v1/expeditions/{slug}/participation").status_code == 200
+    owner_library = str(_api(owner, "GET", "/api/v1/activities").get_json())
+    assert "Rank Camp" in owner_library
+    assert slug in owner_library
+    assert _api(member, "DELETE", f"/api/v1/expeditions/{slug}/participation").status_code == 200
+    hidden = _api(member, "GET", "/api/v1/activities").get_json()
+    blob = str(hidden)
+    assert "Rank Camp" not in blob
+    assert slug not in blob
+    assert hidden["activities"][0]["note"] == "library day"
+    assert [item["expedition_slug"] for item in hidden["activities"][0]["credits"]] == ["everest"]
+    with app.app_context():
+        stored = get_db().execute(
+            """
+            SELECT expedition.slug
+            FROM activity_credits AS credit
+            JOIN expedition_participations AS participation
+                ON participation.id = credit.participation_id
+            JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
+            JOIN activities AS activity ON activity.id = credit.activity_id
+            WHERE activity.note = 'library day'
+            ORDER BY expedition.slug
+            """
+        ).fetchall()
+    assert [row["slug"] for row in stored] == sorted(["everest", slug])
+
+
+def test_expired_invitations_can_be_replaced_without_losing_history(app):
+    owner, _member, slug = _private_pair(app)
+    rae = app.test_client()
+    _join(rae, "Rae")
+    first = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"username": "Rae"})
+    assert first.status_code == 201
+    first_id = first.get_json()["id"]
+    with app.app_context():
+        get_db().execute(
+            """
+            UPDATE expedition_invitations
+            SET expires_at = now() - interval '1 minute'
+            WHERE id = ?
+            """,
+            (first_id,),
+        )
+        get_db().commit()
+    listed = _api(owner, "GET", f"/api/v1/expeditions/{slug}/invitations").get_json()
+    assert first_id not in [row["id"] for row in listed["invitations"]]
+    with app.app_context():
+        assert get_db().execute(
+            "SELECT status FROM expedition_invitations WHERE id = ?",
+            (first_id,),
+        ).fetchone()["status"] == "expired"
+    second = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"username": "Rae"})
+    assert second.status_code == 201
+    second_id = second.get_json()["id"]
+    assert second_id != first_id
+    repeat = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"username": "Rae"})
+    assert repeat.get_json()["id"] == second_id
+    declined = rae.post(
+        f"/invitations/{second_id}/decline",
+        data={"csrf": _csrf(rae, "/activities")},
+    )
+    assert declined.status_code in (302, 200)
+    replacement = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"username": "Rae"})
+    assert replacement.status_code == 201
+    replacement_id = replacement.get_json()["id"]
+    accepted = rae.post(
+        f"/invitations/{replacement_id}/accept",
+        data={"csrf": _csrf(rae, "/activities")},
+        follow_redirects=True,
+    )
+    assert accepted.status_code == 200
+    with app.app_context():
+        statuses = {
+            row["id"]: row["status"]
+            for row in get_db().execute(
+                "SELECT id, status FROM expedition_invitations WHERE invited_user_id IS NOT NULL"
+            ).fetchall()
+        }
+    assert statuses[first_id] == "expired"
+    assert statuses[second_id] == "declined"
+    assert statuses[replacement_id] == "accepted"
+    link = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"kind": "link"})
+    assert link.status_code == 201
+    token = link.get_json()["token"]
+    with app.app_context():
+        get_db().execute(
+            """
+            UPDATE expedition_invitations
+            SET expires_at = now() - interval '1 minute'
+            WHERE id = ?
+            """,
+            (link.get_json()["id"],),
+        )
+        get_db().commit()
+    assert _api(rae, "POST", f"/api/v1/invitations/{token}/accept").status_code == 404
+    with app.app_context():
+        assert get_db().execute(
+            "SELECT status FROM expedition_invitations WHERE id = ?",
+            (link.get_json()["id"],),
+        ).fetchone()["status"] == "expired"
+    renewed = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"kind": "link"})
+    assert renewed.status_code == 201
+    assert renewed.get_json()["token"] != token
+    assert _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"kind": "link"}).status_code == 409
+    assert _api(
+        owner,
+        "DELETE",
+        f"/api/v1/expeditions/{slug}/invitations/{renewed.get_json()['id']}",
+    ).status_code == 200
+    assert _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"kind": "link"}).status_code == 201
+
+
+def test_invitation_acceptance_rolls_back_when_the_status_update_fails(app, monkeypatch):
+    owner, _member, slug = _private_pair(app)
+    rae = app.test_client()
+    _join(rae, "Rae")
+    invited = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"username": "Rae"})
+    invitation_id = invited.get_json()["id"]
+    original = DB.execute
+
+    def explode(self, sql, params=()):
+        if "SET status = 'accepted'" in sql:
+            raise RuntimeError("status update failed")
+        return original(self, sql, params)
+
+    monkeypatch.setattr(DB, "execute", explode)
+    with pytest.raises(RuntimeError, match="status update failed"):
+        rae.post(
+            f"/invitations/{invitation_id}/accept",
+            data={"csrf": _csrf(rae, "/activities")},
+        )
+    monkeypatch.undo()
+    with app.app_context():
+        joined = get_db().execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM expedition_participations AS participation
+            JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
+            JOIN users ON users.id = participation.user_id
+            WHERE users.username_key = 'rae' AND expedition.slug = ?
+            """,
+            (slug,),
+        ).fetchone()["n"]
+        status = get_db().execute(
+            "SELECT status FROM expedition_invitations WHERE id = ?",
+            (invitation_id,),
+        ).fetchone()["status"]
+    assert joined == 0
+    assert status == "pending"
+    recovered = rae.post(
+        f"/invitations/{invitation_id}/accept",
+        data={"csrf": _csrf(rae, "/activities")},
+        follow_redirects=True,
+    )
+    assert recovered.status_code == 200
+    again = rae.post(
+        f"/invitations/{invitation_id}/accept",
+        data={"csrf": _csrf(rae, "/activities")},
+    )
+    assert again.status_code == 404
+    with app.app_context():
+        count = get_db().execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM expedition_participations AS participation
+            JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
+            JOIN users ON users.id = participation.user_id
+            WHERE users.username_key = 'rae' AND expedition.slug = ?
+            """,
+            (slug,),
+        ).fetchone()["n"]
+    assert count == 1
+
+
+def test_retired_route_blocks_invitation_acceptance(app):
+    owner, member, slug = _private_pair(app)
+    assert _api(
+        member,
+        "POST",
+        "/api/v1/activities",
+        {
+            "elevation_ft": 30,
+            "note": "kept credit",
+            "happened_on": "2026-11-05",
+            "expedition_slug": slug,
+        },
+    ).status_code == 201
+    rae = app.test_client()
+    noa = app.test_client()
+    _join(rae, "Rae")
+    _join(noa, "Noa")
+    invited = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"username": "Rae"})
+    link = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"kind": "link"})
+    token = link.get_json()["token"]
+    with app.app_context():
+        get_db().execute("UPDATE routes SET status = 'retired' WHERE slug = 'everest'")
+        get_db().commit()
+        before = get_db().execute(
+            "SELECT COUNT(*) AS n FROM activity_credits WHERE user_id = ?",
+            (_user_id("alex"),),
+        ).fetchone()["n"]
+    assert rae.post(
+        f"/invitations/{invited.get_json()['id']}/accept",
+        data={"csrf": _csrf(rae, "/activities")},
+    ).status_code == 404
+    assert _api(noa, "POST", f"/api/v1/invitations/{token}/accept").status_code == 404
+    assert member.get(f"/api/v1/expeditions/{slug}").status_code == 200
+    assert owner.get(f"/api/v1/expeditions/{slug}").status_code == 200
+    with app.app_context():
+        after = get_db().execute(
+            "SELECT COUNT(*) AS n FROM activity_credits WHERE user_id = ?",
+            (_user_id("alex"),),
+        ).fetchone()["n"]
+        rae_joined = get_db().execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM expedition_participations AS participation
+            JOIN users ON users.id = participation.user_id
+            JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
+            WHERE users.username_key = 'rae' AND expedition.slug = ?
+            """,
+            (slug,),
+        ).fetchone()["n"]
+        alex = get_db().execute(
+            """
+            SELECT participation.status
+            FROM expedition_participations AS participation
+            JOIN users ON users.id = participation.user_id
+            JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
+            WHERE users.username_key = 'alex' AND expedition.slug = ?
+            """,
+            (slug,),
+        ).fetchone()
+    assert before == after
+    assert before >= 1
+    assert rae_joined == 0
+    assert alex["status"] == "active"

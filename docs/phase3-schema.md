@@ -33,13 +33,15 @@ Invitation rules that a normal unique constraint cannot express, because Postgre
 - One pending username invitation per `(expedition_id, invited_user_id)`.
 - One pending share-link invitation per expedition (`invited_user_id` is null).
 
+`0006_invitation_expired` adds `expired` to the invitation status check. A pending invitation whose `expires_at` has passed is marked `expired` before the owner issues a replacement, so it no longer occupies a pending slot. Accepted, declined, and revoked rows stay as history. The downgrade puts `expired` rows back to `pending` only when that cannot collide with a pending invitation for the same person or share link. Otherwise restore from a backup taken before `0006_invitation_expired`.
+
 Deleting a route cascades to its checkpoints. Deleting an expedition cascades to its invitations. Deleting a user cascades that user's invitations. The person who sent an invitation cannot be deleted while the row remains (`ON DELETE RESTRICT`).
 
 ## Authorization
 
 The Flask database role bypasses row level security. Private access is enforced in `adventurer/access.py` and every read in `adventurer/platform.py`.
 
-A missing expedition and a private expedition the viewer cannot read both return 404 with the same body. Withdrawn members lose private access unless they are the owner. The owner can still manage the expedition after leaving the leaderboard, and can reactivate that same participation from the expedition page without inviting themselves. A withdrawn owner stays off the active leaderboard until then. Another withdrawn member of a private expedition has to be invited again. Nobody can edit or archive an expedition whose owner is null.
+A missing expedition and a private expedition the viewer cannot read both return 404 with the same body. The activity library uses the same read check: a credit row stays, but its expedition name and slug are omitted when the viewer can no longer read that private expedition. An owner still sees their own expedition there after withdrawing. Public credits stay visible. An invitation cannot add a participant when the route is no longer published. Withdrawn members lose private access unless they are the owner. The owner can still manage the expedition after leaving the leaderboard, and can reactivate that same participation from the expedition page without inviting themselves. A withdrawn owner stays off the active leaderboard until then. Another withdrawn member of a private expedition has to be invited again. Nobody can edit or archive an expedition whose owner is null.
 
 ## Downgrade
 
