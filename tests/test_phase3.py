@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import date
 from decimal import Decimal
 
@@ -25,6 +26,11 @@ def _api(client, method, path, payload=None):
         json=payload,
         headers={"X-CSRF-Token": token},
     )
+
+
+def _board_names(client, slug: str) -> list[str]:
+    text = client.get(f"/{slug}/board").get_data(as_text=True)
+    return re.findall(r"<strong>([^<]+)</strong>", text)
 
 
 def _user_id(name_key: str) -> int:
@@ -601,3 +607,156 @@ def test_everest_page_and_log_endpoints_still_work(client):
     with client.application.app_context():
         assert get_db().execute("SELECT COUNT(*) AS n FROM activities").fetchone()["n"] == 1
         assert get_db().execute("SELECT COUNT(*) AS n FROM activity_credits").fetchone()["n"] == 0
+
+
+def _private_pair(app):
+    owner = app.test_client()
+    member = app.test_client()
+    _join(owner, "Sam")
+    _join(member, "Alex")
+    created = _api(
+        owner,
+        "POST",
+        "/api/v1/expeditions",
+        {"route_slug": "everest", "name": "Rank Camp", "description": "us"},
+    )
+    assert created.status_code == 201
+    slug = created.get_json()["slug"]
+    invited = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"username": "Alex"})
+    assert invited.status_code == 201
+    accepted = member.post(
+        f"/invitations/{invited.get_json()['id']}/accept",
+        data={"csrf": _csrf(member, "/activities")},
+        follow_redirects=True,
+    )
+    assert accepted.status_code == 200
+    return owner, member, slug
+
+
+def test_private_owner_rejoins_directly_and_keeps_leaderboard_rank(app):
+    owner, member, slug = _private_pair(app)
+    assert _api(
+        owner,
+        "POST",
+        "/api/v1/activities",
+        {"elevation_ft": 800, "note": "owner day", "happened_on": "2026-11-01", "expedition_slug": slug},
+    ).status_code == 201
+    assert _api(
+        member,
+        "POST",
+        "/api/v1/activities",
+        {"elevation_ft": 100, "note": "member day", "happened_on": "2026-11-02", "expedition_slug": slug},
+    ).status_code == 201
+    assert _board_names(owner, slug) == ["Sam", "Alex"]
+    with app.app_context():
+        before = get_db().execute(
+            """
+            SELECT participation.id, credit.credited_elevation_m
+            FROM expedition_participations AS participation
+            JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
+            JOIN users ON users.id = participation.user_id
+            JOIN activity_credits AS credit ON credit.participation_id = participation.id
+            WHERE users.username_key = 'sam' AND expedition.slug = ?
+            """,
+            (slug,),
+        ).fetchone()
+    left = owner.post(
+        f"/expeditions/{slug}/leave",
+        data={"csrf": _csrf(owner, f"/{slug}")},
+        follow_redirects=True,
+    )
+    assert left.status_code == 200
+    assert _board_names(owner, slug) == ["Alex"]
+    detail = owner.get(f"/api/v1/expeditions/{slug}").get_json()
+    assert detail["participation_status"] == "withdrawn"
+    assert detail["can_manage"] is True
+    assert detail["can_join"] is True
+    assert detail["can_log"] is False
+    page = owner.get(f"/{slug}").get_data(as_text=True)
+    assert "Rejoin this expedition" in page
+    assert "Manage" in page
+    assert _api(
+        owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"username": "Sam"}
+    ).status_code == 400
+    rejoined = owner.post(
+        f"/expeditions/{slug}/join",
+        data={"csrf": _csrf(owner, f"/{slug}")},
+        follow_redirects=True,
+    )
+    assert rejoined.status_code == 200
+    assert _board_names(owner, slug) == ["Sam", "Alex"]
+    with app.app_context():
+        after = get_db().execute(
+            """
+            SELECT participation.id, participation.status, credit.credited_elevation_m
+            FROM expedition_participations AS participation
+            JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
+            JOIN users ON users.id = participation.user_id
+            JOIN activity_credits AS credit ON credit.participation_id = participation.id
+            WHERE users.username_key = 'sam' AND expedition.slug = ?
+            """,
+            (slug,),
+        ).fetchone()
+        count = get_db().execute(
+            """
+            SELECT COUNT(*) AS n
+            FROM expedition_participations AS participation
+            JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
+            JOIN users ON users.id = participation.user_id
+            WHERE users.username_key = 'sam' AND expedition.slug = ?
+            """,
+            (slug,),
+        ).fetchone()["n"]
+    assert after["id"] == before["id"]
+    assert after["status"] == "active"
+    assert after["credited_elevation_m"] == before["credited_elevation_m"]
+    assert count == 1
+
+
+def test_withdrawn_private_member_must_be_invited_again(app):
+    owner, member, slug = _private_pair(app)
+    assert _api(
+        member,
+        "POST",
+        "/api/v1/activities",
+        {"elevation_ft": 250, "note": "alex day", "happened_on": "2026-11-03", "expedition_slug": slug},
+    ).status_code == 201
+    with app.app_context():
+        before = get_db().execute(
+            """
+            SELECT participation.id
+            FROM expedition_participations AS participation
+            JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
+            JOIN users ON users.id = participation.user_id
+            WHERE users.username_key = 'alex' AND expedition.slug = ?
+            """,
+            (slug,),
+        ).fetchone()["id"]
+    assert _api(member, "DELETE", f"/api/v1/expeditions/{slug}/participation").status_code == 200
+    assert member.get(f"/api/v1/expeditions/{slug}").status_code == 404
+    assert _api(member, "POST", f"/api/v1/expeditions/{slug}/participation").status_code == 404
+    assert "Alex" not in _board_names(owner, slug)
+    again = _api(owner, "POST", f"/api/v1/expeditions/{slug}/invitations", {"username": "Alex"})
+    assert again.status_code == 201
+    accepted = member.post(
+        f"/invitations/{again.get_json()['id']}/accept",
+        data={"csrf": _csrf(member, "/activities")},
+        follow_redirects=True,
+    )
+    assert accepted.status_code == 200
+    assert _board_names(owner, slug) == ["Alex", "Sam"]
+    with app.app_context():
+        after = get_db().execute(
+            """
+            SELECT participation.id, participation.status, credit.credited_elevation_m
+            FROM expedition_participations AS participation
+            JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
+            JOIN users ON users.id = participation.user_id
+            JOIN activity_credits AS credit ON credit.participation_id = participation.id
+            WHERE users.username_key = 'alex' AND expedition.slug = ?
+            """,
+            (slug,),
+        ).fetchone()
+    assert after["id"] == before
+    assert after["status"] == "active"
+    assert after["credited_elevation_m"] == feet_to_meters(Decimal("250"))

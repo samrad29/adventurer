@@ -34,6 +34,15 @@ def can_join(expedition: dict) -> bool:
     )
 
 
+def can_owner_rejoin(expedition: dict, user_id: int | None) -> bool:
+    """The owner returns to the same participation row without an invitation."""
+    return (
+        is_owner(expedition, user_id)
+        and expedition["status"] == "active"
+        and expedition["route_status"] == "published"
+    )
+
+
 def can_add_credit(
     expedition: dict,
     participation_status: str | None,

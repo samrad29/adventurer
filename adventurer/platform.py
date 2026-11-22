@@ -9,7 +9,14 @@ import secrets
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
-from .access import can_add_credit, can_join, can_manage, can_read, is_owner
+from .access import (
+    can_add_credit,
+    can_join,
+    can_manage,
+    can_owner_rejoin,
+    can_read,
+    is_owner,
+)
 from .challenges import get_challenge
 from .db import get_db, is_unique_violation
 from .measures import feet_number, feet_to_meters, kilometers_number, kilometers_to_meters
@@ -256,11 +263,9 @@ def join_public(user_id: int, slug: str) -> dict:
 
 
 def _may_join(expedition, user_id: int | None) -> bool:
-    if expedition["status"] != "active" or expedition["route_status"] != "published":
-        return False
     if can_join(expedition):
         return True
-    return is_owner(expedition, user_id)
+    return can_owner_rejoin(expedition, user_id)
 
 
 def withdraw(user_id: int, slug: str) -> None:

@@ -39,7 +39,7 @@ Deleting a route cascades to its checkpoints. Deleting an expedition cascades to
 
 The Flask database role bypasses row level security. Private access is enforced in `adventurer/access.py` and every read in `adventurer/platform.py`.
 
-A missing expedition and a private expedition the viewer cannot read both return 404 with the same body. Withdrawn members lose private access unless they are the owner. The owner can still manage the expedition after leaving the leaderboard. Nobody can edit or archive an expedition whose owner is null.
+A missing expedition and a private expedition the viewer cannot read both return 404 with the same body. Withdrawn members lose private access unless they are the owner. The owner can still manage the expedition after leaving the leaderboard, and can reactivate that same participation from the expedition page without inviting themselves. A withdrawn owner stays off the active leaderboard until then. Another withdrawn member of a private expedition has to be invited again. Nobody can edit or archive an expedition whose owner is null.
 
 ## Downgrade
 
