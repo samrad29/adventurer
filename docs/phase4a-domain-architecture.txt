@@ -1,0 +1,772 @@
+The Adventurer — final domain architecture
+Planning document. Not implemented.
+
+This replaces the earlier Phase 4A draft. There is no live expedition or journey data to preserve, so this version has no historical backfill, no reconciliation report, no dual-read period, and no legacy snapshot.
+
+
+1. Executive summary
+
+A route is a curated adventure. An expedition is one group on exactly one route. A route journey is one person's attempt at one route, and it is the only live score. An activity credits at most one journey. The journey total is the sum of those credits, capped at the route target. The activity row keeps the full elevation.
+
+A user has one active journey in the whole account. Switching routes pauses that journey and resumes, or starts, the other route. Returning to a completed or abandoned route does not start a new attempt. Restart is a separate action. It creates a zeroed journey and repoints active expeditions on that route. Closed expedition snapshots stay as they were.
+
+While an expedition is active, its board reads each participant's current journey for that route. When an organization expedition completes, or a private expedition is archived, the board becomes a final snapshot. That snapshot includes people who were active at the close and people who had already finished the route and then left. It excludes people who left without finishing, and anyone who removed their expedition data. Read access after leaving is a separate flag from that standing.
+
+Registration creates an account. It does not join Global Everest and it does not create a journey. The existing Expo app under apps/mobile stays; later work adds methods to the current API client and stores bearer tokens in the current SecureStore wrapper.
+
+
+2. What exists today
+
+Source of truth is the repository on branch the-adventurer-refactor, schema through migration 0006_invitation_expired. The notes below are current behavior, not the target.
+
+Accounts. users and user_profiles. create_adventurer inserts those two rows and nothing else. Passwords are Werkzeug hashes. There is no email column. The HTML POST /join does call join_public for the Global Everest expedition unless an invite token is already in the session. That auto-join is a current behavior this plan changes.
+
+Session. Cookie adventurer_id, thirty days, HttpOnly, SameSite=Lax, Secure when RENDER is set. guard_post in adventurer/__init__.py requires a CSRF token on every non-GET, from the form or X-CSRF-Token. GET /api/v1/session returns the CSRF token and the current user. Login, join, and logout are HTML forms. There is no bearer token table.
+
+Routes. routes and route_checkpoints. Everest is a published route. Narrative text lives in adventurer/challenges.py. Stop photos live in adventurer/static/photos and are resolved by routes._photo. Users cannot create routes. Expedition pages load route structure from the database and story text from challenges.py.
+
+Expeditions. One row per group, exactly one route_id, globally unique slug. Visibility is public or private. Status is active or archived. owner_user_id is nullable. starts_at and ends_at are optional, and the end must be after the start. The Global Everest row keeps its id and slug, name "Global Everest Challenge", public, active, owner null. User-created expeditions are private. The owner can edit, transfer ownership to an active member, or archive. Archive is a status change with no snapshot. App-managed expeditions have no owner and users cannot edit them. Date windows currently block new credits through can_add_credit. They do not block joins.
+
+Participation. Unique (user_id, expedition_id), status active or withdrawn. Join and rejoin reuse the same row. The owner of a private expedition can rejoin without an invitation. A withdrawn non-owner loses private read access. Leaderboards in leaderboard_rows select active participations only, including zeros, ordered by elevation descending, last credit time ascending, then display name.
+
+Credits. activity_credits copies the full activity elevation onto each chosen participation. One activity can be credited to several expeditions, including expeditions on different routes. update_activity rewrites every copy. This is the model being retired.
+
+Invitations. expedition_invitations. Username invites and one pending share link per expedition. The raw share token is shown once. The database stores only its SHA-256. Links expire in thirty days, are revocable, and stay pending so they can be used more than once. Status values are pending, accepted, declined, revoked, and expired. Username accept activates the participation and marks the invite accepted in one transaction. Accept requires the expedition to be active and the route published. Incoming invitations are loaded for the HTML activities page only. There is no JSON list.
+
+Activities. run, hike, walk, stair_climb, other, unspecified. Manual entries require verification_status not_required. activity_verification_events is append-only. competition_seasons exists and is unused. Leave it unused.
+
+Authorization. Row level security is enabled and not forced. anon and authenticated are revoked. The application role bypasses row level security. Privacy is entirely in adventurer/access.py. A hidden private expedition raises KeyError and the route layer returns the same not-found body as a missing expedition.
+
+Mobile. apps/mobile is an Expo SDK 58 scaffold with Expo Router, a typed createApiClient, and secureTokenStore under the key adventurer.access-token. The client already attaches Authorization: Bearer when a token exists, and X-CSRF-Token on non-GET when a CSRF getter returns one. Product screens are not built. apps/mobile/src/auth/native-auth.ts still says registration should enroll Global Everest. That comment is wrong for this plan and is corrected when bearer auth is added. The client is extended, not replaced.
+
+Operations. Gunicorn on Render uses one worker and no scheduler. Elevation is numeric(12,5) meters. The interface shows international feet. New migrations are new files. Applied migrations 0001 through 0006 stay as they are. SQL sent through psycopg must not contain a literal percent sign. The test database is the isolated local URL in TEST_DATABASE_URL. Alembic tests must not read DATABASE_URL.
+
+
+3. Entity relationship model
+
+Users, profiles, routes, checkpoints, activities, and verification events stay. Their meanings stay. New and altered structures are below.
+
+organizations
+  id, slug unique, name, description, status active or suspended
+  logo_ref, image_ref, colors jsonb, welcome_message
+  created_at, updated_at
+  Platform administrators create these. logo_ref and image_ref are nullable references. Where the bytes live is unresolved and does not block the journey work.
+
+organization_memberships
+  id
+  organization_id, user_id, unique pair
+  role: owner, admin, or member
+  status: active or removed
+  Partial unique index: one active owner per organization
+  Membership does not create a participation, and a participation does not create a membership.
+
+expeditions, altered
+  Existing columns remain, including the Everest id and slug.
+  kind: global, organization, or private
+  organization_id, nullable, foreign key, restrict on delete
+  enrollment: open or invitation, required for organization, null otherwise
+  enrollment_opens_at, enrollment_closes_at
+  Optional presentation overrides: accent_color, welcome_override, image_ref
+  status gains completed. Private expeditions use archived. Organization expeditions use completed. Global Everest stays active.
+  New unique (id, route_id), so a participation can reference the pair.
+  Checks:
+    global: organization_id null, owner_user_id null, visibility public
+    organization: organization_id set, owner_user_id null, enrollment set, status active or completed
+    private: organization_id null, visibility private, status active or archived
+    an active private expedition has a non-null owner
+    an archived private expedition may have a null owner after the owner-release path in section 5
+    each date pair, when both ends are set, ends after it starts
+    the two date pairs are independent
+
+route_journeys
+  id
+  user_id, route_id
+  status: active, paused, completed, or abandoned
+  attempt_number, unique with user and route
+  progress_version integer, starts at 1
+  is_current boolean
+  started_at, paused_at, completed_at, abandoned_at, created_at
+  Unique (id, user_id, route_id)
+  Also unique (id, user_id), for the credit foreign key
+  Partial unique indexes:
+    one row per user with status active
+    one row per user and route with status active or paused
+    one row per user and route with is_current true
+
+journey_credits
+  id
+  activity_id unique
+  journey_id, user_id
+  credited_elevation_m > 0
+  created_at
+  Foreign key (activity_id, user_id) to activities (id, user_id)
+  Foreign key (journey_id, user_id) to route_journeys (id, user_id)
+  A trigger rejects the credit when credited_elevation_m is greater than the activity elevation.
+  A trigger rejects updates, and rejects deletes, when the journey is completed.
+  Delete is allowed only during account deletion, and only when users.deletion_state is deleting and the transaction has set adventurer.account_deletion to on. Privacy removal does not delete credits.
+
+expedition_participations, altered
+  Existing unique (user_id, expedition_id) and unique (id, user_id) stay.
+  route_id not null
+  journey_id not null
+  retained_read_access boolean not null default false
+  final_standings_eligible boolean not null default false
+  display_credits_after timestamptz null
+  Foreign key (expedition_id, route_id) to expeditions (id, route_id)
+  Foreign key (journey_id, user_id, route_id) to route_journeys (id, user_id, route_id)
+  Every participation, active or withdrawn, points at a journey for that same user and that expedition's route.
+  display_credits_after is set only when the row is created by a rejoin after privacy removal.
+
+The organization slot is a constraint trigger, not a partial index, because it joins expeditions. For one user, at most one row may be status active on an expedition whose kind is organization and whose status is active. Global and private rows do not count. Pausing a journey does not withdraw the participation, so the slot stays occupied.
+
+expedition_result_entries
+  id
+  expedition_id, participation_id, unique pair
+  user_id, journey_id
+  display_name, total_m, rank, checkpoint_name, captured_at
+  Written only by the close transaction.
+  Ordinary progress cannot update or delete a row.
+  Privacy removal and account deletion may delete the subject's rows. They set adventurer.privacy_removal or adventurer.account_deletion in that transaction so the immutability trigger allows the delete. Other rows are not rewritten. Ranks are not renumbered.
+  There is no legacy snapshot type.
+
+expedition_updates
+  id, expedition_id, user_id, participation_id
+  kind: activity_logged, checkpoint_reached, or summit_reached
+  activity_id nullable, checkpoint_name nullable, elevation_m, created_at
+  Append-only for ordinary requests. The same deletion settings that release result rows allow delete. New kinds can be added later as new allowed values. No comment, post, or announcement kind is added now.
+
+api_tokens
+  id, user_id
+  token_hash unique, SHA-256 hex of a secrets.token_urlsafe(32) value
+  expires_at, revoked_at, last_used_at, client_label nullable
+
+users.deletion_state
+  Null, or deleting. A finished deletion removes the user row, so there is no deleted state.
+
+deletion_log
+  id, completed_at
+  No user id, name, token, or journey id.
+
+expedition_invitations stays, including the expired status from migration 0006, the hashed share link, and the partial unique indexes for one pending username invite and one pending share link. Organization admins become allowed inviters in the service. The table does not need a second invitation system.
+
+activity_credits is dropped in the progress cutover. Nothing is copied out of it.
+
+competition_seasons stays in place, empty, with no new features and no new foreign keys.
+
+New tables enable row level security and revoke anon and authenticated, matching migration 0005. The application role still bypasses those policies. Service checks remain in adventurer/access.py and the modules beside it.
+
+Ownership boundaries:
+  Routes are platform content. Organizations do not own a private copy.
+  An organization owns its memberships and its organization expeditions.
+  A private expedition is owned by owner_user_id until the owner-release path clears it.
+  A journey and an activity are owned by the user.
+  A final result row is owned by the expedition. The user may delete their own row through privacy removal or account deletion.
+  A bearer token is owned by the user. Logout revokes one token. Revoke-all revokes every token for that user.
+
+
+4. State machines
+
+Journey
+  none --start--> active, is_current, attempt 1
+  active --switch away--> paused, is_current
+  paused --resume--> active, is_current
+  active or paused --abandon--> abandoned, is_current
+  active --credit reaches target--> completed, is_current
+  any current row --explicit restart--> that row loses is_current
+      if it was active or paused, it becomes abandoned
+      if it was completed, it stays completed
+      if it was abandoned, it stays abandoned
+      a new row is inserted: active, is_current, next attempt number, no credits
+
+is_current is the attempt expeditions display. It is not a synonym for active. After abandon or summit, that row stays current until an explicit restart. A completed journey cannot return to active, paused, or abandoned.
+
+Switch and resume never insert a journey. Start inserts the first journey on a route that has never had one. Restart is the only path onto a route whose current journey is completed or abandoned.
+
+One active journey per user. Starting or resuming a route pauses the active journey on any other route in the same transaction. The paused row stays is_current for its own route.
+
+Expedition
+  organization: active --ends_at reached, or admin ends it--> completed
+  organization: active --admin extends ends_at--> active, with a later ends_at
+  private: active --owner archives--> archived
+  global: remains active
+  completed and archived are read-only. They do not reopen, accept joins, or accept feed rows.
+  Completion and archival do not delete journeys or participations.
+
+Participation
+  absent --join or accept invite--> active, journey assigned by the activation rules
+  active --leave--> withdrawn
+  withdrawn --rejoin or accept invite--> active, same row, journey activated again
+  active or withdrawn --privacy removal or account deletion--> row deleted
+
+On an ordinary leave the service sets the two flags from the state at that moment. They are independent columns. Leave writes both. Nothing later derives one from the other.
+
+  final_standings_eligible is true only when the journey currently pointed at by this participation has status completed.
+  retained_read_access is true when this user has any completed journey on this route.
+
+A completion after leave does not update either flag. A later restart does not clear either flag. Restart repoints only participations whose expedition is still active, so a withdrawn finisher keeps pointing at the completed journey.
+
+A second leave recomputes both flags from the journey state at that later moment.
+
+Invitation
+  pending --accept--> accepted, for a username invite, in the same transaction as participation activation
+  pending --decline--> declined
+  pending --owner or admin revoke--> revoked
+  pending --expires_at passed--> expired, marked before a replacement insert so the partial unique index can take a new pending row
+  A share link stays pending across accepts until it expires or is revoked.
+  An expired, revoked, declined, or accepted username invite cannot be accepted.
+  Email delivery is not part of this machine.
+
+Account
+  normal --deletion request accepted--> deleting, tokens revoked, commit
+  deleting --batches finish--> user row removed, deletion_log gains completed_at
+  deleting --batch fails--> stays deleting, login stays disabled, retry continues the deletes
+  A refusal because of ownership happens before the deleting commit. The account still works.
+
+
+5. Core transaction flows
+
+Lock order for every flow in this section:
+  1. users, ascending id
+  2. expeditions, ascending id
+  3. route_journeys, ascending id
+  4. expedition_participations, ascending id
+  5. activities, ascending id
+  Then write journey_credits, expedition_updates, and expedition_result_entries.
+
+A transaction that needs several rows of one kind sorts them and locks in that order. It never locks a later kind and then an earlier kind. Two transactions therefore cannot deadlock against each other. A unique-index or trigger failure becomes a 409. A close that sees the participation set change rolls back and retries, up to three times, then returns 409.
+
+Lazy completion runs as its own transaction before a slot check, a home read, or an organization-expedition read. It selects due organization expeditions, locks them in id order using the close flow, and commits. The caller's transaction starts after that.
+
+5.1 Journey activation
+
+Used by joining, rejoining, and accepting an invitation, for global, organization, and private expeditions alike.
+
+Lock the user. Lock the target expedition. Lock the user's current journey on that route and the user's active journey, in journey id order. Lock the participations that will be updated, in id order.
+
+Then:
+  The user already has an active journey on this route. Point the participation at it.
+  The user has a paused journey on this route. Pause the active journey on the other route, if there is one. Set this journey back to active. Point the participation at it. Progress is unchanged.
+  The user has never had a journey on this route. Pause the other active journey, if there is one. Insert the first journey, active and current. Point the participation at it.
+  The current journey on this route is completed or abandoned. Write nothing. Return 409 restart_required, with the route slug, the current status, and the slugs of active expeditions a restart would reset.
+
+A follow-up with confirm_new_attempt true runs the restart flow and the participation insert in one transaction. The server does not start that restart from a plain join. A client may send the flag immediately; the effect is still a restart of that user's own route, under the restart rules, not a second silent path.
+
+Creating a private expedition uses the same activation for its owner. If restart confirmation is required and absent, the expedition insert rolls back too.
+
+5.2 Join
+
+After activation:
+  Global. The expedition is public, active, and on a published route. Insert or reactivate the participation. Global Everest does not use the organization slot.
+  Organization, open enrollment. The caller does not need a membership, and the join does not create one. The enrollment window must be open. The slot trigger must pass. Lazy completion has already run, so an overdue expedition no longer holds the slot.
+  Organization, invitation enrollment. Join is refused. The accept path is the only entry, and it uses this same activation.
+  Private. An invitation accept, or the owner's direct rejoin, uses this same activation. Ordinary users do not join a private expedition because it is public.
+
+The participation's route_id is the expedition's route. journey_id is the journey activation just chose. display_credits_after stays null on an ordinary join or on reactivation of an existing row. A brand-new row after privacy removal is specified in 5.9.
+
+5.3 Switch, resume, abandon, restart
+
+Switch to a route. If a paused journey exists there, resume it and pause the previous active journey. If no journey exists there, start the first one and pause the previous active journey. If the current journey there is completed or abandoned, return 409 restart_required and leave the active journey untouched.
+
+Resume. Allowed only when that route has a paused journey. Same pause-the-other-route behavior. Pointers do not move, because the participation already points at this journey.
+
+Abandon. The chosen in-progress journey becomes abandoned and stays current. Participations keep their pointers. Boards keep that total. The account has no active journey until a later start, resume, or restart.
+
+Restart. Lock the user, then the active expeditions on the restarted route, then the active journey on any other route, then the old and new journeys, then the participations.
+  Pause the active journey on the other route. It stays current for that route.
+  Clear is_current on the old journey for this route. Abandon it if it was active or paused. Leave it completed or abandoned otherwise.
+  Insert the new active current journey with no credits.
+  Repoint participations whose expedition status is still active and whose route is this route.
+  Do not update withdrawn participations. A person who finished, left, and later restarts their personal climb keeps the participation pointed at the completed journey.
+  Do not update completed or archived expeditions, and do not update their result rows.
+
+5.4 Activity credit and summit confirmation
+
+Preview, POST /api/v1/activities/preview, does not write. It reports the active journey's total, the remaining elevation, the activity's full elevation, the amount that would be credited, the resulting total, and will_complete. When will_complete is true it also returns an HMAC and a ten-minute expiry.
+
+The signed payload is the string
+  v1|{user_id}|{journey_id}|{progress_version}|{credited_elevation_m}|{exp_unix}
+credited_elevation_m is a canonical numeric string. The key is the server SECRET_KEY. The token is not stored.
+
+Save locks the user, the active expeditions on that route for which this user has an active participation, the active journey, those participations, and then inserts the activity.
+
+Under those locks it recomputes the remainder.
+  If the journey would complete, the token must match the locked progress_version and the locked credited amount, and it must be unexpired. Otherwise the transaction rolls back and the response is 409 confirmation_required with a fresh preview. No activity row is left behind.
+  The first commit increments progress_version. A second confirmation no longer matches, so it writes nothing.
+  The credited amount is the smaller of the activity elevation and the remaining elevation. From 28,532 ft, a 900 ft activity credits 500 ft on a 29,032 ft route. The activity stores 900.
+  Reaching the target sets the journey completed.
+  If there is no active journey, the activity is stored and no credit is written. No token is required.
+  An activity after completion is stored with no credit and no token.
+
+The credit transaction writes feed rows only for expeditions that are still active and whose active participation points at this journey. Crossing a checkpoint writes checkpoint_reached. Completing the journey writes summit_reached. An expedition that closed before this transaction took its lock gets no feed row. The personal credit is still written when the journey itself is active.
+
+Elevation edits and deletes are allowed while the credited journey is active, paused, or abandoned. If an edit on the active journey would reach the target, it uses the same confirmation token. If an edit on a paused or abandoned journey would reach the target, the response is 409 resume_required and nothing is written. Completing a route happens on the active journey, through the confirmation path.
+
+Once the journey is completed, the immutability trigger rejects elevation changes and deletes for every credit on that journey, including credits from earlier activities. Note, distance, date, and activity type remain editable. Account deletion is the only delete bypass, and it is the bypass in section 5.10.
+
+5.5 Leave
+
+Lock the user, the expedition, the pointed journey, and the participation. Set status withdrawn. Recompute the two flags as specified in section 4. Do not delete activities, credits, journeys, feed rows, or result rows.
+
+The live board lists active participations only, so the person disappears from it immediately. Their journey total remains their personal progress. If final_standings_eligible is true, the later close includes them.
+
+5.6 Close
+
+Used when an organization expedition reaches ends_at, when an admin ends it early, and when a private owner archives it. Global Everest has no close path.
+
+Lock the candidate users in id order. Candidates are participations that are active, plus participations that are withdrawn and final_standings_eligible. Lock the expedition. Read the candidate set again. If the set of participation ids changed, roll back and retry. Lock their journeys and participations in id order.
+
+Set the expedition completed or archived. For each remaining candidate, insert one result row: display name, journey id, total meters, rank, checkpoint name, captured_at. The total is the sum of that journey's credits, and when display_credits_after is set, only credits created at or after that time. Rank uses the current live-board ordering: higher elevation, earlier last credit, then display name. Active participants with zero credits are included. Withdrawn people who did not finish are not candidates. People whose participation was deleted are not candidates.
+
+The slot releases because the expedition is no longer active. Journeys are not modified. A later restart does not repoint this expedition and does not update the result rows.
+
+Concurrent activity. If the activity transaction locks the expedition first, its credit and feed commit, and the close sums that credit. If the close commits first, the activity may still credit a personal active journey and writes no feed row for this expedition. It does not update the result rows.
+
+Concurrent leave. If leave commits first, the person is a candidate only when the new flag is set. If the close commits first, the person is inside the snapshot as an active participant. A later ordinary leave does not remove that row.
+
+Concurrent restart. If restart commits first, the close snapshots the new journey for people who are still active. If the close commits first, restart's repoint predicate no longer matches this expedition.
+
+Concurrent privacy removal. If it commits first, the person is gone from the candidate set. If the close commits first, privacy removal may delete that person's result row afterward. Other rows stay, ranks included.
+
+5.7 Switch while an organization expedition is underway
+
+The participation stays active. The slot stays occupied. The journey for the expedition's route is paused and remains the participation's journey, so the board still shows that progress. Credits on the new active route go to the other journey. Home marks the organization expedition as not contributing. Resuming the expedition route uses the resume flow. No new attempt is created unless the user explicitly restarts.
+
+5.8 Read access after leave
+
+Active participant: roster, live or final board, and feed.
+Private owner: the same, including after a normal withdraw, which matches can_read today.
+Withdrawn with retained_read_access: read-only roster, board, and feed.
+Withdrawn without that flag, on a private expedition: the same not-found body as a stranger.
+Public expeditions remain readable because they are public. The read flag still matters for organization expeditions, which are not world-readable.
+
+Organization discovery is separate from the roster. An open organization expedition exposes its name, route, dates, branding, and enrollment to a signed-in user so they can join. Roster, board, and feed require participation, or an owner or admin role in that organization. An invitation-only organization expedition exposes that profile to invitees and to organization admins. A non-member participant does not gain the membership list.
+
+5.9 Privacy removal
+
+POST /api/v1/expeditions/<slug>/privacy-removal
+
+The caller must already have a participation row, including a withdrawn one. Authorization does not use can_read, so a former member who lost access can still erase the association. No participation produces the same not-found body as a stranger.
+
+If the caller is the owner of this private expedition and any other participation is active, return 409 ownership_transfer_required and write nothing. They transfer ownership with the existing owner update, then remove themselves as an ordinary participant. The expedition's owner_user_id then names the new owner.
+
+If the caller is the owner and no other participation is active, the same transaction releases ownership:
+  Set the privacy-removal setting.
+  Build the close snapshot from eligible departed finishers, excluding the owner.
+  Delete the owner's feed rows, result rows, and participation.
+  If no participations and no result rows remain, delete the expedition's invitations and the expedition. The route remains.
+  If departed finishers' result rows remain, archive the expedition and set owner_user_id null. The archived-private check allows that. No owner column still names the removed person.
+
+For everyone else, one transaction:
+  Set the privacy-removal setting.
+  Delete their feed rows and result rows for this expedition.
+  Delete the participation. An organization slot held by that row is free.
+  Do not delete activities, journey credits, or journeys.
+  Do not insert a substitute anonymous total.
+
+Rejoin inserts a new participation because the old row is gone. Journey activation runs. display_credits_after is the insert time. The live board sums only credits created at or after that time, so the removed total does not reappear. Home and the personal journey still show the full journey. A later restart still resets active expeditions, including this new participation. retained_read_access and final_standings_eligible do not survive, because the row that held them was deleted. New credits after the rejoin count normally.
+
+5.10 Account deletion
+
+POST /api/v1/account/deletion with a confirmation phrase. Refusals happen before any destroying commit, and the account still works.
+
+Refuse when the user is the active owner of an organization that is not suspended. They transfer ownership first. If they are the only member, a platform administrator assigns another owner or suspends the organization. Suspend completes any active organization expeditions through the close flow, then removes the active-owner requirement. The deletion endpoint does not dissolve an organization.
+
+Refuse when the user owns a private expedition that still has another active participant. They transfer that owner first. Archive alone is not enough in this case, because the owner column would still name them.
+
+When those refusals do not apply, a short transaction sets deletion_state to deleting, revokes every API token, and commits. Cookie and bearer authentication both fail from then on. That commit is the point of no return.
+
+Later transactions are idempotent deletes by user id. They may be retried by the same request and by the lazy pass that also completes due expeditions. Each batch sets adventurer.account_deletion and locks in the global order, then deletes feed rows, result rows, participations, journey credits, verification events, activities, journeys, invitations where they are the inviter or the invitee, memberships, and tokens. Share links they created are deleted, so the hash stops matching. invited_by_user_id is ON DELETE RESTRICT, so those invitation rows are removed rather than left in place.
+
+For a private expedition they still own, with no other active participant, the batch uses the owner-release path from 5.9 before the user row can go. The owner column is null, or the expedition is gone. It does not keep a foreign key to the deleted user.
+
+The last transaction deletes the profile and the user, then inserts deletion_log with completed_at only. Completed-journey credits are deleted here. The immutability trigger allows that delete only behind the deletion state and the transaction setting. It does not allow an elevation update. Other people's activities, journeys, and remaining result totals stay. Routes, expeditions, and organizations stay.
+
+
+6. Authorization matrix
+
+The application role bypasses row level security. These checks are service-layer checks. A private miss and a missing expedition return the same not-found body, with no name in the error.
+
+Anonymous
+  Read published routes and public expedition profiles.
+  No roster for a private or organization expedition, no join, no activity write.
+
+Signed-in user
+  Register and login.
+  Create a private expedition.
+  Join Global Everest and open organization expeditions, subject to journey activation and the slot.
+  Log personal activities.
+  Read and edit their own activities within the completed-journey rules.
+  Privacy-remove their own participation.
+  Delete their own account, subject to the ownership refusals.
+  Read an organization profile when they are a member, and read an open organization expedition's public profile when they are not.
+
+Active participant
+  Read that expedition's roster, board, and feed.
+  Leave.
+  Their journey receives credits. The expedition board reflects the pointed journey while the expedition is active.
+
+Withdrawn, retained_read_access
+  Read-only roster, board, and feed.
+  No invite, no archive, no credit into a closed expedition.
+
+Withdrawn, flag false, private expedition
+  No expedition read. Personal journey remains.
+
+Private owner
+  Edit name and description, invite, revoke, transfer to an active member, archive, and rejoin without an invitation.
+  These management actions remain available after a normal withdraw.
+  They do not remain after ownership release.
+
+Organization member
+  Read the branded organization home.
+  No roster or board unless they also participate.
+  No expedition create.
+
+Organization admin or owner
+  Create expeditions for that organization, choose open or invitation enrollment, invite non-members, end an expedition early, and extend ends_at while it is active.
+  Read rosters and boards for that organization's expeditions.
+  No access to another organization's membership list, and no access to a private expedition they do not belong to.
+
+Platform administrator
+  User ids listed in PLATFORM_ADMIN_IDS, read by Flask from the server environment.
+  Create an organization, assign its owner, and suspend an organization.
+  The value is never sent to the client and is never an EXPO_PUBLIC variable.
+  No request can grant the role. Changing it is an environment change and a process restart.
+  There is no database flag. The application role can write every table, so a column would not be a boundary.
+
+Bearer requests with a valid token skip CSRF. Cookie requests do not. A present Authorization header that is missing, unknown, revoked, or expired returns 401 and does not fall through to the cookie. The token is never read from a query string or a cookie.
+
+
+7. API contract
+
+Cookie or bearer identifies the same user. Responses stay JSON. Errors keep a human error string and add a stable code. Existing HTML pages keep their flashes. Codes used below: confirmation_required, restart_required, resume_required, slot_occupied, ownership_transfer_required, forbidden, not_found.
+
+Auth
+  POST /api/v1/auth/register
+    body: name, password
+    calls create_adventurer, returns the user and a raw token once
+    creates no participation and no journey
+  POST /api/v1/auth/login
+    body: name, password
+    uses authenticate, returns the user and a raw token once
+  POST /api/v1/auth/logout
+    revokes the bearer token presented on this request
+    a cookie logout still clears the browser session and does not require a bearer token
+  POST /api/v1/auth/revoke
+    revokes every token for the user and does not clear a browser cookie
+  GET /api/v1/session
+    unchanged for the browser: csrf and you
+    a bearer call returns you and a null csrf
+
+Home
+  GET /api/v1/home
+    you
+    journey: null, or id, status, progress_version, total_ft, remaining_ft, percent,
+      route slug, name, region, summit_ft, curated photo path,
+      current checkpoint and next checkpoint, each with name, elevation, and photo path when the stop is unlocked
+    paused_journeys: the same progress shape, without making them the home focus
+    expeditions: slug, name, kind, route slug, status, contributing, displayed total
+      contributing is false when the active journey is on another route
+    incoming_invitations
+    next_actions, chosen by the server:
+      choose_route, when there is no current journey
+      continue, for the active journey
+      resume, for a paused journey the screen can offer
+      start_new_attempt, when the user is looking at a completed or abandoned current journey
+      review_invitation
+
+The photo paths are the existing curated files under photos/. The API does not accept user photographs.
+
+Journeys
+  POST /api/v1/journeys/switch   body: route_slug
+  POST /api/v1/journeys/resume   body: route_slug
+  POST /api/v1/journeys/abandon  body: route_slug
+  POST /api/v1/journeys/restart  body: route_slug
+  Switch and resume return 409 restart_required when the current journey is completed or abandoned.
+  Restart returns the expeditions that were reset and the journey that was paused, if one was.
+
+Activities
+  POST /api/v1/activities/preview
+    body: the activity fields
+    no write
+  POST /api/v1/activities
+    body: the activity fields, plus the summit token when the preview said will_complete
+    409 confirmation_required, fresh preview, no row, when the token is missing, expired, or stale
+  PATCH /api/v1/activities/<id>
+    metadata, and elevation only under the rules in 5.4
+  DELETE /api/v1/activities/<id>
+    rejected when that activity credits a completed journey, except inside account deletion
+
+Routes
+  GET /api/v1/routes
+  GET /api/v1/routes/<slug>
+    current payload, plus this user's current journey and historical attempts on that route
+    checkpoint writing stays locked until progress reaches the stop, using the existing view_model rule
+
+Expeditions
+  GET /api/v1/expeditions/<slug>
+    says whether totals are live or final
+    a final read returns result rows only
+    a live read sums the pointed journey, including elevation from before starts_at, and applies display_credits_after
+    zeros stay on the live board
+  GET /api/v1/expeditions/<slug>/roster
+  GET /api/v1/expeditions/<slug>/leaderboard
+  GET /api/v1/expeditions/<slug>/updates
+  POST /api/v1/expeditions/<slug>/join
+    body may include confirm_new_attempt
+    409 restart_required, or 409 slot_occupied
+  POST /api/v1/expeditions/<slug>/leave
+  POST /api/v1/expeditions
+    private create: route_slug, name, description, optional confirm_new_attempt
+  Existing update, archive, and invitation routes stay.
+    Archive and the new organization complete action run the close flow.
+    Organization create is a sibling that also sends organization slug and enrollment.
+  POST /api/v1/expeditions/<slug>/privacy-removal
+    body: confirm true
+    409 ownership_transfer_required for a private owner who still has another active member
+
+Invitations
+  GET /api/v1/invitations
+    the list already computed for the HTML activities page
+  Existing create, revoke, accept, and decline paths stay.
+    Accept runs journey activation in the invitation transaction.
+
+Organizations
+  GET /api/v1/organizations/<slug>
+    branding and the caller's role
+    membership list only for an owner or admin of that organization
+  GET /api/v1/organizations/<slug>/expeditions
+    public profile fields for a member or a participant
+    management fields for an owner or admin
+  POST /api/v1/organizations
+    platform allowlist
+    body: slug, name, initial owner username
+  POST /api/v1/admin/organizations/<slug>/owner
+    platform allowlist, body: username
+  POST /api/v1/admin/organizations/<slug>/suspend
+    platform allowlist
+    completes active expeditions for that organization, then suspends it
+
+Account
+  POST /api/v1/account/deletion
+    body: confirmation phrase
+    409 ownership_transfer_required and a still-working account, when a refusal applies
+    after the deleting commit, a repeat call continues the batches and does not log anyone in
+
+Browser /join stops calling join_public for Global Everest. Invitation signup already skips that enroll. Login and logout forms stay. Cookie CSRF stays.
+
+CORS is added only if the Expo web build calls Flask from a browser. Native iOS and Android calls do not need it.
+
+Login and register, and repeated bad bearer presentations, share a process-local failure limit. One Gunicorn worker makes a process-local limit real. The starting point is five failures in fifteen minutes for a client address and username. Those numbers are an implementation default.
+
+
+8. Concurrency
+
+The lock order in section 5 is the only order. Close, credit, join, leave, switch, restart, privacy removal, and account deletion all use it.
+
+Deadlock is avoided because a later resource is never locked before an earlier one, and ids within one resource are always sorted. PostgreSQL waits instead of cycling.
+
+Retryable failures are limited and specific.
+  Close retries when the candidate participation set changes between the user-lock step and the reread. Bound of three, then 409.
+  A duplicate active journey, a duplicate in-progress journey, a duplicate current journey, a second journey credit, or a second organization slot raises a constraint failure and returns 409. The application does not catch those and try a second winner.
+  Summit confirmation does not retry a stale token. The client asks for a new preview.
+
+Final snapshot contents are the candidate set at the successful close commit: active participants, including zeros, and withdrawn participants whose final_standings_eligible flag is true. Departed finishers are in that set because leave set the flag while their participation still pointed at the completed journey. A restart after that leave does not move a withdrawn pointer, so the closed total remains the summit total.
+
+
+9. Clean-slate schema transition
+
+Reuse without a domain change
+  users and user_profiles, aside from deletion_state
+  routes and route_checkpoints
+  activities and activity_verification_events
+  expedition_invitations
+  competition_seasons, left unused
+  the Everest route and the Global Everest expedition row, including its id and slug
+  challenges.py narrative and the curated photo files
+  cookie session, CSRF, access.py's not-found behavior, the Expo client, and SecureStore
+
+Modify
+  expeditions, with kind, organization, enrollment, presentation, and the completed status
+  expedition_participations, with the journey pointer and the two independent flags
+  users, with deletion_state
+  the HTML /join handler, so registration no longer enrolls Global Everest
+  activity create, update, and delete, so they talk to journey credits
+  archive, so it writes a final snapshot
+  native-auth.ts, so it no longer says registration enrolls Global Everest
+
+Add
+  organizations, organization_memberships
+  route_journeys, journey_credits
+  expedition_result_entries, expedition_updates
+  api_tokens, deletion_log
+
+Retire
+  activity_credits
+  the service paths that copy one activity onto many participations
+  any client field that asks which expedition a new activity should credit
+  An activity credits the active journey, or it credits nothing.
+
+The cutover migration is destructive on purpose, and only because there is no meaningful expedition or journey data to keep. It deletes expedition_participations and activity_credits, drops activity_credits, and does not create journeys from the deleted rows. Existing activities remain personal history with no journey credit. Users, routes, the Everest expedition row, and invitations that are not dangling from a deleted participation remain. Take a database backup before applying it anyway. If that assumption about production data is later found to be false, stop before this migration. Do not invent a backfill at that point without a new product decision.
+
+Tests that describe per-expedition credit copies are rewritten in the cutover phase. They are not preserved by a compatibility layer. The current suite is expected to fail against the new progress model until those tests are replaced. A green run of today's suite is evidence of the old model only.
+
+Migrations 0001 through 0006 are not edited. The new work is the next revision files, applied in order, on the isolated test database first.
+
+
+10. Implementation phases
+
+Each phase is releasable only when its acceptance checks pass on the isolated database. Phases 1 through 4 can land as separate changes on the branch. Production does not run an intermediate release that reads both credit models. The first production deploy that serves journey totals is the deploy that drops activity_credits.
+
+Phase 1. Schema
+  New tables, altered expedition and participation columns, deletion_state, and the constraint triggers.
+  No request behavior changes. activity_credits still serves the live app.
+  Acceptance: migration upgrade and downgrade on the empty test database; the new uniqueness rules reject a second active journey, a second in-progress journey per route, a second current journey per route, a cross-user pointer, and a cross-route pointer; the existing suite still passes.
+
+Phase 2. Journey and activity service
+  Activation, switch, resume, abandon, restart, preview, and summit confirmation.
+  Not yet wired to expedition boards.
+  Acceptance: the service tests in section 11 for journeys and summit tokens, with no HTTP required.
+
+Phase 3. Progress cutover
+  Join, leave, accept, and private create call activation.
+  Boards read the pointed journey.
+  Activity writes stop inserting activity_credits.
+  The migration deletes obsolete participation and credit rows and drops activity_credits.
+  /join no longer enrolls Global Everest.
+  Acceptance: a new account has no participation and no journey; one activity cannot credit two routes; restart resets active expeditions on that route and leaves a closed snapshot unchanged; the rewritten expedition tests pass.
+
+Phase 4. Close
+  Lazy completion, admin early end, private archive, and final snapshots that include departed finishers.
+  Acceptance: the close, leave-before-close, and leave-after-close tests in section 11.
+
+Phase 5. Organizations
+  Memberships, branding fields, enrollment windows, the slot, admin create and invite.
+  Acceptance: a second active organization expedition is rejected; a private expedition and Global Everest do not occupy the slot; a non-member can open-enroll; a member who does not participate cannot read the roster.
+
+Phase 6. Leave flags and feed
+  The two leave flags, feed writes, and read rules.
+  Acceptance: a departed finisher can read and is named in the later snapshot; a departed non-finisher cannot read and is absent from the snapshot; the two flags can differ after a restart-then-leave.
+
+Phase 7. Privacy removal
+  Including the private-owner release path and display_credits_after on rejoin.
+  Acceptance: the privacy tests in section 11.
+
+Phase 8. Bearer auth
+  api_tokens, the auth endpoints, the failure limit, and methods on the existing mobile client and SecureStore wrapper.
+  Browser cookie login stays.
+  Correct the Everest comment in native-auth.ts.
+  Acceptance: cookie without CSRF fails; valid bearer without CSRF succeeds; a bad bearer returns 401 and does not use the cookie; register still creates no journey.
+
+Phase 9. Account deletion
+  The deleting commit, batched deletes, lazy retry, and the completed-credit bypass.
+  Acceptance: the deletion tests in section 11.
+
+Phase 10. Home
+  GET /api/v1/home and the matching client method.
+  No product screens in this phase.
+  Acceptance: the payload contains the active route, checkpoint, paused journeys, expeditions, invitations, and a server-chosen next action, including start_new_attempt for a completed current journey.
+
+
+11. Test strategy
+
+Run on the isolated local database only. Do not point tests at hosted Supabase. Do not treat a run of the current suite as evidence that journeys exist.
+
+Database constraints
+  Second active journey, second in-progress journey on one route, second current journey on one route, second credit for one activity, credit whose user does not own the activity, participation aimed at another user's journey, participation aimed at another route, second active organization expedition.
+
+Journey flows
+  Resume does not move pointers and restores the same total.
+  Abandon does not move pointers.
+  Switch onto a completed or abandoned route writes nothing.
+  Restart while another route is active pauses that other route, abandons the old in-progress row, repoints only active expeditions on the restarted route, and does not move a withdrawn finisher's pointer.
+  Join on a brand-new route creates attempt 1 and pauses the previous active journey.
+  Join on a paused route resumes it.
+  Join on a completed route returns restart_required unless confirm_new_attempt is set, in which case restart and join commit together or not at all.
+
+Summit
+  28,532 ft plus a 900 ft activity stores 900 on the activity and 500 on the credit, and completes the journey only with a matching token.
+  A stale, expired, or missing token writes no activity.
+  Two overlapping confirmations complete the journey once.
+  An elevation edit or a delete fails for every credit on that completed journey.
+  A note edit succeeds.
+  Account deletion, with the deletion setting, deletes those credits.
+
+Close
+  An activity that commits first is inside the snapshot. An activity that loses the race credits the person and adds no feed row and no snapshot change.
+  Leave before close: a finisher is in the snapshot, a non-finisher is not.
+  Leave after close does not remove the active row that was already snapshotted.
+  Restart after a finisher has left does not change that later snapshot.
+  Restart while the person is still active, followed by close, snapshots the new journey.
+  Both a live read and a final read agree with the rules above. A final read does not sum live credits.
+
+Authorization
+  A non-participant member of the organization cannot read the roster.
+  A non-member participant can read that expedition and cannot read the membership list.
+  A withdrawn non-finisher receives not-found on a private expedition.
+  A withdrawn finisher can read it.
+  Platform routes reject a user who is only an organization owner.
+  A private miss matches the missing-expedition response.
+
+Privacy and deletion
+  Privacy removal deletes the result row and the feed rows, keeps the journey, frees the slot, and a rejoin does not show the old total.
+  A private owner with another active member is refused.
+  A sole owner with a departed finisher leaves an archived expedition, a null owner, and the finisher's result row.
+  A sole owner with nobody else leaves no expedition.
+  Account deletion refuses an active organization owner and a private owner who still has another active member.
+  After the deleting commit, cookie and bearer both fail, including when a later batch fails and is retried.
+  Another participant's result total and rank are unchanged.
+  deletion_log has no user id.
+
+Mobile client
+  Extend client.test.ts for the new methods.
+  A bearer header is attached from the existing token store.
+  No screen tests in this plan, because no screens are built.
+
+Concurrency
+  Two joins to two organization expeditions for one user: one wins, the other gets slot_occupied.
+  Close overlapping leave, restart, and privacy removal, as specified in 5.6.
+
+
+12. Field Journal support
+
+No screens are part of this plan. The home payload is shaped for the Field Journal direction.
+
+The active journey is the focus: route name, curated route image, current checkpoint, progress, and a continue action. Paused journeys and expeditions are present and secondary. Invitations are present so the next action can offer them. Activity history remains a dated personal list through the existing activity endpoints, which is enough for field notes. The API does not accept user photos, motivational copy, or a social feed.
+
+Organization profiles supply the branded place a Community tab can open: name, colors, welcome, and that organization's expeditions. Roster and party details stay on the expedition endpoints, for participants and managers only.
+
+
+13. Deferred
+
+Competitive seasons, official rankings, provider imports, automated validation, appeals, moderation, comments, chat, direct messages, social posts, authored announcements, automated milestone announcements, and email invitations. competition_seasons and the verification-event table stay. No competitive feature is built on them. Manual activities continue to record a single not_required verification event.
+
+
+14. Consistency audit
+
+Every active participation has a non-null journey for the same user and the expedition's route. The foreign keys require it, and the cutover deletes old participation rows instead of leaving them journey-less.
+
+Join, rejoin, and invite accept all use one activation function. A paused journey is resumed. A first journey is started. A completed or abandoned journey produces restart_required unless the client explicitly confirms a new attempt.
+
+Several private expeditions can be active together. They share one journey when they share a route. They pause each other's routes when they do not. One organization expedition can be active in the whole account. Global Everest occupies neither restriction.
+
+Restart repoints active expeditions on that route and pauses a different route's active journey. It does not update a completed or archived snapshot, and it does not move a withdrawn participation.
+
+A person who finished and then left stays pointed at the completed journey, keeps final_standings_eligible, and is written into the close snapshot. A person who left first and finished later does not gain the flag. A person who restarted while still a participant, and then left, is judged on the new journey: they can keep read access because an older completed attempt exists, and they are absent from the final standings because the journey the expedition was showing was not completed. The two flags are written by the same leave function and are not derived from each other.
+
+Privacy removal deletes a private owner's expedition, or archives it with a null owner, when nobody else is active. It refuses while another active member exists, until ownership is transferred. The owner column does not keep the removed person.
+
+Account deletion uses that same owner release, refuses while the user is still an active organization owner or the owner of a private expedition with other active members, and deletes completed-journey credits only after login is already disabled.
+
+Summit confirmation is recomputed under the journey lock, bound to progress_version and the credited amount, and unused tokens do not write. Completion freezes every credit on that journey without blocking account deletion.
+
+One lock order covers every multi-row flow in section 5.
+
+
+15. Open questions
+
+1. Which user ids belong in PLATFORM_ADMIN_IDS. The allowlist mechanism is decided. The ids are operational.
+
+2. Where organization logo and image bytes are stored. The columns may stay null until that choice is made. Journey work does not depend on it.
+
+3. The failure-limit numbers. A limit is part of the auth phase. Five failures in fifteen minutes is the default written into that phase, and it can change without a domain change.
