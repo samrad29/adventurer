@@ -33,7 +33,7 @@ Organization
   Owns membership and the branding fields already on organizations: logo_ref, image_ref, colors, and welcome_message. Membership is not required to participate in an open organization expedition. Home may show that public branding to a participant who is not a member. It does not show the membership list.
 
 Home composer
-  A new read-only module, called by GET /api/v1/home. It asks the journey service for the user's journeys, a route read for checkpoints, the existing view_model for the current and next stop, a pure scene function for the image, and expedition and invitation reads for the surrounding context. Next-action choice lives here because it is presentation priority, not a domain transition.
+  A new read-only module, called by GET /api/v1/home. It asks the journey service for the user's journeys, a route read for checkpoints, the existing view_model for the current and next stop, a pure scene function for the image, and expedition and invitation reads for the surrounding context. It lists the actions the user is eligible to take. It does not order them for display, and reading home does not perform any of them.
 
 Scene function
   A pure function beside view_model. Inputs are the route's checkpoints, the journey total in meters, and the curated file lookup. Output is the selected place and the image that survives fallback. It has no database writes and it is not called from activity create, update, or delete.
@@ -70,7 +70,7 @@ What already exists
 
   routes has slug, name, region, summary, target_elevation_m, and status. It has no image column.
   route_checkpoints has slug, name, position, and elevation_m, unique per route for position, slug, and elevation. It has no image column.
-  The site resolves a stop photograph by looking for photos/{stop_slug} plus a known extension, and returns no path when the file is absent.
+  The current _photo() helper resolves a stop by a flat file name, photos/{stop_slug} plus a known extension, and returns no path when the file is absent. It is not route-scoped and it has no hero lookup. That helper stays as it is. Home does not call it.
   photo_credits.json is keyed by stop slug and already stores author, license, license_url, source_url, and alt. It is curated content, like challenges.py.
   expeditions already has accent_color, welcome_override, and image_ref.
   organizations already has logo_ref, image_ref, colors, and welcome_message.
@@ -80,9 +80,13 @@ Required migration
 
   None. Checkpoint elevation is the scene index. Adding a media table, a segment table, or a progress-image column would create a second geography or a second progress value.
 
-File convention
+Image resolver
 
-  Bytes stay as curated files served by Flask static. The home payload carries a path, not the file.
+  No schema migration is required. The source assets are the curated files under photos/ and the attribution already stored in photo_credits.json. Those files are route content.
+
+  A later route-aware resolver, not _photo(), performs the lookup below. It belongs to route and content presentation. Activity services do not import it. Journey transitions do not import it. Whether a file exists has no effect on journey progress, checkpoint unlocks, or authorization. A missing picture changes only scene.image.
+
+  The resolver is not implemented by this document.
 
   Lookup order for a checkpoint image:
     photos/{route_slug}/{checkpoint_slug}{ext}
@@ -119,6 +123,19 @@ Endpoint
 
 The handler is aggregation only. Journey status changes remain POST /api/v1/journeys/switch, resume, abandon, and restart. Route detail remains GET /api/v1/routes/<slug>. Expedition boards, rosters, and feeds remain on the expedition routes. Home does not embed those collections.
 
+journey and focus
+
+  These are different objects. Reading home never changes either of them.
+
+  journey is the Phase 4A active journey, or null. When it is present its status is active, so this is the only journey that can receive credits. It carries the route and the progress Phase 4A assigned to it: id, status, attempt_number, progress_version, total_ft, remaining_ft, percent, summited, route slug, name, region, summit_ft, the curated scene, and the current and next checkpoints. A paused, completed, or abandoned attempt is never placed here.
+
+  focus is the journey context the home scene centers on. It does not grant an active status and it does not make a finished attempt eligible for credits.
+    When an active journey exists, focus is a reference: journey_id and status active. The route, progress, checkpoints, and scene stay on journey. They are not copied.
+    When the center is a completed or abandoned current attempt, journey is null and focus carries that attempt's presentation: journey_id, status, attempt_number, progress_version, the progress numbers, route, checkpoints, and scene. status is completed or abandoned. Credits are refused for that attempt. A new attempt requires the restart action, which creates a different journey.
+    When the center is neither an active journey nor a finished attempt, focus is null. That is the ready state, and the state in which only paused journeys exist.
+
+  state names that center: active, resume, completed, abandoned, or ready. It does not remove actions.
+
 Response shape
 
   you
@@ -127,20 +144,17 @@ Response shape
   state
     ready, active, resume, completed, or abandoned. See section 6.
 
-  next_action
-    One of the Phase 4A codes: continue, resume, start_new_attempt, review_invitation, choose_route.
+  next_actions
+    Every journey action the caller is eligible to perform, in the stable order below. The array is not a ranking. The client chooses visual prominence. Home does not drop a valid action because another one is more central.
 
   journey
-    Null, or the active journey only: id, status, attempt_number, progress_version, total_ft, remaining_ft, percent, summited.
-    A paused, completed, or abandoned journey is never placed here. That preserves the Phase 4A field.
+    The active journey, with its route and progress, or null. See above.
 
   focus
-    Null when state is ready or resume.
-    Otherwise the journey the scene is about, plus its route, reached checkpoint, next checkpoint, and scene.
-    When state is active, focus.journey_id is journey.id.
+    A reference to journey when state is active. The full presentation of one finished attempt when state is completed or abandoned. Null when state is ready or resume.
 
   paused_journeys
-    Current paused attempts only, not the home scene. Each entry has the journey progress fields, route slug, name, region, summit_ft, and a scene selected by the same rules. Phase 4A asked for that progress shape without making a paused journey the focus.
+    Current paused attempts. Each has the same progress shape as an active journey, including its route and scene, and is not focus. Phase 4A asked for that shape without making a paused journey the home center. The matching resume_journey action carries only ids. The progress body lives once, on this entry.
 
   expeditions
     The caller's active participations. Each has expedition slug, name, kind, status, route_slug, contributing, and displayed_total_ft.
@@ -151,12 +165,33 @@ Response shape
     Withdrawn participations are omitted. A retained-read expedition stays on its own endpoint.
 
   incoming_invitations
-    Pending invitations already defined for GET /api/v1/invitations. Home does not accept or decline them.
+    Pending invitations the caller may act on. Home does not accept or decline them. Each row holds the display context once: id, kind, expires_at, and expedition slug, name, and route_slug. Its actions array uses the action object below and contains only accept_invitation and, for a username invite, decline_invitation. Those actions are not repeated in next_actions.
 
-Focus fields
+Action object
 
-  journey_id, status, attempt_number, progress_version
-  total_ft, remaining_ft, percent, summited
+  type
+    A stable code. The home journey codes are continue_journey, resume_journey, start_new_attempt, and choose_route. Invitation rows use accept_invitation and decline_invitation. No other type is emitted. None of these types is a new write. continue_journey and choose_route do not change the database. resume_journey is POST /api/v1/journeys/resume. start_new_attempt is POST /api/v1/journeys/restart. accept_invitation and decline_invitation are the existing invitation accept and decline paths.
+
+  Targets
+    continue_journey and resume_journey: journey_id and route_slug. One resume_journey is returned for each paused journey. A resume action without a journey id is not returned.
+    start_new_attempt: journey_id, route_slug, and status completed or abandoned. The status says why a new attempt is offered. It does not make that journey active and it does not accept credits on it.
+    choose_route: no target. Returned only when the user has no current journey on any route.
+    accept_invitation and decline_invitation: invitation_id only. The expedition and route stay on the invitation row.
+
+  Eligibility
+    continue_journey: the single active journey.
+    resume_journey: each current journey whose status is paused. A completed journey is not resumed from home.
+    start_new_attempt: each current journey whose status is completed or abandoned. An active or paused journey is not offered here. Restart of an in-progress journey remains available on the journey endpoint and is not a home action.
+    choose_route: no current journey exists.
+    accept_invitation: each pending invitation this user may accept.
+    decline_invitation: a pending username invitation this user may decline. A share link does not get one. Phase 4A keeps a share link pending across accepts until it expires or is revoked.
+
+  Order inside next_actions, which is not display priority:
+    continue_journey, then resume_journey by route_slug, then start_new_attempt by route_slug, then choose_route.
+    Invitation actions stay on their invitation, accept_invitation before decline_invitation. Invitations are ordered by id.
+
+Scene fields, wherever a progress body is carried
+
   route: slug, name, region, summit_ft
   checkpoint.current: null, or slug, name, elevation_ft
   checkpoint.next: null, or slug, name, elevation_ft
@@ -165,18 +200,20 @@ Focus fields
   scene.image: null, or path, alt, credit
   scene.fallback: null, lower_checkpoint, route_hero, or none
 
-  image.path is a stable static path such as /static/photos/lukla.jpg. It does not contain the journey id, the total, or progress_version. image.credit uses the photo_credits.json fields. Feet are the existing API unit. The selector itself compares meters.
+  On an active journey these fields live on journey. On a paused journey they live on that paused_journeys entry. On a finished focus they live on focus. They are not copied onto a second object for the same attempt.
+
+  image.path is a stable static path such as /static/photos/lukla.jpg. It does not contain the journey id, the total, or progress_version. image.credit uses the photo_credits.json fields. Feet are the existing API unit. The selector itself compares meters. The next checkpoint has no photo path. It is not unlocked.
 
 Errors stay a human error string plus a stable code. This route adds no new code. Unauthenticated is the existing 401.
 
 Representative responses
 
-No journey yet. state ready. next_action choose_route.
+No journey yet. state ready. The only journey action is choose_route.
 
   {
     "you": {"id": 1, "name": "Sam"},
     "state": "ready",
-    "next_action": "choose_route",
+    "next_actions": [{"type": "choose_route"}],
     "journey": null,
     "focus": null,
     "paused_journeys": [],
@@ -184,24 +221,18 @@ No journey yet. state ready. next_action choose_route.
     "incoming_invitations": []
   }
 
-Active journey, below the first checkpoint, no expedition. The scene is the route hero. If that file is missing, image is null and fallback is none. The checkpoint object stays empty either way.
+Active journey, below the first checkpoint, no expedition. The scene is on journey. focus only names that active journey. If the hero file is missing, image is null and fallback is none. The checkpoint object stays empty either way.
 
   {
     "you": {"id": 1, "name": "Sam"},
     "state": "active",
-    "next_action": "continue",
+    "next_actions": [{
+      "type": "continue_journey",
+      "journey_id": 10,
+      "route_slug": "everest"
+    }],
     "journey": {
       "id": 10,
-      "status": "active",
-      "attempt_number": 1,
-      "progress_version": 1,
-      "total_ft": 400,
-      "remaining_ft": 28632,
-      "percent": 1.4,
-      "summited": false
-    },
-    "focus": {
-      "journey_id": 10,
       "status": "active",
       "attempt_number": 1,
       "progress_version": 1,
@@ -231,19 +262,20 @@ Active journey, below the first checkpoint, no expedition. The scene is the rout
         "fallback": null
       }
     },
+    "focus": {"journey_id": 10, "status": "active"},
     "paused_journeys": [],
     "expeditions": [],
     "incoming_invitations": []
   }
 
-Active journey at a checkpoint that has a photograph. Timms Hill has been passed, but its file is missing, and no lower checkpoint has one, so the example in section 6 shows the hero fallback. This example is Lukla, the first Everest stop with a credit entry.
+Active journey at a checkpoint that has a photograph. This fragment is Lukla, the first Everest stop with a credit entry. It lives on journey, not on focus.
 
-  "focus.checkpoint.current": {
+  "journey.checkpoint.current": {
     "slug": "lukla",
     "name": "Lukla",
     "elevation_ft": 9383
   }
-  "focus.scene": {
+  "journey.scene": {
     "role": "checkpoint",
     "checkpoint_slug": "lukla",
     "image": {
@@ -261,12 +293,12 @@ Active journey at a checkpoint that has a photograph. Timms Hill has been passed
 
 Reached checkpoint with no file, and no lower file. The journey is at Timms Hill. The scene does not advance to Lukla.
 
-  "focus.checkpoint.current": {
+  "journey.checkpoint.current": {
     "slug": "timms-hill",
     "name": "Timms Hill",
     "elevation_ft": 1951.5
   }
-  "focus.scene": {
+  "journey.scene": {
     "role": "route_hero",
     "checkpoint_slug": "timms-hill",
     "image": {
@@ -313,16 +345,19 @@ Active journey and an organization expedition. The participant need not be a mem
     }
   }]
 
-Switched routes. The Kilimanjaro journey is active and supplies the scene. The Everest journey is paused and listed, with its own scene for a later card. The Everest expedition remains, and contributing is false because its journey is not active.
+Switched routes. Kilimanjaro is the active journey, so it owns the scene and focus points at it. Everest is paused. Both actions are present. The Everest expedition remains, and contributing is false because its journey is not active. Opening home does not resume Everest.
 
   "state": "active"
-  "next_action": "continue"
-  "journey.status": "active"
-  "journey" route implied by focus: "kilimanjaro"
+  "next_actions": [
+    {"type": "continue_journey", "journey_id": 20, "route_slug": "kilimanjaro"},
+    {"type": "resume_journey", "journey_id": 10, "route_slug": "everest"}
+  ]
+  "journey": {"id": 20, "status": "active", "route": {"slug": "kilimanjaro"}}
+  "focus": {"journey_id": 20, "status": "active"}
   "paused_journeys": [{
     "id": 10,
     "status": "paused",
-    "route_slug": "everest",
+    "route": {"slug": "everest", "name": "Everest", "region": "Khumbu, Nepal", "summit_ft": 29032},
     "total_ft": 9383,
     "percent": 32.3,
     "scene": {
@@ -342,11 +377,49 @@ Switched routes. The Kilimanjaro journey is active and supplies the scene. The E
     "organization": null
   }]
 
-Completed journey, nothing else in progress. journey is null because nothing is active. focus is the completed current attempt. The total is the capped journey total, so the scene is the summit checkpoint when that file exists.
+Paused journey and a pending invitation, with no active journey. focus is null, so neither the paused route nor the invitation becomes the scene. The resume action names Everest. The invitation carries its own accept and decline actions and is not copied into next_actions. Home does not resume the journey and does not accept the invitation.
+
+  {
+    "you": {"id": 1, "name": "Sam"},
+    "state": "resume",
+    "next_actions": [{
+      "type": "resume_journey",
+      "journey_id": 10,
+      "route_slug": "everest"
+    }],
+    "journey": null,
+    "focus": null,
+    "paused_journeys": [{
+      "id": 10,
+      "status": "paused",
+      "route": {"slug": "everest", "name": "Everest", "region": "Khumbu, Nepal", "summit_ft": 29032},
+      "total_ft": 9383,
+      "percent": 32.3
+    }],
+    "incoming_invitations": [{
+      "id": 4,
+      "kind": "username",
+      "expires_at": "2026-12-22T00:00:00",
+      "expedition": {"slug": "kili-party", "name": "Kili party", "route_slug": "kilimanjaro"},
+      "actions": [
+        {"type": "accept_invitation", "invitation_id": 4},
+        {"type": "decline_invitation", "invitation_id": 4}
+      ]
+    }]
+  }
+
+Two paused journeys and no active journey produce two resume actions, each with its own journey_id and route_slug. focus stays null.
+
+Completed journey, nothing active or paused. journey is null. focus carries the finished attempt, and its status says credits are closed. The action starts a new attempt. It does not append credits to journey 10.
 
   {
     "state": "completed",
-    "next_action": "start_new_attempt",
+    "next_actions": [{
+      "type": "start_new_attempt",
+      "journey_id": 10,
+      "route_slug": "everest",
+      "status": "completed"
+    }],
     "journey": null,
     "focus": {
       "journey_id": 10,
@@ -373,7 +446,9 @@ Completed journey, nothing else in progress. journey is null because nothing is 
     "expeditions": []
   }
 
-Abandoned is the same shape with state abandoned, focus.status abandoned, and next_action start_new_attempt. The scene is the place that attempt had reached, not an empty trailhead.
+Abandoned is the same shape with state abandoned and focus.status abandoned. The start_new_attempt action reports status abandoned. The scene is the place that attempt had reached.
+
+A paused journey on one route and a completed journey on another leaves focus null and state resume. next_actions contains resume_journey for the paused route and start_new_attempt for the completed route. The completed attempt is not treated as active.
 
 No curated files at all. Position is still reported.
 
@@ -387,17 +462,28 @@ No curated files at all. Position is still reported.
 
 6. State handling and fallback behavior
 
-Focus priority
+Focus selection
 
-  1. An active journey, if one exists. state is active. next_action is continue. There is at most one.
-  2. Otherwise, if any current journey is paused, state is resume. focus is null. next_action is resume. paused_journeys lists every paused current attempt. Their scenes are available on those entries and are not the home scene. A paused journey is not silently resumed by opening home.
-  3. Otherwise, if any current journey is completed or abandoned, state is that journey's status. focus is that journey. next_action is start_new_attempt. Among several, choose the latest completed_at or abandoned_at, then the smallest route slug. Restart remains an explicit journey action. Home does not restart anything.
-  4. Otherwise there is no journey. state is ready. focus is null. next_action is choose_route.
-  5. review_invitation replaces choose_route when state would be ready and a pending invitation exists. It does not outrank an active journey, a paused journey, or a finished attempt. The invitation list is present in every state.
+  Reading home does not activate, resume, abandon, or restart a journey. The response describes actions. The matching POST performs them.
 
-A completed journey stays completed. Home does not turn it into an active journey and does not offer resume. A paused journey is resumed only through the journey resume or switch operation.
+  1. An active journey exists, with or without paused journeys on other routes. state is active. focus is {journey_id, status: active} and points at journey. There is at most one active journey. Each paused journey remains in paused_journeys and keeps its own resume_journey action. A completed or abandoned current journey on another route keeps its start_new_attempt action. None of those actions is removed because the active journey is the center.
+  2. No active journey, and one or more paused journeys. state is resume. focus is null, including when several routes are paused and including when another route has a completed or abandoned current journey. Every paused journey has its own resume_journey action, with that journey id and route slug. A finished attempt on another route still has start_new_attempt. Home does not pick one paused route and hide the others.
+  3. No active journey and no paused journey, and at least one current journey is completed or abandoned. state is that selected attempt's status. journey is null. focus carries the selected attempt's presentation. Selection is the latest completed_at or abandoned_at, then the smallest route slug. Every finished current attempt, not only the selected one, has its own start_new_attempt action. Home does not restart the selected attempt.
+  4. No current journey. state is ready. journey and focus are null. next_actions contains choose_route.
 
-Expedition context does not change focus. A private expedition, a global expedition, and an organization expedition can all point at the focus journey. Zero expeditions is normal, because registration creates neither a journey nor a participation, and starting a journey does not join one.
+  A pending invitation does not change this selection. It adds an incoming_invitations row in every state above. Accept and decline sit on that row.
+
+How journey and focus relate
+
+  Active journey, nothing else. journey holds the route, progress, checkpoints, and scene. focus references journey.id.
+  Active journey plus paused journeys. The same. The paused bodies are in paused_journeys, not in journey and not in focus.
+  Paused journeys only, or paused plus a finished attempt elsewhere. journey is null. focus is null. Each paused entry carries that route's progress and scene, and none of them is the home center. The finished attempt is identified by its start_new_attempt action and is not given the center either.
+  Finished attempts only. journey is null. focus holds the one selected attempt, with status completed or abandoned, and is the only place that attempt's scene appears. Other finished attempts appear as actions, not as a second focus.
+  No journeys. Both are null.
+
+A completed or abandoned focus cannot receive credits. continue_journey is absent in that state. resume_journey is absent for that route. start_new_attempt names the finished journey and, when used, creates a new attempt through the restart endpoint.
+
+Expedition context does not change focus. A private, global, or organization expedition can point at the active journey, or at a paused or finished journey on its own route. Zero expeditions is normal, because registration creates neither a journey nor a participation, and starting a journey does not join one.
 
 Image fallback never changes the reached checkpoint. current stays Timms Hill while the file falls back to the hero. next remains the following checkpoint and does not lend its picture. A route whose checkpoints have no files uses the hero for every reached position, with fallback route_hero, until the hero itself is missing.
 
@@ -423,11 +509,11 @@ The composer reads, in one request:
 
   the user
   that user's current journeys, which is a small set because only one journey per route is current and only one is active
-  checkpoints for the focus route and for each paused route
+  checkpoints for the active journey's route, for each paused route, and for the finished attempt carried on focus when journey is null
   active participations joined to expeditions and, for organization expeditions, the organization row
   pending invitations
 
-Checkpoint images are not queried per stop. The file resolver lists the curated directory once and matches slugs in memory, which is what a single _photo scan already does. The home document does not contain stop stories, the full checkpoint list, roster rows, or feed rows. Those stay on their own routes.
+Checkpoint images are not queried per stop. The future route-aware resolver lists the curated directory once and matches route and checkpoint slugs in memory. Today's flat _photo() helper is not that resolver. The home document does not contain stop stories, the full checkpoint list, roster rows, or feed rows. Those stay on their own routes.
 
 Image paths are stable. Progress changes the selected path only when the fallback result changes, usually when the total reaches a higher checkpoint that has a file. Clients cache by path. progress_version tells the client that the journey total may have changed. It is not appended to the image URL. Replacing a curated file is a new deployment of that static file, not a journey write.
 
@@ -444,7 +530,7 @@ Already in place
   Route, checkpoint, journey, participation, expedition, and organization tables.
   Journey lifecycle service and its tests.
   view_model's current and next checkpoint rule.
-  Curated photo lookup and photo_credits.json.
+  Curated photo files, photo_credits.json, and the flat _photo() helper. The route-aware resolver is not written yet.
   Phase 4A's decision that GET /api/v1/home is the aggregate, and that its photographs are the curated files.
 
 Still required before the numbers and the scene are meaningful
@@ -456,7 +542,7 @@ Not required first
   Close, leave flags, and privacy removal. displayed_total_ft uses the board rules once those writes exist. Until then the composer sums the pointed journey and applies display_credits_after when the column is set.
 
 Sequence
-  1. Pure scene function and tests: reached checkpoint, between checkpoints, below the first checkpoint, missing checkpoint file, missing hero, summit. No HTTP and no new tables.
+  1. Route-aware image resolver and the pure scene function, in route presentation: reached checkpoint, between checkpoints, below the first checkpoint, missing checkpoint file, missing hero, summit. No HTTP, no migration, and no import from activity or journey services. Image misses do not change progress, unlocks, or authorization.
   2. Home composer, after credit totals are readable. It calls the journey service, route reads, view_model, the scene function, participation reads, and invitations.
   3. GET /api/v1/home in the Phase 4A home phase, including the scene fields from the first version of the payload so a later visual pass does not change the contract.
   4. One method on the existing mobile API client. No screen in that phase.
@@ -470,9 +556,10 @@ Activity services should not import the scene function. Expedition services shou
 Settled
 
   GET /api/v1/home is the only home route. /api/v1/me/home is not a second contract.
-  The active journey is the home scene whenever one exists. Paused journeys are listed and are not the focus.
-  With no active and no paused journey, the latest completed or abandoned current journey is the focus, and next_action is start_new_attempt. With no journey at all, focus is null.
-  review_invitation is the next action only for a ready account that has a pending invitation.
+  journey is the active journey and carries its route, progress, checkpoints, and scene. focus references that id while a journey is active. focus carries presentation only for a completed or abandoned center, and that status cannot receive credits.
+  An active journey is the center whenever one exists. Paused and finished journeys on other routes stay visible as their own actions.
+  With no active journey, paused journeys leave focus null. Each paused journey has its own resume_journey target. With neither active nor paused journeys, the latest finished current attempt is focus, and every finished current attempt still has start_new_attempt.
+  next_actions is an array of eligible journey actions. Invitation accept and decline live once, on the invitation row. Home returns every eligible action and does not pick a winner. The client chooses prominence. Reading home performs none of them.
   Scene selection is the reached checkpoint, then the nearest lower image, then the route hero, then null. It never uses a locked checkpoint's image.
   The personal scene uses the full capped journey total. Expedition cards use the board total. Those numbers can differ after privacy rejoin, and the scene follows the personal total.
   No migration and no media table. Files stay curated static assets. Credits and alt text stay in photo_credits.json.
@@ -481,9 +568,11 @@ Settled
 
 Relationship to Phase 4A
 
-  This document does not reopen journey lifecycle, credit ownership, restart, snapshots, or registration. The journey field on home remains "the active journey, or null," which is what Phase 4A specified. focus is the extra object that gives start_new_attempt a completed or abandoned attempt to show, without calling that attempt active.
+  This document does not reopen journey lifecycle, credit ownership, restart, snapshots, or registration. journey remains the active journey or null, and now keeps the route, progress, and checkpoint fields Phase 4A put on that object. focus is the center of the home scene. When the center is the active journey, focus only repeats the id. When the center is a finished attempt, journey stays null and focus holds the presentation, with a status that cannot take credits.
 
-  Phase 4A says each of the current and next checkpoints includes a photo path when the stop is unlocked. The next stop is not unlocked, so it has no photo in the home payload. The current stop's photo is the scene, subject to the fallback above. That is a refinement of the same rule, not a second progress system.
+  Phase 4A named next_actions as a plural list and also described a server-chosen next action. This document keeps the array. The server returns every eligible action in a stable order and does not discard one because another is a better center. Phase 4A's codes map onto continue_journey, resume_journey, start_new_attempt, and choose_route. review_invitation is not a competing singleton. Accept and decline are the existing invitation operations, carried on the invitation so the expedition is not described twice.
+
+  Phase 4A says each of the current and next checkpoints includes a photo path when the stop is unlocked. The next stop is not unlocked, so it has no photo in the home payload. The current stop's photo is the scene, subject to the fallback above. That is a refinement of the same rule, not a second progress system. The flat _photo() helper is the current file lookup. The route-aware resolver is future presentation code.
 
   Phase 4A Phase 10 still owns implementation of the endpoint and the client method. This document fixes the scene contract those deliver. It does not pull that work forward into activity services.
 
@@ -492,8 +581,6 @@ Open questions
   1. Whether a route hero photograph should be produced for the Everest approach below Lukla. The contract already allows image null. The missing piece is the curated file, not a schema decision. photo_credits.json has no entry for Timms Hill, the four-thousand-foot stop, the seven-thousand-foot stop, or a route hero.
 
   2. Where organization logo and expedition image bytes live. Unresolved in Phase 4A. Home returns the existing refs and does not interpret them. A URL field waits on that choice.
-
-  3. Whether a pending invitation should outrank resume or a finished attempt in next_action. The default above keeps the journey as the focus and still returns the invitation list. Changing the winner does not change scene selection.
 
 Deferred
 
