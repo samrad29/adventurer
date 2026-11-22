@@ -6,20 +6,20 @@ Phase 4A remains the source of truth for routes, journeys, expeditions, credits,
 
 1. Executive summary
 
-The home payload is a presentation of one journey's position on a shared route. The journey total, capped at the route target, is the only progress input. The scene is the curated photograph of the highest checkpoint that total has reached. Below the first checkpoint, and whenever that photograph is missing, the scene falls back along the route. It never looks ahead to a checkpoint the journey has not reached, and it never stores a separate visual-progress value.
+The home payload is a presentation of one journey's position on a shared route. The only progress input is that journey's credited total for each metric the route requires, each capped at its own target. Phase 4A section 16 defines those metrics. The scene is the curated photograph of the highest checkpoint those totals have reached. Below the first checkpoint, and whenever that photograph is missing, the scene falls back along the route. It never looks ahead to a checkpoint the journey has not reached, and it never stores a separate visual-progress value. There is no combined percent.
 
 GET /api/v1/home is the endpoint. Phase 4A already named it. A /me/home path would be a second name for the same authenticated read. The handler composes journey, route, expedition, and invitation reads. It does not own lifecycle rules, and activity saving does not select an image.
 
-No migration is required. Routes and checkpoints already define the elevation line. Curated files under photos/ and the credits in photo_credits.json already describe the pictures. Organization and expedition branding columns already exist and stay on those owners. They decorate an expedition card. They do not replace the route scene.
+Home adds no scene table and no second progress column. Phase 4A section 16 replaces the elevation line with route and checkpoint requirements. This document only reads them. Curated files under photos/ and the credits in photo_credits.json already describe the pictures. Organization and expedition branding columns already exist and stay on those owners. They decorate an expedition card. They do not replace the route scene.
 
 
 2. Domain ownership and responsibilities
 
 Route
-  Shared geography. The route owns the target elevation, the ordered checkpoints, the narrative in challenges.py, and the curated photographs. Every user and every expedition on that route sees the same places and the same pictures. A route does not know who is climbing it.
+  Shared geography. The route owns its metric requirements, the ordered checkpoints and their thresholds, the narrative in challenges.py, and the curated photographs. Every user and every expedition on that route sees the same places and the same pictures. A route does not know who is on it.
 
 Route journey
-  One user's attempt at one route. It owns status, attempt number, is_current, and progress_version. Its position is the sum of its journey credits, capped at the route target. That sum is the only input to scene selection. Switching, resuming, abandoning, and restarting stay in adventurer/journeys.py. Those operations do not copy progress and do not choose an image.
+  One user's attempt at one route. It owns status, attempt number, is_current, and progress_version. Its position is the capped credit total of each required metric. Those totals are the only input to scene selection. Switching, resuming, abandoning, and restarting stay in adventurer/journeys.py. Those operations do not copy progress and do not choose an image.
 
   The journey service remains a lifecycle service. It does not learn about photographs, expeditions, or the home payload.
 
@@ -27,7 +27,7 @@ Expedition
   One group on exactly one route. It owns identity, kind, organization link, branding overrides, participants, the live or final board, and its own lifecycle. Its image_ref, accent_color, and welcome_override are expedition presentation. They are not a second route illustration.
 
 Expedition participation
-  The link from a user to an expedition. It points at the journey the expedition currently displays. It does not own elevation. Home reads the pointer. It does not invent a participation total.
+  The link from a user to an expedition. It points at the journey the expedition currently displays. It does not own any metric. Home reads the pointer. It does not invent a participation total.
 
 Organization
   Owns membership and the branding fields already on organizations: logo_ref, image_ref, colors, and welcome_message. Membership is not required to participate in an open organization expedition. Home may show that public branding to a participant who is not a member. It does not show the membership list.
@@ -36,32 +36,32 @@ Home composer
   A new read-only module, called by GET /api/v1/home. It asks the journey service for the user's journeys, a route read for checkpoints, the existing view_model for the current and next stop, a pure scene function for the image, and expedition and invitation reads for the surrounding context. It lists the actions the user is eligible to take. It does not order them for display, and reading home does not perform any of them.
 
 Scene function
-  A pure function beside view_model. Inputs are the route's checkpoints, the journey total in meters, and the curated file lookup. Output is the selected place and the image that survives fallback. It has no database writes and it is not called from activity create, update, or delete.
+  A pure function. Inputs are the route's checkpoints and their requirement thresholds, the journey's capped storage totals, and the curated file lookup. Output is the selected place and the image that survives fallback. It has no database writes and it is not called from activity create, update, or delete.
 
 Activity service
-  Later work writes activities and journey credits. After commit, the next home read sees the new total and, only when a checkpoint elevation has been crossed, a different scene. The activity transaction does not resolve a photograph.
+  Later work writes activities and journey credits. After commit, the next home read sees the new metric totals and, only when a checkpoint's thresholds are all met, a different scene. The activity transaction does not resolve a photograph.
 
 
 3. Dynamic scene-selection rules
 
-Position comes from the existing checkpoint rule. Walk the route's checkpoints in ascending elevation_m. The reached checkpoint is the last one whose elevation_m is less than or equal to the journey total. Before the first checkpoint, nothing has been reached. view_model already treats a stop as current once the displayed feet reach that stop. Scene selection uses the same comparison in meters so rounding for display cannot pick a different place.
+Position comes from checkpoint requirements. Walk the route's checkpoints in ascending position. A checkpoint is reached only when every one of its thresholds is less than or equal to the journey's capped storage total for that metric. Meeting one threshold of a two-metric checkpoint does not reach it. Before the first checkpoint, nothing has been reached. The highest reached checkpoint is the reached one with the greatest position. Display rounding is not the comparison. Storage meters are.
 
-route_checkpoints.elevation_m is unique per route, so two checkpoints cannot tie. Ranges do not overlap because the line is a single increasing total, not a set of segments. Position is not a second order. If position and elevation ever disagreed, elevation wins, because the journey total is elevation. Everest is a strict climb, so the two orders match today.
+Position is the only order. The earlier rule that elevation wins when it disagrees with position is withdrawn. Phase 4A requires thresholds to be monotonic along position, so a later checkpoint cannot be reached while an earlier one is not.
 
-The journey total is the sum of that journey's credits, capped at the route target. display_credits_after does not apply. Phase 4A already says the personal journey, including home, shows the full journey. An expedition card on the same payload uses the board rule, including display_credits_after, and that number is not fed back into the scene.
+The journey totals are the sums of that journey's credits, each capped at its own target. display_credits_after does not apply. Phase 4A already says the personal journey, including home, shows the full journey. An expedition card on the same payload uses the board rule, including display_credits_after, for every metric, and those numbers are not fed back into the scene.
 
 Selection, in order:
 
   1. If a checkpoint has been reached and that checkpoint has a curated image, the scene is that image. role is checkpoint.
-  2. If the reached checkpoint has no image, walk downward by elevation and use the nearest lower checkpoint that has one. role is checkpoint. fallback is lower_checkpoint. The response still names the reached checkpoint, so the client can tell position from the file that was found.
+  2. If the reached checkpoint has no image, walk downward by position and use the nearest lower checkpoint that has one. role is checkpoint. fallback is lower_checkpoint. The response still names the reached checkpoint, so the client can tell the place from the file that was found.
   3. If no reached checkpoint has an image, or no checkpoint has been reached, use the route hero. role is route_hero. fallback is route_hero when a reached checkpoint was skipped for lack of a file, and null when the journey is simply below the first checkpoint.
   4. If the route hero is also missing, image is null. role is none. fallback is none. The checkpoint identity is still returned.
 
-The next checkpoint is reported separately. Its image is not the scene. A locked place stays locked, which is the current site rule that a stop photo is available only once the stop is unlocked. Between checkpoints the scene stays on the place already reached until the total meets the next elevation. Reaching an elevation exactly selects that checkpoint.
+The next checkpoint is reported separately. Its image is not the scene. A locked place stays locked, which is the current site rule that a stop photo is available only once the stop is unlocked. Between checkpoints the scene stays on the place already reached until every threshold of the next checkpoint is met. Meeting a threshold exactly counts as reaching it.
 
 The route hero is the picture of the approach, before the first checkpoint opens. Everest has one. It shows the broader Everest and Khumbu setting, and it is not a photograph of Lukla, Timms Hill, or any later checkpoint. The opening of the journey then has its own scene without implying the person has reached a place they have not. photo_credits.json currently begins at Lukla, and the hero file is not in the repository yet. Adding that file and its credit entry is curated route content for the route-aware resolver. Until the file exists, the selector returns image null rather than borrowing a checkpoint photograph.
 
-The choice is deterministic. The same route files and the same total always return the same scene. There is no per-user scene row, no viewed-at marker, and no priority column.
+The choice is deterministic. The same route files and the same metric totals always return the same scene. There is no per-user scene row, no viewed-at marker, and no priority column.
 
 
 4. Recommended data model and schema changes
@@ -78,7 +78,7 @@ What already exists
 
 Required migration
 
-  None. Checkpoint elevation is the scene index. Adding a media table, a segment table, or a progress-image column would create a second geography or a second progress value.
+  None in this document. Phase 4A section 16 adds the requirement rows and then drops target_elevation_m and checkpoint elevation_m as progress inputs. Home does not add a media table, a segment table, or a progress-image column. Any of those would create a second geography or a second progress value.
 
 Image resolver
 
@@ -104,7 +104,7 @@ Optional later columns
 
   Nullable routes.hero_image_ref and route_checkpoints.image_ref, used only when a curator needs a path that the convention cannot express. Null means "use the convention." They are not required for Everest or for the first home implementation.
 
-  Do not add a route-media table, an asset library, upload, or a CMS. One image per checkpoint and one hero per route is the whole model. Ordering and priority are the checkpoint elevation. A priority column would be a second way to answer the same question.
+  Do not add a route-media table, an asset library, upload, or a CMS. One image per checkpoint and one hero per route is the whole model. Ordering is the checkpoint position. A priority column would be a second way to answer the same question.
 
 What home must not store
 
@@ -127,11 +127,11 @@ journey and focus
 
   These are different objects. Reading home never changes either of them.
 
-  journey is the Phase 4A active journey, or null. When it is present its status is active, so this is the only journey that can receive credits. It carries the route and the progress Phase 4A assigned to it: id, status, attempt_number, progress_version, total_ft, remaining_ft, percent, summited, route slug, name, region, summit_ft, the curated scene, and the current and next checkpoints. A paused, completed, or abandoned attempt is never placed here.
+  journey is the Phase 4A active journey, or null. When it is present its status is active, so this is the only journey that can receive credits. It carries the route and the progress Phase 4A assigned to it: id, status, attempt_number, progress_version, a metrics array, route slug, name, region, the curated scene, and the current and next checkpoints. A paused, completed, or abandoned attempt is never placed here. The journey is complete only when status is completed, which is when every metric in that array has complete true. There is no summited flag and no route-level percent beside the array.
 
   focus is the journey context the home scene centers on. It does not grant an active status and it does not make a finished attempt eligible for credits.
     When an active journey exists, focus is a reference: journey_id and status active. The route, progress, checkpoints, and scene stay on journey. They are not copied.
-    When the center is a completed or abandoned current attempt, journey is null and focus carries that attempt's presentation: journey_id, status, attempt_number, progress_version, the progress numbers, route, checkpoints, and scene. status is completed or abandoned. Credits are refused for that attempt. A new attempt requires the restart action, which creates a different journey.
+    When the center is a completed or abandoned current attempt, journey is null and focus carries that attempt's presentation: journey_id, status, attempt_number, progress_version, the metrics array, route, checkpoints, and scene. status is completed or abandoned. Credits are refused for that attempt. A new attempt requires the restart action, which creates a different journey. Focus does not keep a second copy of those metrics when an active journey is present.
     When the center is neither an active journey nor a finished attempt, focus is null. That is the ready state, and the state in which only paused journeys exist.
 
   state names that center: active, resume, completed, abandoned, or ready. It does not remove actions.
@@ -157,9 +157,9 @@ Response shape
     Current paused attempts. Each has the same progress shape as an active journey, including its route and scene, and is not focus. Phase 4A asked for that shape without making a paused journey the home center. The matching resume_journey action carries only ids. The progress body lives once, on this entry.
 
   expeditions
-    The caller's active participations. Each has expedition slug, name, kind, status, route_slug, contributing, and displayed_total_ft.
+    The caller's active participations. Each has expedition slug, name, kind, status, route_slug, contributing, and displayed_metrics.
     contributing is true only when the participation's journey is the active journey.
-    displayed_total_ft is the board total for that participation: the pointed journey, capped, and limited by display_credits_after when that timestamp is set.
+    displayed_metrics uses the same metric object as the journey, with credited and remaining taken from the board rule: the pointed journey, each metric capped, and limited by display_credits_after when that timestamp is set. It is not a copy of the personal journey totals when that filter differs.
     Private rows add accent_color, welcome_override, and image_ref.
     Organization rows add the public organization branding object. Global rows have no organization.
     Withdrawn participations are omitted. A retained-read expedition stays on its own endpoint.
@@ -190,11 +190,12 @@ Action object
     continue_journey, then resume_journey by route_slug, then start_new_attempt by route_slug, then choose_route.
     Invitation actions stay on their invitation, accept_invitation before decline_invitation. Invitations are ordered by id.
 
-Scene fields, wherever a progress body is carried
+Progress fields, wherever a progress body is carried
 
-  route: slug, name, region, summit_ft
-  checkpoint.current: null, or slug, name, elevation_ft
-  checkpoint.next: null, or slug, name, elevation_ft
+  metrics: one object per required metric, in metric-code order. Each object is metric, unit, target, credited, remaining, and complete. Amounts are decimal strings in the display unit. unit is ft or mi. complete is true only when that metric's capped credit has reached its target. A metric the route does not require is omitted, not sent as zero.
+  route: slug, name, region, and the same requirements the route detail returns: metric, unit, and target. The route object does not repeat the journey's credited amounts.
+  checkpoint.current: null, or slug, name, position, and requirements. Each requirement is metric, unit, and threshold.
+  checkpoint.next: null, or the same shape. It has no photo path.
   scene.role: checkpoint, route_hero, or none
   scene.checkpoint_slug: the reached checkpoint, or null below the first one
   scene.image: null, or path, alt, credit
@@ -202,7 +203,11 @@ Scene fields, wherever a progress body is carried
 
   On an active journey these fields live on journey. On a paused journey they live on that paused_journeys entry. On a finished focus they live on focus. They are not copied onto a second object for the same attempt.
 
-  image.path is a stable static path such as /static/photos/lukla.jpg. It does not contain the journey id, the total, or progress_version. image.credit uses the photo_credits.json fields. Feet are the existing API unit. The selector itself compares meters. The next checkpoint has no photo path. It is not unlocked.
+  image.path is a stable static path such as /static/photos/lukla.jpg. It does not contain the journey id, a metric total, or progress_version. image.credit uses the photo_credits.json fields. The selector compares storage meters. The client displays the metric strings. The next checkpoint has no photo path. It is not unlocked.
+
+The home screen stays a picture of one place on one route, with one indicator per required metric of the journey in focus. A paused journey card repeats that shape for its own route. The screen does not become a fitness dashboard: no combined score, no chart of unrelated history, and no indicator for a metric the route does not require.
+
+Examples later in this file that still print total_ft, remaining_ft, percent, summit_ft, elevation_ft, or displayed_total_ft are elevation-only illustrations from before section 16. They are not extra fields. Read each of those numbers as the single elevation metric of an elevation-only route. Do not emit them beside metrics.
 
 Errors stay a human error string plus a stable code. This route adds no new code. Unauthenticated is the existing 401.
 
@@ -539,7 +544,7 @@ Still required before the numbers and the scene are meaningful
 Not required first
   Organization administration. Branding fields can be null.
   Bearer auth. A cookie session can call the route. The mobile client sends a bearer the server does not accept yet. The client method belongs with Phase 4A's home phase, after bearer auth, and this document does not add a screen.
-  Close, leave flags, and privacy removal. displayed_total_ft uses the board rules once those writes exist. Until then the composer sums the pointed journey and applies display_credits_after when the column is set.
+  Close, leave flags, and privacy removal. displayed_metrics uses the board rules once those writes exist. Until then the composer sums each required metric on the pointed journey and applies display_credits_after when the column is set.
 
 Sequence
   1. Route-aware image resolver and the pure scene function, in route presentation: reached checkpoint, between checkpoints, below the first checkpoint, missing checkpoint file, route hero, summit. Include the Everest hero file and its photo_credits.json entry: a broader Everest and Khumbu photograph, not a checkpoint. No HTTP, no migration, and no import from activity or journey services. Image misses do not change progress, unlocks, or authorization.
@@ -560,9 +565,9 @@ Settled
   An active journey is the center whenever one exists. Paused and finished journeys on other routes stay visible as their own actions.
   With no active journey, paused journeys leave focus null. Each paused journey has its own resume_journey target. With neither active nor paused journeys, the latest finished current attempt is focus, and every finished current attempt still has start_new_attempt.
   next_actions is an array of eligible journey actions. Invitation accept and decline live once, on the invitation row. Home returns every eligible action and does not pick a winner. The client chooses prominence. Reading home performs none of them.
-  Scene selection is the reached checkpoint, then the nearest lower image, then the route hero, then null. It never uses a locked checkpoint's image. Everest's hero is a broader Everest and Khumbu photograph, not Lukla or another checkpoint. The file is added with the route-aware resolver.
-  The personal scene uses the full capped journey total. Expedition cards use the board total. Those numbers can differ after privacy rejoin, and the scene follows the personal total.
-  No migration and no media table. Files stay curated static assets. Credits and alt text stay in photo_credits.json.
+  Scene selection is the highest reached checkpoint, then the nearest lower position with an image, then the route hero, then null. A checkpoint with several thresholds is reached only when all of them are met. The scene never uses a locked checkpoint's image. Everest's hero is a broader Everest and Khumbu photograph, not Lukla or another checkpoint. The file is added with the route-aware resolver.
+  The personal scene uses the full capped totals of the journey. Expedition cards use the board totals. Those numbers can differ after privacy rejoin, and the scene follows the personal totals.
+  Home adds no media table. The metric tables belong to Phase 4A section 16. Files stay curated static assets. Credits and alt text stay in photo_credits.json.
   Organization branding and expedition image_ref are card fields. They do not own or override route imagery. Participation does not require organization membership. Where those image bytes live is deferred until branding and image display are implemented. The nullable refs stay as they are.
   The home module is a composer. Journey lifecycle, route content, and expedition rules stay in their own services. Activity writes do not select images.
 
@@ -574,7 +579,29 @@ Relationship to Phase 4A
 
   Phase 4A says each of the current and next checkpoints includes a photo path when the stop is unlocked. The next stop is not unlocked, so it has no photo in the home payload. The current stop's photo is the scene, subject to the fallback above. That is a refinement of the same rule, not a second progress system. The flat _photo() helper is the current file lookup. The route-aware resolver is future presentation code.
 
-  Phase 4A Phase 10 still owns implementation of the endpoint and the client method. This document fixes the scene contract those deliver. It does not pull that work forward into activity services.
+  Phase 4A Phase 10 still owns implementation of the endpoint and the client method. This document fixes the scene contract those deliver. It does not pull that work forward into activity services. Section 16 of Phase 4A replaces total_ft, remaining_ft, percent, and summit_ft with the metrics array. This document uses that array and does not keep the old fields beside it.
+
+Combined route
+
+  A route that requires 500 ft and 2 miles, with 500 ft credited and 1 mile credited, is still active. The scene stays on the last checkpoint whose elevation and distance thresholds are both met. focus only names the active journey. Nothing on this payload adds the feet to the miles.
+
+  {
+    "journey": {
+      "id": 10,
+      "status": "active",
+      "metrics": [
+        {"metric": "elevation", "unit": "ft", "target": "500", "credited": "500", "remaining": "0", "complete": true},
+        {"metric": "distance", "unit": "mi", "target": "2", "credited": "1", "remaining": "1", "complete": false}
+      ]
+    },
+    "focus": {"journey_id": 10, "status": "active"}
+  }
+
+Pace
+
+  A later picture may draw a dot on the route. The dot is the highest checkpoint this payload already selected, or the approach when checkpoint.current is null. It does not move because a forecast says the person would be farther along.
+
+  A ring or color around that dot may be on_track, behind, insufficient_data, or no_deadline. Phase 4A section 16.6 lists the inputs and the decisions that are still open. Home does not return a forecast until those decisions exist, and it never stores one on the journey. If a response later adds forecast, it is a sibling of scene, derived from credit history and the expedition deadline, and safe to omit or recompute.
 
 Open questions
 
@@ -585,5 +612,6 @@ Deferred
   More than one photograph per checkpoint, user photographs, a CMS, and a general asset library.
   Where organization logo and expedition image bytes are stored. The nullable refs remain. Journey and activity services do not depend on that choice. It is made when branding and image upload or display are implemented.
   Image paths that do not match the slug convention, until a route actually needs the optional ref columns.
-  Screen layout, navigation, and interaction. The payload names the place and the file. It does not describe how they are drawn.
+  Screen layout, navigation, and interaction, except for the rule that home shows one place and one indicator per required metric. The payload names the place and the file. It does not describe how they are drawn.
+  The pace calculation. The dot's place is the reached checkpoint. The forecast status is not part of this payload yet.
   Caching headers on the static files themselves. The path contract is enough for the client to cache.

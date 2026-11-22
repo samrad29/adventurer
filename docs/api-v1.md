@@ -66,7 +66,7 @@ POST /api/v1/journeys/switch
 
 ## Activities
 
-Elevation is feet, sent as an integer or a string, not a JSON float. `happened_on` is `YYYY-MM-DD`. Optional fields are `distance_km`, `note`, `activity_type`, `duration_s`, `started_at`, and `ended_at`.
+The fields in this section are the implemented contract. The target metric contract below replaces elevation-only credit. Elevation is feet, sent as an integer or a string, not a JSON float. `happened_on` is `YYYY-MM-DD`. Optional fields are `distance_km`, `note`, `activity_type`, `duration_s`, `started_at`, and `ended_at`. `distance_km` does not credit a journey.
 
 | Method | Path |
 | --- | --- |
@@ -167,7 +167,7 @@ Another person's activity or journey returns 403 `forbidden`, which is the servi
 
 `next_actions` lists every eligible journey action in this order: `continue_journey`, `resume_journey` by route slug, `start_new_attempt` by route slug, `choose_route`. Invitation `accept_invitation` and `decline_invitation` stay on `incoming_invitations` and are not copied into `next_actions`. A share link has no decline action.
 
-The scene uses the capped personal journey total in meters. It shows the reached checkpoint's curated file, then the nearest lower checkpoint file, then `photos/<route>/hero` or `photos/<route>`, then null. It never uses the next checkpoint's file. Expedition `displayed_total_ft` follows the board rule, including `display_credits_after`, and is not the scene input. Until a curated file exists, `image` is null rather than a borrowed checkpoint.
+The implemented scene uses the capped personal elevation in meters. The target scene uses every required metric and the checkpoint thresholds, then the same fallback: the reached checkpoint's file, then the nearest lower checkpoint by position, then `photos/<route>/hero` or `photos/<route>`, then null. It never uses an unmet checkpoint's file. The implemented expedition card field `displayed_total_ft` follows the board rule, including `display_credits_after`. The target card uses `displayed_metrics` for the same rule and does not feed that number into the scene. Until a curated file exists, `image` is null rather than a borrowed checkpoint.
 
 ```json
 {
@@ -182,10 +182,149 @@ The scene uses the capped personal journey total in meters. It shows the reached
 }
 ```
 
+## Target metric contract
+
+The routes above are the implemented elevation-only API. Phase 4A section 16 is the progress contract those payloads move to. Authentication, CSRF, status codes, and error bodies do not change. Do not build a screen against both shapes. Until that revision is implemented, clients still send `elevation_ft` and still receive `total_ft`, `remaining_ft`, `percent`, and `summit_ft`.
+
+The target shape gives every required metric the same object. Amounts are decimal strings in the display unit named by `unit`. `ft` is the international foot. `mi` is the statute mile. Storage and confirmation stay in meters. There is no route-level percent. A metric the route does not require is omitted.
+
+`distance_km` on an activity is optional metadata in the current API and does not credit a journey. The target activity field is `distance_mi`. The implementation replaces `distance_km`. It does not accept both.
+
+Journey and home progress:
+
+```json
+"metrics": [
+  {"metric": "elevation", "unit": "ft", "target": "29032", "credited": "400", "remaining": "28632", "complete": false}
+]
+```
+
+Route requirements and checkpoint thresholds use `target` or `threshold` in that same unit. They do not include `credited`.
+
+Confirmation still previews, then submits `confirmation_token`. `will_complete` is true only when the save would satisfy every required metric. The token is bound to the user, the journey, `progress_version`, and every proposed credit in storage units. A stale token is 409 `confirmation_required` with a fresh preview and no write. An elevation edit, a distance edit, or an edit of both uses that path when it would complete the active journey.
+
+Elevation-only route:
+
+```json
+{
+  "slug": "everest",
+  "name": "Everest",
+  "region": "Khumbu, Nepal",
+  "requirements": [
+    {"metric": "elevation", "unit": "ft", "target": "29032"}
+  ],
+  "checkpoints": [
+    {
+      "slug": "lukla",
+      "name": "Lukla",
+      "position": 3,
+      "requirements": [
+        {"metric": "elevation", "unit": "ft", "threshold": "9383"}
+      ]
+    }
+  ]
+}
+```
+
+Distance-only route:
+
+```json
+{
+  "slug": "towpath",
+  "name": "Towpath",
+  "region": "Canal",
+  "requirements": [
+    {"metric": "distance", "unit": "mi", "target": "12"}
+  ],
+  "checkpoints": [
+    {
+      "slug": "lock",
+      "name": "Lock",
+      "position": 1,
+      "requirements": [
+        {"metric": "distance", "unit": "mi", "threshold": "4"}
+      ]
+    }
+  ]
+}
+```
+
+Combined route:
+
+```json
+{
+  "slug": "ridge-loop",
+  "name": "Ridge Loop",
+  "region": "Foothills",
+  "requirements": [
+    {"metric": "distance", "unit": "mi", "target": "2"},
+    {"metric": "elevation", "unit": "ft", "target": "500"}
+  ],
+  "checkpoints": [
+    {
+      "slug": "gate",
+      "name": "Gate",
+      "position": 1,
+      "requirements": [
+        {"metric": "distance", "unit": "mi", "threshold": "1"},
+        {"metric": "elevation", "unit": "ft", "threshold": "200"}
+      ]
+    }
+  ]
+}
+```
+
+Requirement arrays are ordered by metric code. A checkpoint that lists both metrics unlocks only when both thresholds are met.
+
+Preview that completes a combined route. The journey still needs 500 ft and 2 miles. The activity records 900 ft and 3 miles. The journey receives 500 ft and 2 miles. The activity keeps 900 and 3.
+
+```json
+POST /api/v1/activities/preview
+{"elevation_ft": "900", "distance_mi": "3", "happened_on": "2026-01-02"}
+
+{
+  "preview": {
+    "will_complete": true,
+    "confirmation_token": "<hmac>",
+    "confirmation_expires_at": 1768000000,
+    "credits": [
+      {"metric": "distance", "unit": "mi", "credited": "2"},
+      {"metric": "elevation", "unit": "ft", "credited": "500"}
+    ]
+  }
+}
+```
+
+Home for that same combined route, after only the elevation requirement is met. `focus` does not repeat the metrics. The scene is the last checkpoint both of whose thresholds are already met, not the next one.
+
+```json
+{
+  "you": {"id": 1, "name": "Sam"},
+  "state": "active",
+  "next_actions": [{"type": "continue_journey", "journey_id": 10, "route_slug": "ridge-loop"}],
+  "journey": {
+    "id": 10,
+    "status": "active",
+    "metrics": [
+      {"metric": "distance", "unit": "mi", "target": "2", "credited": "1", "remaining": "1", "complete": false},
+      {"metric": "elevation", "unit": "ft", "target": "500", "credited": "500", "remaining": "0", "complete": true}
+    ],
+    "scene": {"role": "checkpoint", "checkpoint_slug": "gate"}
+  },
+  "focus": {"journey_id": 10, "status": "active"},
+  "paused_journeys": [],
+  "expeditions": [],
+  "incoming_invitations": []
+}
+```
+
+Roster, leaderboard, and update payloads use the same metric objects for live progress. A final leaderboard returns the snapshotted amounts and does not recompute them. On a multi-metric route, finishers are ordered by completion time. Participants who have not finished are listed after them without a performance rank. A single-metric board still orders by credited amount, then earlier last credit, then display name.
+
+An activity update payload may include `elevation_ft`, `distance_mi`, or both. Omitted progress fields stay as they are. The preview and the token describe the whole resulting credit, not only the field that changed.
+
 ## What the Expo client needs first
 
 1. Call register or login and store the bearer token. Do not send it as a query parameter or a cookie.
 2. Send `Authorization: Bearer` on later requests. Native clients do not need CSRF. A browser client that uses the cookie must send `X-CSRF-Token`.
 3. Treat 409 `restart_required` and `confirmation_required` as instructions to show a confirmation step, then call restart or resubmit with the new token. Do not retry a stale summit token.
-4. Use `GET /api/v1/home` for the first screen. Journey totals on that payload are feet. Activity elevations submitted to the API are also feet.
+4. Use `GET /api/v1/home` for the first screen. The implemented payload reports elevation in feet. The target payload in the metric section reports one object per required metric, in feet or miles, and does not add those objects together. Activity elevation is feet. The target distance field is miles.
 5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API.
