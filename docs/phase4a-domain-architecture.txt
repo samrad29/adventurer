@@ -142,11 +142,11 @@ expedition_privacy_removals
   Foreign key user_id to users, ON DELETE CASCADE
   One row per user and expedition. It records that this person removed their participation and has not rejoined since.
   It stores no token, display name, elevation, activity, journey, or result.
-  Written in the privacy-removal transaction after that person's participation, feed rows, and result row are deleted.
+  Written in the privacy-removal transaction after that person's participation, feed rows, and result row are deleted, and only when the expedition remains rejoinable.
   The next new participation for that pair consumes the row and sets display_credits_after to the insert time.
   A repeated removal before rejoin updates removed_at on the same row.
   After rejoin the row is gone. An ordinary leave and rejoin does not create one and does not read one.
-  Deleting the expedition or the user removes the row through the foreign keys. Owner release that deletes the expedition therefore leaves nothing behind. Account deletion does not need a separate copy of this table's contents.
+  Deleting the expedition or the user removes the row through the foreign keys. Owner release that deletes the expedition therefore leaves nothing behind. Owner release that archives the expedition does not insert a row, because that expedition cannot be rejoined. Account deletion does not need a separate copy of this table's contents.
 
 api_tokens
   id, user_id
@@ -247,6 +247,8 @@ Lock order for every flow in this section:
   Then write journey_credits, expedition_updates, and expedition_result_entries.
 
 A transaction that needs several rows of one kind sorts them and locks in that order. It never locks a later kind and then an earlier kind. Two transactions therefore cannot deadlock against each other. A unique-index or trigger failure becomes a 409. A close that sees the participation set change rolls back and retries, up to three times, then returns 409.
+
+An organization row is locked after the acting user and before any expedition that transaction inserts. Creating an organization expedition locks the acting user, locks the organization with FOR UPDATE, then reads the organization status and the actor's active membership again. It inserts only when that status is still active and the actor is still an owner or admin. Suspending an organization locks the platform administrator, then locks that same organization row. Creation and suspension serialize on it. If creation acquires the row first, suspension sees the new active expedition, closes it through the close flow, and only then marks the organization suspended. If suspension acquires the row first, creation sees the suspended status and inserts nothing.
 
 Lazy completion runs as its own transaction before a slot check, a home read, or an organization-expedition read. It selects due organization expeditions, locks them in id order using the close flow, and commits. The caller's transaction starts after that.
 
@@ -367,7 +369,7 @@ If the caller is the owner and no other participation is active, the same transa
   Build the close snapshot from eligible departed finishers, excluding the owner.
   Delete the owner's feed rows, result rows, and participation.
   If no participations and no result rows remain, delete the expedition's invitations and the expedition. The route remains.
-  If departed finishers' result rows remain, archive the expedition and set owner_user_id null. The archived-private check allows that. No owner column still names the removed person.
+  If departed finishers' result rows remain, archive the expedition and set owner_user_id null. The archived-private check allows that. No owner column still names the removed person. Do not insert a privacy-removal row. The archived expedition cannot be rejoined.
 
 For everyone else, one transaction:
   Set the privacy-removal setting.
@@ -380,7 +382,7 @@ Rejoin inserts a new participation because the old row is gone. Journey activati
 
 The privacy-removal row is kept only until that rejoin, or until the expedition or the user is deleted. It is not a log of past removals after the person has rejoined. An ordinary leave keeps the participation, so the later rejoin updates that same row, leaves display_credits_after unchanged, and does not consult expedition_privacy_removals. A second privacy removal writes the pair again. The following rejoin starts a new board clock and does not restore the previous one.
 
-If the owner-release path deletes the expedition, it does not insert a privacy-removal row. The expedition is gone, and there is no rejoin. If the expedition stays, the row is inserted after the caller's participation is deleted.
+If the owner-release path deletes the expedition, it does not insert a privacy-removal row. The expedition is gone, and there is no rejoin. If that path archives the expedition, it does not insert one either. If the expedition stays active, the row is inserted after the caller's participation is deleted.
 
 5.10 Account deletion
 
@@ -579,7 +581,7 @@ Login and register, and repeated bad bearer presentations, share a process-local
 
 8. Concurrency
 
-The lock order in section 5 is the only order. Close, credit, join, leave, switch, restart, privacy removal, and account deletion all use it.
+The lock order in section 5 is the only order. Close, credit, join, leave, switch, restart, privacy removal, account deletion, organization-expedition creation, and organization suspension all use it. Creation and suspension take the same organization-row lock after their acting user lock. The transaction that locks the organization first decides whether the new expedition is closed by suspension or never inserted.
 
 Deadlock is avoided because a later resource is never locked before an earlier one, and ids within one resource are always sorted. PostgreSQL waits instead of cycling.
 
@@ -731,7 +733,7 @@ Privacy and deletion
   Invitation lists and accepts are unchanged by a privacy removal.
   A privacy-removal transaction that rolls back leaves the participation and writes no privacy-removal row.
   A private owner with another active member is refused.
-  A sole owner with a departed finisher leaves an archived expedition, a null owner, and the finisher's result row.
+  A sole owner with a departed finisher leaves an archived expedition, a null owner, and the finisher's result row. No privacy-removal row remains.
   A sole owner with nobody else leaves no expedition.
   Account deletion refuses an active organization owner and a private owner who still has another active member.
   After the deleting commit, cookie and bearer both fail, including when a later batch fails and is retried.
@@ -746,6 +748,7 @@ Mobile client
 Concurrency
   Two joins to two organization expeditions for one user: one wins, the other gets slot_occupied.
   Close overlapping leave, restart, and privacy removal, as specified in 5.6.
+  Organization expedition creation overlapping suspension. The organization row decides the order. The new expedition is closed and the organization suspended, or creation fails and inserts nothing.
 
 
 12. Field Journal support

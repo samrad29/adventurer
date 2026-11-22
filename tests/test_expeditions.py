@@ -6,6 +6,7 @@ import os
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
@@ -189,6 +190,60 @@ def _pause_at_user_lock(monkeypatch):
 
     monkeypatch.setattr(DB, "execute", wrapped)
     return reached, allow
+
+
+def _pause_after_organization_lock(monkeypatch):
+    main = get_db()
+    reached = threading.Event()
+    allow = threading.Event()
+    original = DB.execute
+    seen = {"paused": False}
+
+    def wrapped(self, sql, params=()):
+        normalized = " ".join(sql.split()).lower()
+        if (
+            not seen["paused"]
+            and self is not main
+            and "for update" in normalized
+            and "from organizations" in normalized
+            and "where slug" in normalized
+        ):
+            seen["paused"] = True
+            outcome = original(self, sql, params)
+            reached.set()
+            assert allow.wait(timeout=15)
+            return outcome
+        return original(self, sql, params)
+
+    monkeypatch.setattr(DB, "execute", wrapped)
+    return reached, allow
+
+
+def _wait_for_organization_lock_wait() -> None:
+    url = os.environ.get(
+        "TEST_DATABASE_URL",
+        "postgresql://postgres:postgres@127.0.0.1:54329/adventurer_migration_test",
+    )
+    deadline = time.monotonic() + 10
+    while time.monotonic() < deadline:
+        with psycopg.connect(url, connect_timeout=3) as conn:
+            waiting = conn.execute(
+                """
+                SELECT 1
+                FROM pg_stat_activity
+                WHERE datname = current_database()
+                  AND pid <> pg_backend_pid()
+                  AND state = 'active'
+                  AND wait_event_type = 'Lock'
+                  AND query ILIKE '%from organizations where slug%'
+                  AND query ILIKE '%for update%'
+                LIMIT 1
+                """
+            ).fetchone()
+        if waiting is not None:
+            return
+        time.sleep(0.02)
+    raise AssertionError("timed out waiting for the organization lock")
 
 
 def test_private_create_activates_the_owner_journey_or_rolls_back(app):
@@ -1263,3 +1318,169 @@ def test_privacy_removal_migration_upgrades_and_downgrades():
     finally:
         alembic("upgrade", "head")
         assert relation() is not None
+
+
+def test_archived_owner_release_keeps_no_privacy_row(app):
+    with app.app_context():
+        owner_id = _user("Fay")
+        member_id = _user("Sam")
+        route_id = _route("kili", "500")
+        create_private_expedition(owner_id, slug="fay-kili", name="Fay Kili", route_slug="kili")
+        logged = _log(owner_id, "100")
+        assert _count("expedition_updates", "user_id = ?", (owner_id,)) == 1
+        link = create_share_link(owner_id, "fay-kili")
+        accept_invitation(member_id, token=link["token"])
+        switch_journey(member_id, route_id)
+        _log(member_id, "500")
+        leave_expedition(member_id, "fay-kili")
+        remove_participation_privacy(owner_id, "fay-kili", confirm=True)
+        expedition = get_db().execute(
+            "SELECT id, status, owner_user_id FROM expeditions WHERE slug = 'fay-kili'"
+        ).fetchone()
+        assert expedition["status"] == "archived"
+        assert expedition["owner_user_id"] is None
+        assert _participation(owner_id, "fay-kili") is None
+        assert _count(
+            "expedition_updates",
+            "expedition_id = ? AND user_id = ?",
+            (expedition["id"], owner_id),
+        ) == 0
+        assert _count(
+            "expedition_result_entries",
+            "expedition_id = ? AND user_id = ?",
+            (expedition["id"], owner_id),
+        ) == 0
+        assert _count(
+            "expedition_result_entries",
+            "expedition_id = ? AND user_id = ?",
+            (expedition["id"], member_id),
+        ) == 1
+        assert _count(
+            "expedition_privacy_removals",
+            "expedition_id = ? AND user_id = ?",
+            (expedition["id"], owner_id),
+        ) == 0
+        assert [row["user_id"] for row in get_leaderboard(member_id, "fay-kili")["entries"]] == [
+            member_id
+        ]
+        assert _journey_total(logged["journey"]["id"]) == feet_to_meters(Decimal("100"))
+
+
+def test_creation_that_locks_the_organization_first_is_closed_by_suspension(app, monkeypatch):
+    with app.app_context():
+        admin_id = _user("Ada")
+        owner_id = _user("Owen")
+        _org(app, admin_id, "ridge-club", "Owen")
+        _route("kili")
+        reached, allow = _pause_after_organization_lock(monkeypatch)
+        holder = {"create": {}, "suspend": {}}
+
+        def create() -> None:
+            with app.app_context():
+                try:
+                    holder["create"]["result"] = _season(
+                        owner_id, "ridge-club", "ridge-season", "kili"
+                    )
+                except Exception as exc:
+                    holder["create"]["error"] = exc
+                finally:
+                    get_db().close()
+
+        def suspend() -> None:
+            with app.app_context():
+                try:
+                    holder["suspend"]["result"] = suspend_organization(admin_id, "ridge-club")
+                except Exception as exc:
+                    holder["suspend"]["error"] = exc
+                finally:
+                    get_db().close()
+
+        creator = threading.Thread(target=create)
+        suspender = threading.Thread(target=suspend)
+        creator.start()
+        suspender_started = False
+        try:
+            assert reached.wait(timeout=10)
+            suspender.start()
+            suspender_started = True
+            _wait_for_organization_lock_wait()
+        finally:
+            allow.set()
+        creator.join(timeout=20)
+        if suspender_started:
+            suspender.join(timeout=20)
+        assert not creator.is_alive()
+        assert not suspender.is_alive()
+        assert "error" not in holder["create"]
+        assert "error" not in holder["suspend"]
+        assert holder["suspend"]["result"]["status"] == "suspended"
+        assert get_db().execute(
+            "SELECT status FROM organizations WHERE slug = 'ridge-club'"
+        ).fetchone()["status"] == "suspended"
+        expedition = get_db().execute(
+            "SELECT status FROM expeditions WHERE slug = 'ridge-season'"
+        ).fetchone()
+        assert expedition["status"] == "completed"
+        assert _count(
+            "expeditions",
+            "organization_id = (SELECT id FROM organizations WHERE slug = 'ridge-club') AND status = 'active'",
+        ) == 0
+
+
+def test_suspension_that_locks_the_organization_first_blocks_creation(app, monkeypatch):
+    with app.app_context():
+        admin_id = _user("Ada")
+        owner_id = _user("Owen")
+        _org(app, admin_id, "ridge-club", "Owen")
+        _route("kili")
+        reached, allow = _pause_after_organization_lock(monkeypatch)
+        holder = {"create": {}, "suspend": {}}
+
+        def create() -> None:
+            with app.app_context():
+                try:
+                    holder["create"]["result"] = _season(
+                        owner_id, "ridge-club", "ridge-season", "kili"
+                    )
+                except Exception as exc:
+                    holder["create"]["error"] = exc
+                finally:
+                    get_db().close()
+
+        def suspend() -> None:
+            with app.app_context():
+                try:
+                    holder["suspend"]["result"] = suspend_organization(admin_id, "ridge-club")
+                except Exception as exc:
+                    holder["suspend"]["error"] = exc
+                finally:
+                    get_db().close()
+
+        creator = threading.Thread(target=create)
+        suspender = threading.Thread(target=suspend)
+        suspender.start()
+        creator_started = False
+        try:
+            assert reached.wait(timeout=10)
+            creator.start()
+            creator_started = True
+            _wait_for_organization_lock_wait()
+        finally:
+            allow.set()
+        suspender.join(timeout=20)
+        if creator_started:
+            creator.join(timeout=20)
+        assert not suspender.is_alive()
+        assert not creator.is_alive()
+        assert "error" not in holder["suspend"]
+        assert holder["suspend"]["result"]["status"] == "suspended"
+        assert isinstance(holder["create"]["error"], ExpeditionError)
+        assert holder["create"]["error"].code == "invalid_state"
+        assert get_db().execute(
+            "SELECT status FROM organizations WHERE slug = 'ridge-club'"
+        ).fetchone()["status"] == "suspended"
+        assert _count(
+            "expeditions",
+            "organization_id = (SELECT id FROM organizations WHERE slug = 'ridge-club')",
+        ) == 0
+        assert _count("expeditions", "status = 'active' AND kind = 'organization'") == 0

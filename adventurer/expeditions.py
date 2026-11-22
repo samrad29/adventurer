@@ -1211,6 +1211,7 @@ def _privacy_once(database, user_id: int, expedition_id: int) -> dict:
             """,
             (expedition_id,),
         )
+        return {"removed": True, "expedition_id": expedition_id}
     _remember_privacy(database, expedition_id, user_id)
     return {"removed": True, "expedition_id": expedition_id}
 
@@ -2115,25 +2116,31 @@ def _active_membership(database, user_id: int, slug: str, *, lock_user: bool):
     return row
 
 
-def _managed_organization(database, user_id: int, slug: str):
+def _lock_organization(database, slug: str):
     row = database.execute(
-        """
-        SELECT organization.id, organization.status, membership.role
-        FROM organizations AS organization
-        JOIN organization_memberships AS membership
-          ON membership.organization_id = organization.id
-         AND membership.user_id = ?
-         AND membership.status = 'active'
-        WHERE organization.slug = ?
-        FOR UPDATE OF organization
-        """,
-        (user_id, slug),
+        "SELECT id, status FROM organizations WHERE slug = ? FOR UPDATE",
+        (slug,),
     ).fetchone()
-    if row is None or row["role"] not in ("owner", "admin"):
+    if row is None:
         raise ExpeditionError("not_found", "That organization does not exist.", status=404)
-    if row["status"] != "active":
-        raise ExpeditionError("invalid_state", "This organization is suspended.", status=409)
     return row
+
+
+def _managed_organization(database, user_id: int, slug: str):
+    organization = _lock_organization(database, slug)
+    membership = database.execute(
+        """
+        SELECT role
+        FROM organization_memberships
+        WHERE organization_id = ? AND user_id = ? AND status = 'active'
+        """,
+        (organization["id"], user_id),
+    ).fetchone()
+    if membership is None or membership["role"] not in ("owner", "admin"):
+        raise ExpeditionError("not_found", "That organization does not exist.", status=404)
+    if organization["status"] != "active":
+        raise ExpeditionError("invalid_state", "This organization is suspended.", status=409)
+    return organization
 
 
 def _find_organization(database, slug: str):
@@ -2237,12 +2244,7 @@ def _active_organization_expeditions(slug: str) -> list[int]:
 def _mark_suspended(user_id: int, slug: str) -> bool:
     def write(database):
         _lock_user(database, user_id)
-        organization = database.execute(
-            "SELECT id, status FROM organizations WHERE slug = ? FOR UPDATE",
-            (slug,),
-        ).fetchone()
-        if organization is None:
-            raise ExpeditionError("not_found", "That organization does not exist.", status=404)
+        organization = _lock_organization(database, slug)
         pending = database.execute(
             """
             SELECT id
