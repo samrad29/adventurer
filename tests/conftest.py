@@ -76,6 +76,20 @@ def _prepare_database() -> None:
                     "SELECT to_regclass('adventurer.expedition_privacy_removals') AS name"
                 ).fetchone()[0]
                 is not None
+                and conn.execute(
+                    "SELECT to_regclass('adventurer.progress_metrics') AS name"
+                ).fetchone()[0]
+                is not None
+                and conn.execute(
+                    """
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'adventurer'
+                      AND table_name = 'routes'
+                      AND column_name = 'target_elevation_m'
+                    """
+                ).fetchone()
+                is None
                 and constraint is not None
                 and "expired" in constraint[0]
             )
@@ -97,6 +111,7 @@ def _wipe(application) -> None:
         database.execute("DELETE FROM expedition_updates")
         database.execute("DELETE FROM expedition_result_entries")
         database.execute("DELETE FROM journey_credits")
+        database.execute("DELETE FROM activity_journey_assignments")
         database.execute("DELETE FROM expedition_invitations")
         database.execute("DELETE FROM expedition_privacy_removals")
         database.execute("DELETE FROM expedition_participations")

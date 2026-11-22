@@ -4,6 +4,8 @@ The executable DDL is `migrations/sql/0002_phase1_schema.sql`. Everest is seeded
 
 The Flask application reads and writes these tables. It does not run schema DDL on startup. Alembic remains responsible for schema changes, including on the isolated test database. The hosted project is not a migration target.
 
+Migration `0009_multi_metric_progress` replaces the elevation-only progress columns described below. Route targets live in `route_requirements`, checkpoint thresholds live in `checkpoint_requirements`, and journey credit is an assignment plus one row per metric. The sections under this note remain the historical description of `0002` through `0008`. The progress contract is `docs/phase4a-domain-architecture.md`, section 16.
+
 ## Refinements
 
 - `activities.source` and `activities.activity_type` are `NOT NULL`, defaulting to `manual` and `unspecified`.
