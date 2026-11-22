@@ -117,9 +117,12 @@ def register():
     key = _limit_key(name)
     if limits.too_many(key):
         raise ApiError("rate_limited", "Try again later.", status=429)
-    _require_invite(body)
     try:
+        _require_invite(body)
         viewer = create_adventurer(name, password)
+    except ApiError:
+        limits.record(key)
+        raise
     except AccountError as exc:
         limits.record(key)
         code = "conflict" if "already" in str(exc) else "invalid"
@@ -307,14 +310,24 @@ def routes_get(slug: str):
     ).fetchall()
     expeditions = database.execute(
         """
-        SELECT slug, name, kind, status, visibility
-        FROM expeditions
-        WHERE route_id = ?
+        SELECT expedition.slug, expedition.name, expedition.kind,
+               expedition.status, expedition.visibility
+        FROM expeditions AS expedition
+        LEFT JOIN organizations AS organization
+          ON organization.id = expedition.organization_id
+        WHERE expedition.route_id = ?
+          AND expedition.status = 'active'
           AND (
-            kind = 'global'
-            OR (kind = 'organization' AND enrollment = 'open')
+            expedition.kind = 'global'
+            OR (
+              expedition.kind = 'organization'
+              AND expedition.enrollment = 'open'
+              AND organization.status = 'active'
+              AND (expedition.enrollment_opens_at IS NULL OR expedition.enrollment_opens_at <= now())
+              AND (expedition.enrollment_closes_at IS NULL OR expedition.enrollment_closes_at > now())
+            )
           )
-        ORDER BY slug
+        ORDER BY expedition.slug
         """,
         (route["id"],),
     ).fetchall()

@@ -11,7 +11,7 @@ Two credentials identify the same user. They are not interchangeable.
 
 If an `Authorization` header is present and the token is missing, unknown, revoked, expired, or belongs to an account being deleted, the response is 401. The cookie is not consulted. `POST /api/v1/auth/logout` with a bearer token revokes that token and leaves the cookie alone. The same path with only a cookie clears the browser session. `POST /api/v1/auth/revoke` revokes every token for the user and does not clear the cookie.
 
-Login, registration, and repeated bad bearer presentations share a process-local limit of five failures in fifteen minutes for that client address and name. The response is 429 `rate_limited`. The count is not in the database and resets when the process restarts.
+Login, registration, and repeated bad bearer presentations share a process-local limit of five failures in fifteen minutes for that client address and name. An invalid invite code is a failed registration for that same key and is counted once. The response is 429 `rate_limited` and does not include the expected code. A successful login or registration clears that key. Expired timestamps are discarded, and a key with nothing left is removed, so unused names do not stay in the process dictionary. The count is not in the database and resets when the process restarts.
 
 `GET /api/v1/session` returns `you` and, for a cookie caller, `csrf`. A bearer caller receives `csrf: null` and does not receive a new cookie session.
 
@@ -150,7 +150,12 @@ A second active organization expedition returns 409 `slot_occupied`. An enrollme
 
 ## Routes
 
-`GET /api/v1/routes` and `GET /api/v1/routes/<slug>` list published routes. The detail adds checkpoints, the caller's journeys when a session or bearer is present, and the global or open-enrollment expeditions on that route. Private and invitation-only expeditions are not included. These reads do not require a login. Expedition, journey, activity, home, and organization routes do.
+`GET /api/v1/routes` and `GET /api/v1/routes/<slug>` list published routes. The detail adds checkpoints and, when a session or bearer is present, the caller's journeys. Its `expeditions` list is the set someone can still join without an invitation:
+
+- an active global expedition, such as Everest
+- an active organization expedition with open enrollment, an active organization, and an enrollment window that is open now
+
+Private expeditions, invitation-only expeditions, completed or archived expeditions, expeditions whose enrollment window has not opened or has already closed, and expeditions belonging to a suspended organization are left out. The same list is returned to an anonymous caller because the route catalog is public. Roster, board, and feed stay on the authenticated expedition routes. These route reads do not require a login. Expedition, journey, activity, home, and organization routes do.
 
 Another person's activity or journey returns 403 `forbidden`, which is the service rule. A private expedition the caller cannot see returns 404.
 

@@ -6,11 +6,21 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
+from adventurer import limits
 from adventurer.db import get_db
 from adventurer.measures import feet_to_meters
 from adventurer.scene import select_scene
 
 DAY = "2026-01-02"
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limits():
+    limits.clear()
+    yield
+    limits.clear()
 
 
 def _register(client, name="Sam", password="trailhead", *, cookie=False):
@@ -595,3 +605,206 @@ def test_home_states_actions_photos_and_no_writes(client, app, tmp_path):
     assert finished["focus"]["status"] == finished["state"]
     assert "scene" in finished["focus"]
     assert all(action["type"] == "start_new_attempt" for action in finished["next_actions"])
+
+
+def test_login_returns_a_usable_token_and_logout_revokes_it(client):
+    _register(client, "Sam")
+    wrong = client.post(
+        "/api/v1/auth/login",
+        json={"name": "Sam", "password": "not-the-password"},
+    )
+    assert wrong.status_code == 401
+    assert wrong.get_json()["code"] == "unauthenticated"
+    logged = client.post(
+        "/api/v1/auth/login",
+        json={"name": "Sam", "password": "trailhead"},
+    )
+    assert logged.status_code == 200
+    token = logged.get_json()["token"]
+    client.delete_cookie("session")
+    assert client.get("/api/v1/home", headers=_auth(token)).status_code == 200
+    signed_out = client.post("/api/v1/auth/logout", headers=_auth(token))
+    assert signed_out.status_code == 200
+    denied = client.get("/api/v1/home", headers=_auth(token))
+    assert denied.status_code == 401
+    assert denied.get_json()["code"] == "unauthenticated"
+
+
+def test_failed_logins_reach_the_limit_and_success_clears_it(client, app):
+    _register(client, "Sam")
+    with app.app_context():
+        tokens_before = _count("api_tokens")
+
+    def fail():
+        return client.post(
+            "/api/v1/auth/login",
+            json={"name": "Sam", "password": "not-the-password"},
+        )
+
+    for _attempt in range(4):
+        rejected = fail()
+        assert rejected.status_code == 401
+        assert rejected.get_json()["code"] == "unauthenticated"
+    logged = client.post(
+        "/api/v1/auth/login",
+        json={"name": "Sam", "password": "trailhead"},
+    )
+    assert logged.status_code == 200
+    client.delete_cookie("session")
+    for _attempt in range(5):
+        rejected = fail()
+        assert rejected.status_code == 401
+    limited = fail()
+    assert limited.status_code == 429
+    assert limited.get_json()["code"] == "rate_limited"
+    with app.app_context():
+        assert _count("api_tokens") == tokens_before + 1
+
+
+def test_invalid_invite_codes_are_rate_limited_and_create_nothing(client, app):
+    app.config["INVITE_CODE"] = "khumbu"
+    body = {"name": "Sam", "password": "trailhead", "invite": "wrong"}
+    for _attempt in range(5):
+        rejected = client.post("/api/v1/auth/register", json=body)
+        assert rejected.status_code == 400
+        payload = rejected.get_json()
+        assert payload["code"] == "invalid"
+        assert "khumbu" not in payload["error"]
+    limited = client.post("/api/v1/auth/register", json=body)
+    assert limited.status_code == 429
+    assert limited.get_json()["code"] == "rate_limited"
+    assert "khumbu" not in limited.get_json()["error"]
+    with app.app_context():
+        assert _count("users") == 0
+        assert _count("api_tokens") == 0
+
+
+def test_registration_with_the_invite_code_clears_failures(client, app):
+    app.config["INVITE_CODE"] = "khumbu"
+    wrong = {"name": "Sam", "password": "trailhead", "invite": "wrong"}
+    for _attempt in range(4):
+        assert client.post("/api/v1/auth/register", json=wrong).status_code == 400
+    created = client.post(
+        "/api/v1/auth/register",
+        json={"name": "Sam", "password": "trailhead", "invite": "khumbu"},
+    )
+    assert created.status_code == 201, created.get_json()
+    token = created.get_json()["token"]
+    client.delete_cookie("session")
+    assert client.get("/api/v1/home", headers=_auth(token)).status_code == 200
+    with app.app_context():
+        assert _count("users") == 1
+        assert _count("api_tokens") == 1
+    for _attempt in range(5):
+        rejected = client.post("/api/v1/auth/register", json=wrong)
+        assert rejected.status_code == 400
+        assert rejected.get_json()["code"] == "invalid"
+    limited = client.post("/api/v1/auth/register", json=wrong)
+    assert limited.status_code == 429
+    with app.app_context():
+        assert _count("users") == 1
+        assert _count("api_tokens") == 1
+
+
+def test_revoke_all_invalidates_every_bearer_token(client):
+    _user, first, _csrf = _register(client, "Sam")
+    logged = client.post(
+        "/api/v1/auth/login",
+        json={"name": "Sam", "password": "trailhead"},
+    )
+    second = logged.get_json()["token"]
+    client.delete_cookie("session")
+    assert client.get("/api/v1/home", headers=_auth(first)).status_code == 200
+    assert client.get("/api/v1/home", headers=_auth(second)).status_code == 200
+    revoked = client.post("/api/v1/auth/revoke", headers=_auth(second))
+    assert revoked.status_code == 200
+    assert client.get("/api/v1/home", headers=_auth(first)).status_code == 401
+    assert client.get("/api/v1/home", headers=_auth(second)).status_code == 401
+
+
+def test_expired_rate_limit_keys_are_removed(monkeypatch):
+    clock = {"now": 1_000_000.0}
+    monkeypatch.setattr(limits.time, "time", lambda: clock["now"])
+    for name in range(30):
+        assert limits.too_many(f"203.0.113.8\nname-{name}") is False
+    assert limits._failures == {}
+    for _attempt in range(limits.LIMIT):
+        limits.record("203.0.113.8\nsam")
+    assert limits.too_many("203.0.113.8\nsam") is True
+    assert set(limits._failures) == {"203.0.113.8\nsam"}
+    clock["now"] += limits.WINDOW_SECONDS
+    assert limits.too_many("203.0.113.8\nsam") is False
+    assert limits._failures == {}
+    limits.record("203.0.113.8\nsam")
+    limits.clear("203.0.113.8\nsam")
+    assert limits._failures == {}
+
+
+def test_route_detail_lists_only_joinable_expeditions(client, app):
+    _ada, ada, _csrf = _register(client, "Ada")
+    _owen, owen, _csrf = _register(client, "Owen")
+    app.config["PLATFORM_ADMIN_IDS"] = {_ada}
+    with app.app_context():
+        _route("catalog", "1000")
+    created = client.post(
+        "/api/v1/organizations",
+        json={"slug": "ridge-club", "name": "Ridge Club", "owner_username": "Owen"},
+        headers=_auth(ada),
+    )
+    assert created.status_code == 201, created.get_json()
+    now = datetime.now(timezone.utc)
+    windows = {
+        "open-now": {},
+        "finish-me": {},
+        "invite-only": {"enrollment": "invitation"},
+        "closed-window": {"enrollment_closes_at": (now - timedelta(days=1)).isoformat()},
+        "future-window": {
+            "enrollment_opens_at": (now + timedelta(days=1)).isoformat(),
+            "enrollment_closes_at": (now + timedelta(days=3)).isoformat(),
+        },
+    }
+    for slug, extra in windows.items():
+        body = {
+            "slug": slug,
+            "name": slug,
+            "route_slug": "catalog",
+            "enrollment": extra.get("enrollment", "open"),
+        }
+        body.update({key: value for key, value in extra.items() if key != "enrollment"})
+        made = client.post(
+            "/api/v1/organizations/ridge-club/expeditions",
+            json=body,
+            headers=_auth(owen),
+        )
+        assert made.status_code == 201, made.get_json()
+    private = client.post(
+        "/api/v1/expeditions",
+        json={"slug": "owen-private", "name": "Owen Private", "route_slug": "catalog"},
+        headers=_auth(owen),
+    )
+    assert private.status_code == 201, private.get_json()
+    archived = client.post("/api/v1/expeditions/owen-private/archive", headers=_auth(owen))
+    assert archived.status_code == 200, archived.get_json()
+
+    def slugs():
+        detail = client.get("/api/v1/routes/catalog")
+        assert detail.status_code == 200
+        return {row["slug"] for row in detail.get_json()["expeditions"]}
+
+    assert slugs() == {"open-now", "finish-me"}
+    finished = client.post("/api/v1/expeditions/finish-me/complete", headers=_auth(owen))
+    assert finished.status_code == 200, finished.get_json()
+    assert slugs() == {"open-now"}
+    with app.app_context():
+        get_db().execute(
+            "UPDATE organizations SET status = 'suspended' WHERE slug = 'ridge-club'"
+        )
+        get_db().commit()
+        status = get_db().execute(
+            "SELECT status FROM expeditions WHERE slug = 'open-now'"
+        ).fetchone()
+        assert status["status"] == "active"
+    assert slugs() == set()
+    everest = client.get("/api/v1/routes/everest")
+    assert everest.status_code == 200
+    assert {row["slug"] for row in everest.get_json()["expeditions"]} == {"everest"}
