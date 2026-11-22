@@ -232,20 +232,31 @@ def _commit(write) -> dict:
     database = get_db()
     try:
         result, changed = write(database)
-    except JourneyError:
-        database.rollback()
-        raise
+        if changed:
+            database.commit()
+        else:
+            database.rollback()
     except Exception as exc:
-        database.rollback()
+        _rollback_preserving(database, exc)
+        if isinstance(exc, JourneyError):
+            raise
         translated = translate_database_error(exc)
         if translated is not None:
             raise translated from exc
         raise
-    if changed:
-        database.commit()
-    else:
-        database.rollback()
     return result
+
+
+def _rollback_preserving(database, original: BaseException) -> None:
+    """Roll back a write that did not commit.
+
+    A rollback failure stays attached to the original exception so the
+    caller's error code and type are the ones that propagate.
+    """
+    try:
+        database.rollback()
+    except Exception as rollback_error:
+        raise original from rollback_error
 
 
 def _require_user(database, user_id: int, *, lock: bool) -> None:

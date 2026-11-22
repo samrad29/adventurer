@@ -448,6 +448,91 @@ def test_invalid_routes_and_unauthorized_operations(app):
         assert deleting.value.code == "forbidden"
 
 
+def test_restart_repoint_failure_rolls_the_journey_back(app, monkeypatch):
+    with app.app_context():
+        user_id = _user("Sam")
+        kili = _route("kili")
+        original = start_journey(user_id, kili)
+        expedition_id = _private_expedition("live-kili", kili, user_id, "active")
+        participation_id = _participation(user_id, expedition_id, kili, original["id"])
+        database = get_db()
+        query = database.execute
+
+        def fail_repoint(sql, params=()):
+            if "SET journey_id" in sql:
+                raise RuntimeError("repoint failed")
+            return query(sql, params)
+
+        monkeypatch.setattr(database, "execute", fail_repoint)
+        with pytest.raises(RuntimeError, match="repoint failed"):
+            restart_journey(user_id, kili)
+        monkeypatch.undo()
+        rows = list_journeys(user_id, kili)
+        assert [(row["id"], row["status"], row["is_current"], row["attempt_number"]) for row in rows] == [
+            (original["id"], "active", True, 1)
+        ]
+        assert _pointed_journey(participation_id) == original["id"]
+
+
+def test_commit_failure_rolls_back_and_leaves_the_connection_usable(app, monkeypatch):
+    with app.app_context():
+        user_id = _user("Sam")
+        everest = _everest()
+        kili = _route("kili")
+        started = start_journey(user_id, everest)
+        database = get_db()
+        rollbacks = []
+        original_rollback = database.rollback
+
+        def fail_commit():
+            raise RuntimeError("commit failed")
+
+        def spy_rollback():
+            rollbacks.append(True)
+            return original_rollback()
+
+        monkeypatch.setattr(database, "commit", fail_commit)
+        monkeypatch.setattr(database, "rollback", spy_rollback)
+        with pytest.raises(RuntimeError, match="commit failed") as caught:
+            switch_journey(user_id, kili)
+        assert caught.value.__cause__ is None
+        assert rollbacks
+        monkeypatch.undo()
+        current = active_journey(user_id)
+        assert current["id"] == started["id"]
+        assert current["status"] == "active"
+        assert list_journeys(user_id, kili) == []
+        retried = switch_journey(user_id, kili)
+        assert retried["status"] == "active"
+        assert retried["route_slug"] == "kili"
+        assert list_journeys(user_id, everest)[0]["status"] == "paused"
+
+
+def test_a_rollback_failure_keeps_the_original_commit_exception(app, monkeypatch):
+    with app.app_context():
+        user_id = _user("Sam")
+        everest = _everest()
+        kili = _route("kili")
+        start_journey(user_id, everest)
+        database = get_db()
+
+        def fail_commit():
+            raise RuntimeError("commit failed")
+
+        def fail_rollback():
+            raise RuntimeError("rollback failed")
+
+        monkeypatch.setattr(database, "commit", fail_commit)
+        monkeypatch.setattr(database, "rollback", fail_rollback)
+        try:
+            with pytest.raises(RuntimeError, match="commit failed") as caught:
+                switch_journey(user_id, kili)
+            assert str(caught.value.__cause__) == "rollback failed"
+        finally:
+            monkeypatch.undo()
+            database.rollback()
+
+
 def test_a_failed_transition_rolls_back(app, monkeypatch):
     with app.app_context():
         user_id = _user("Sam")
