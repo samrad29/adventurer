@@ -1341,7 +1341,11 @@ def _write_snapshot(database, expedition, candidates) -> None:
             (candidate["user_id"],),
         ).fetchone()
         journey = progress["journeys"][candidate["journey_id"]]
-        credited = {metric["metric"]: metric["credited_m"] for metric in metrics}
+        # Metric totals follow the board cutoff. The checkpoint name is the
+        # highest stop the personal journey had reached, cutoff or not.
+        personal = _capped_totals(
+            requirements, progress["totals"].get(candidate["journey_id"], {})
+        )
         ranked.append(
             {
                 "participation_id": candidate["id"],
@@ -1353,7 +1357,7 @@ def _write_snapshot(database, expedition, candidates) -> None:
                 "credited_m": _primary_amount(requirements, metrics),
                 "reached_at": reached_at,
                 "metrics": metrics,
-                "checkpoint_name": _checkpoint_name(checkpoints, credited),
+                "checkpoint_name": _checkpoint_name(checkpoints, personal),
             }
         )
     ordered = _order_standings(ranked, multi=len(requirements) > 1)
@@ -1708,6 +1712,14 @@ def _journey_total(database, journey_id: int, cutoff):
         (journey_id, cutoff, cutoff),
     ).fetchone()
     return total, last["last_credit_at"]
+
+
+def _capped_totals(requirements, stored: dict[str, Decimal]) -> dict[str, Decimal]:
+    capped = {}
+    for code, target in requirements:
+        raw = stored.get(code, Decimal("0"))
+        capped[code] = raw if raw < target else target
+    return capped
 
 
 def _primary_amount(requirements, metrics) -> Decimal:

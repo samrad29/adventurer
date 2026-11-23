@@ -448,6 +448,45 @@ def test_two_active_expeditions_share_one_journey(app):
         ).fetchone()["n"] == 1
 
 
+def test_a_cutoff_hides_board_credit_without_calling_the_journey_finished(app):
+    """Privacy rejoin hides old credit. The journey stays unfinished until it completes."""
+    with app.app_context():
+        owner_id = _user("Owen")
+        sam_id = _user("Sam")
+        _route(
+            "camp-cut",
+            {"elevation": _feet("1000")},
+            [
+                ("camp", 0, {"elevation": _feet("100")}),
+                ("summit", 1, {"elevation": _feet("1000")}),
+            ],
+        )
+        create_private_expedition(owner_id, slug="camp-party", name="Camp", route_slug="camp-cut")
+        link = create_share_link(owner_id, "camp-party")
+        joined = accept_invitation(sam_id, token=link["token"])
+        _save(sam_id, elevation_ft="150")
+        remove_participation_privacy(sam_id, "camp-party", confirm=True)
+        rejoined = accept_invitation(sam_id, token=link["token"])
+        assert rejoined["journey"]["id"] == joined["journey"]["id"]
+        assert rejoined["participation"]["display_credits_after"] is not None
+        assert _stored(joined["journey"]["id"])["elevation"] == _feet("150")
+        live = _entry(get_leaderboard(owner_id, "camp-party"), sam_id)
+        assert _amount(live, "elevation") == 0
+        assert live["checkpoint_name"] == "Start"
+        assert live["rank_basis"] == "credited_amount"
+        assert live["completed_at"] is None
+        closed = archive_private_expedition(owner_id, "camp-party")
+        sam = next(row for row in closed["entries"] if row["user_id"] == sam_id)
+        assert _amount(sam, "elevation") == 0
+        assert sam["checkpoint_name"] == "camp"
+        assert sam["final_rank"] is not None
+        journey = get_db().execute(
+            "SELECT status FROM route_journeys WHERE id = ?",
+            (joined["journey"]["id"],),
+        ).fetchone()
+        assert journey["status"] == "active"
+
+
 def test_close_after_an_activity_snapshots_the_committed_metrics(app):
     with app.app_context():
         owner_id = _user("Owen")
