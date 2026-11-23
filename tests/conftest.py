@@ -111,6 +111,17 @@ def _wipe(application) -> None:
         database.execute("DELETE FROM expedition_updates")
         database.execute("DELETE FROM expedition_result_entries")
         database.execute("DELETE FROM journey_credits")
+        database.execute(
+            """
+            DO $wipe_totals$
+            BEGIN
+                IF to_regclass('adventurer.journey_metric_totals') IS NOT NULL THEN
+                    EXECUTE 'DELETE FROM journey_metric_totals';
+                END IF;
+            END
+            $wipe_totals$
+            """
+        )
         database.execute("DELETE FROM activity_journey_assignments")
         database.execute("DELETE FROM expedition_invitations")
         database.execute("DELETE FROM expedition_privacy_removals")

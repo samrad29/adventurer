@@ -330,6 +330,8 @@ canonical_credits lists every metric that would be credited, sorted by metric co
 
 Save and update lock the user, the active expeditions on that route for which this user has an active participation, the journey being credited, those participations, and the activity when one already exists.
 
+The journey row lock is the serialization point for remaining capacity. Lock every affected `route_journeys` row, in ascending id, and read the credited total in a following statement. An edit that changes two journeys locks both before it recalculates either total. Metric credits for one journey are written in metric code order. The credit trigger then updates `journey_metric_totals` and rejects a total above the route target. Callers do not lock that table, and the trigger does not lock `route_journeys`, so the global order stays intact. Two direct inserts that skip the journey lock still cannot commit a combined total above the target; the second fails. The journey lock is what lets the service see that committed total and credit only the remainder.
+
 Under those locks the service recomputes each metric on its own.
   A null measurement is not credited. A stored zero is not credited. Otherwise the credited amount is the smaller of the activity's full value and the remaining target. A journey that needs 500 ft and 2 miles, given an activity of 900 ft and 3 miles, stores 900 ft and 3 miles on the activity and credits 500 ft and 2 miles. The same journey given 500 ft and no distance stores 500 ft, leaves distance null, credits 500 ft, and stays active. Neither leftover moves to another journey, another metric, or a later attempt.
   A metric that is already at its target gets no new credit row. The other required metrics still can.

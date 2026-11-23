@@ -3,9 +3,19 @@
 -- checks cannot store are not rebuilt and not discarded here.
 
 DO $refuse$
+DECLARE
+    totals_remain boolean := false;
 BEGIN
+    -- A database upgraded by the first version of this revision has no totals
+    -- table. Dynamic SQL keeps that downgrade from failing at parse time.
+    IF to_regclass('adventurer.journey_metric_totals') IS NOT NULL THEN
+        EXECUTE 'SELECT EXISTS (SELECT 1 FROM adventurer.journey_metric_totals)'
+            INTO totals_remain;
+    END IF;
+
     IF EXISTS (SELECT 1 FROM adventurer.activity_journey_assignments)
         OR EXISTS (SELECT 1 FROM adventurer.journey_credits)
+        OR totals_remain
         OR EXISTS (SELECT 1 FROM adventurer.expedition_result_metrics)
         OR EXISTS (SELECT 1 FROM adventurer.expedition_update_metrics)
         OR EXISTS (SELECT 1 FROM adventurer.expedition_result_entries)
@@ -86,6 +96,10 @@ DROP TRIGGER IF EXISTS activity_journey_assignments_protect
     ON adventurer.activity_journey_assignments;
 DROP TRIGGER IF EXISTS journey_credits_protect ON adventurer.journey_credits;
 DROP TRIGGER IF EXISTS journey_credits_within_target ON adventurer.journey_credits;
+DROP TRIGGER IF EXISTS expedition_result_entries_open_metrics
+    ON adventurer.expedition_result_entries;
+DROP TRIGGER IF EXISTS expedition_updates_open_metrics
+    ON adventurer.expedition_updates;
 DROP TRIGGER IF EXISTS activities_protect_completed_journey ON adventurer.activities;
 DROP TRIGGER IF EXISTS expedition_result_metrics_immutable
     ON adventurer.expedition_result_metrics;
@@ -97,6 +111,11 @@ DROP FUNCTION IF EXISTS adventurer.assert_route_progress_shape(bigint);
 DROP FUNCTION IF EXISTS adventurer.reject_progress_change_after_journey();
 DROP FUNCTION IF EXISTS adventurer.protect_journey_assignments();
 DROP FUNCTION IF EXISTS adventurer.assert_credit_within_target();
+DROP FUNCTION IF EXISTS adventurer.adjust_credit_total();
+DROP FUNCTION IF EXISTS adventurer.apply_credit_delta(bigint, bigint, text, numeric);
+DROP FUNCTION IF EXISTS adventurer.credit_key_before(bigint, text, bigint, text);
+DROP FUNCTION IF EXISTS adventurer.note_open_snapshot();
+DROP FUNCTION IF EXISTS adventurer.snapshot_metrics_are_open(text, bigint);
 DROP FUNCTION IF EXISTS adventurer.protect_result_metrics();
 DROP FUNCTION IF EXISTS adventurer.protect_update_metrics();
 
@@ -138,6 +157,7 @@ WHERE requirement.checkpoint_id = checkpoint.id
 ALTER TABLE adventurer.route_checkpoints
     ALTER COLUMN elevation_m SET NOT NULL;
 
+DROP TABLE IF EXISTS adventurer.journey_metric_totals;
 DROP TABLE adventurer.journey_credits;
 DROP TABLE adventurer.activity_journey_assignments;
 DROP TABLE adventurer.checkpoint_requirements;

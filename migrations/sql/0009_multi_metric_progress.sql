@@ -282,6 +282,23 @@ CREATE TABLE adventurer.journey_credits (
 CREATE INDEX journey_credits_journey_metric_idx
     ON adventurer.journey_credits (journey_id, metric_code);
 
+-- One running total per journey and metric. The credit trigger is the only
+-- writer. Callers do not lock this table. It is taken at credit-write time,
+-- after activities, so it does not move ahead of route_journeys in the
+-- global lock order.
+CREATE TABLE adventurer.journey_metric_totals (
+    journey_id bigint NOT NULL,
+    metric_code text NOT NULL,
+    credited_total numeric(16, 6) NOT NULL,
+    CONSTRAINT journey_metric_totals_pkey PRIMARY KEY (journey_id, metric_code),
+    CONSTRAINT journey_metric_totals_journey_id_fkey
+        FOREIGN KEY (journey_id)
+        REFERENCES adventurer.route_journeys (id) ON DELETE NO ACTION,
+    CONSTRAINT journey_metric_totals_metric_code_fkey
+        FOREIGN KEY (metric_code) REFERENCES adventurer.progress_metrics (code),
+    CONSTRAINT journey_metric_totals_total_chk CHECK (credited_total >= 0)
+);
+
 ALTER TABLE adventurer.expedition_result_entries
     DROP CONSTRAINT expedition_result_entries_total_chk,
     DROP CONSTRAINT expedition_result_entries_rank_chk,
@@ -520,37 +537,172 @@ BEFORE INSERT OR UPDATE OR DELETE ON adventurer.journey_credits
 FOR EACH ROW
 EXECUTE FUNCTION adventurer.protect_journey_credits();
 
-CREATE FUNCTION adventurer.assert_credit_within_target()
-RETURNS trigger
+-- Credit totals are serialized on journey_metric_totals, not by summing
+-- journey_credits inside this statement. A sum sees the statement snapshot,
+-- so two concurrent inserts can both observe the old total and both commit.
+-- Locking route_journeys here would also run after activities are locked and
+-- would invert the global order.
+--
+-- Application contract, for the journey and activity services:
+--   Lock users, then expeditions, then every affected route_journeys row in
+--   ascending id, then participations, then activities. The next statement
+--   reads the credited total. Only then write credits, in metric_code order
+--   for one journey. An edit that changes two journeys locks both journey
+--   rows before it recalculates either total. That journey lock is what lets
+--   the service credit the remainder instead of failing.
+--   Do not lock journey_metric_totals directly. This trigger takes an
+--   advisory lock per journey (namespace 8142) and then locks that journey's
+--   total row. Callers that already hold the journey row lock do not
+--   deadlock, because every credit write takes the advisory lock only after
+--   the journey row.
+--
+-- The advisory lock plus the total row also covers a direct insert that
+-- skipped the journey lock. The second writer waits, then applies its delta
+-- to the committed total. The sum of committed credits for a journey and
+-- metric cannot exceed the route target.
+
+CREATE FUNCTION adventurer.credit_key_before(
+    left_journey_id bigint,
+    left_metric text,
+    right_journey_id bigint,
+    right_metric text
+)
+RETURNS boolean
+LANGUAGE sql
+IMMUTABLE
+AS $fn$
+    SELECT left_journey_id < right_journey_id
+        OR (
+            left_journey_id = right_journey_id
+            AND left_metric < right_metric
+        );
+$fn$;
+
+CREATE FUNCTION adventurer.apply_credit_delta(
+    subject_journey_id bigint,
+    subject_route_id bigint,
+    subject_metric text,
+    delta numeric
+)
+RETURNS void
 LANGUAGE plpgsql
 SET search_path = adventurer, pg_temp
 AS $fn$
 DECLARE
-    credited_total numeric(16, 6);
     target_amount numeric(16, 6);
+    next_total numeric(16, 6);
 BEGIN
     SELECT route_requirement.target_amount INTO target_amount
     FROM route_requirements AS route_requirement
-    WHERE route_requirement.route_id = NEW.route_id
-      AND route_requirement.metric_code = NEW.metric_code;
+    WHERE route_requirement.route_id = subject_route_id
+      AND route_requirement.metric_code = subject_metric;
 
-    SELECT COALESCE(SUM(credit.credited_amount), 0) INTO credited_total
-    FROM journey_credits AS credit
-    WHERE credit.journey_id = NEW.journey_id
-      AND credit.metric_code = NEW.metric_code;
+    IF target_amount IS NULL THEN
+        RAISE EXCEPTION USING MESSAGE = 'credit metric is not required by the route';
+    END IF;
 
-    IF credited_total > target_amount THEN
-        RAISE EXCEPTION USING MESSAGE = 'credit exceeds the route target';
+    -- One lock per journey, taken before either metric total. A second metric
+    -- on the same journey reenters it. Moves lock the lower journey id first.
+    PERFORM pg_advisory_xact_lock(8142, subject_journey_id::integer);
+
+    IF delta < 0 THEN
+        -- UPDATE waits on the total row and reapplies the delta to the
+        -- committed version. A plain sum would not.
+        UPDATE journey_metric_totals AS total
+        SET credited_total = total.credited_total + delta
+        WHERE total.journey_id = subject_journey_id
+          AND total.metric_code = subject_metric
+        RETURNING total.credited_total INTO next_total;
+
+        IF NOT FOUND THEN
+            RAISE EXCEPTION USING MESSAGE = 'credit total is missing';
+        END IF;
+        IF next_total < 0 THEN
+            RAISE EXCEPTION USING MESSAGE = 'credit total would become negative';
+        END IF;
+    ELSE
+        -- INSERT ON CONFLICT finds the committed total through the unique
+        -- index, including a row this statement's snapshot cannot see yet.
+        INSERT INTO journey_metric_totals AS total (
+            journey_id, metric_code, credited_total
+        )
+        VALUES (subject_journey_id, subject_metric, delta)
+        ON CONFLICT (journey_id, metric_code) DO UPDATE
+        SET credited_total = total.credited_total + EXCLUDED.credited_total
+        WHERE total.credited_total + EXCLUDED.credited_total <= target_amount
+        RETURNING total.credited_total INTO next_total;
+
+        IF NOT FOUND OR next_total > target_amount THEN
+            RAISE EXCEPTION USING MESSAGE = 'credit exceeds the route target';
+        END IF;
+    END IF;
+
+    IF next_total = 0 THEN
+        DELETE FROM journey_metric_totals
+        WHERE journey_id = subject_journey_id
+          AND metric_code = subject_metric;
+    END IF;
+END;
+$fn$;
+
+CREATE FUNCTION adventurer.adjust_credit_total()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = adventurer, pg_temp
+AS $fn$
+BEGIN
+    IF TG_OP = 'INSERT' THEN
+        PERFORM apply_credit_delta(
+            NEW.journey_id, NEW.route_id, NEW.metric_code, NEW.credited_amount
+        );
+        RETURN NULL;
+    END IF;
+
+    IF TG_OP = 'DELETE' THEN
+        PERFORM apply_credit_delta(
+            OLD.journey_id, OLD.route_id, OLD.metric_code, -OLD.credited_amount
+        );
+        RETURN NULL;
+    END IF;
+
+    IF OLD.journey_id IS NOT DISTINCT FROM NEW.journey_id
+       AND OLD.metric_code IS NOT DISTINCT FROM NEW.metric_code THEN
+        PERFORM apply_credit_delta(
+            NEW.journey_id,
+            NEW.route_id,
+            NEW.metric_code,
+            NEW.credited_amount - OLD.credited_amount
+        );
+        RETURN NULL;
+    END IF;
+
+    -- A metric change or a journey change touches two totals. Apply the
+    -- earlier key first so two such edits cannot deadlock.
+    IF credit_key_before(
+        OLD.journey_id, OLD.metric_code, NEW.journey_id, NEW.metric_code
+    ) THEN
+        PERFORM apply_credit_delta(
+            OLD.journey_id, OLD.route_id, OLD.metric_code, -OLD.credited_amount
+        );
+        PERFORM apply_credit_delta(
+            NEW.journey_id, NEW.route_id, NEW.metric_code, NEW.credited_amount
+        );
+    ELSE
+        PERFORM apply_credit_delta(
+            NEW.journey_id, NEW.route_id, NEW.metric_code, NEW.credited_amount
+        );
+        PERFORM apply_credit_delta(
+            OLD.journey_id, OLD.route_id, OLD.metric_code, -OLD.credited_amount
+        );
     END IF;
     RETURN NULL;
 END;
 $fn$;
 
-CREATE CONSTRAINT TRIGGER journey_credits_within_target
-AFTER INSERT OR UPDATE ON adventurer.journey_credits
-DEFERRABLE INITIALLY IMMEDIATE
+CREATE TRIGGER journey_credits_within_target
+AFTER INSERT OR UPDATE OR DELETE ON adventurer.journey_credits
 FOR EACH ROW
-EXECUTE FUNCTION adventurer.assert_credit_within_target();
+EXECUTE FUNCTION adventurer.adjust_credit_total();
 
 CREATE OR REPLACE FUNCTION adventurer.protect_completed_journey_activity()
 RETURNS trigger
@@ -644,6 +796,60 @@ BEFORE UPDATE OF elevation_gain_m, distance_m OR DELETE ON adventurer.activities
 FOR EACH ROW
 EXECUTE FUNCTION adventurer.protect_completed_journey_activity();
 
+-- The parent insert records its id for this transaction only. Metric rows
+-- inserted before commit can see it. Commit and rollback both clear it, so
+-- a later transaction cannot append, and an ordinary request cannot leave
+-- the marker set. The marker is not a privilege: privacy removal and
+-- account deletion do not use it.
+
+CREATE FUNCTION adventurer.note_open_snapshot()
+RETURNS trigger
+LANGUAGE plpgsql
+SET search_path = adventurer, pg_temp
+AS $fn$
+DECLARE
+    setting_name text := TG_ARGV[0];
+    current_value text;
+BEGIN
+    current_value := current_setting(setting_name, true);
+    IF current_value IS NULL OR current_value = '' THEN
+        current_value := ',';
+    END IF;
+    IF position(',' || NEW.id::text || ',' IN current_value) = 0 THEN
+        current_value := current_value || NEW.id::text || ',';
+    END IF;
+    PERFORM set_config(setting_name, current_value, true);
+    RETURN NULL;
+END;
+$fn$;
+
+CREATE TRIGGER expedition_result_entries_open_metrics
+AFTER INSERT ON adventurer.expedition_result_entries
+FOR EACH ROW
+EXECUTE FUNCTION adventurer.note_open_snapshot('adventurer.open_result_entries');
+
+CREATE TRIGGER expedition_updates_open_metrics
+AFTER INSERT ON adventurer.expedition_updates
+FOR EACH ROW
+EXECUTE FUNCTION adventurer.note_open_snapshot('adventurer.open_expedition_updates');
+
+CREATE FUNCTION adventurer.snapshot_metrics_are_open(
+    setting_name text,
+    subject_id bigint
+)
+RETURNS boolean
+LANGUAGE plpgsql
+SET search_path = adventurer, pg_temp
+AS $fn$
+DECLARE
+    current_value text;
+BEGIN
+    current_value := current_setting(setting_name, true);
+    RETURN current_value IS NOT NULL
+        AND position(',' || subject_id::text || ',' IN current_value) > 0;
+END;
+$fn$;
+
 CREATE FUNCTION adventurer.protect_result_metrics()
 RETURNS trigger
 LANGUAGE plpgsql
@@ -653,6 +859,12 @@ DECLARE
     subject_user_id bigint;
 BEGIN
     IF TG_OP = 'INSERT' THEN
+        IF NOT snapshot_metrics_are_open(
+            'adventurer.open_result_entries', NEW.result_entry_id
+        ) THEN
+            RAISE EXCEPTION USING MESSAGE =
+                'a result snapshot cannot gain metric rows after it is created';
+        END IF;
         RETURN NEW;
     END IF;
 
@@ -673,7 +885,7 @@ END;
 $fn$;
 
 CREATE TRIGGER expedition_result_metrics_immutable
-BEFORE UPDATE OR DELETE ON adventurer.expedition_result_metrics
+BEFORE INSERT OR UPDATE OR DELETE ON adventurer.expedition_result_metrics
 FOR EACH ROW
 EXECUTE FUNCTION adventurer.protect_result_metrics();
 
@@ -686,6 +898,12 @@ DECLARE
     subject_user_id bigint;
 BEGIN
     IF TG_OP = 'INSERT' THEN
+        IF NOT snapshot_metrics_are_open(
+            'adventurer.open_expedition_updates', NEW.update_id
+        ) THEN
+            RAISE EXCEPTION USING MESSAGE =
+                'an expedition update cannot gain metric rows after it is created';
+        END IF;
         RETURN NEW;
     END IF;
 
@@ -703,7 +921,7 @@ END;
 $fn$;
 
 CREATE TRIGGER expedition_update_metrics_immutable
-BEFORE UPDATE OR DELETE ON adventurer.expedition_update_metrics
+BEFORE INSERT OR UPDATE OR DELETE ON adventurer.expedition_update_metrics
 FOR EACH ROW
 EXECUTE FUNCTION adventurer.protect_update_metrics();
 
@@ -913,6 +1131,7 @@ ALTER TABLE adventurer.route_requirements ENABLE ROW LEVEL SECURITY;
 ALTER TABLE adventurer.checkpoint_requirements ENABLE ROW LEVEL SECURITY;
 ALTER TABLE adventurer.activity_journey_assignments ENABLE ROW LEVEL SECURITY;
 ALTER TABLE adventurer.journey_credits ENABLE ROW LEVEL SECURITY;
+ALTER TABLE adventurer.journey_metric_totals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE adventurer.expedition_result_metrics ENABLE ROW LEVEL SECURITY;
 ALTER TABLE adventurer.expedition_update_metrics ENABLE ROW LEVEL SECURITY;
 
@@ -924,6 +1143,7 @@ BEGIN
         REVOKE ALL ON TABLE adventurer.checkpoint_requirements FROM anon;
         REVOKE ALL ON TABLE adventurer.activity_journey_assignments FROM anon;
         REVOKE ALL ON TABLE adventurer.journey_credits FROM anon;
+        REVOKE ALL ON TABLE adventurer.journey_metric_totals FROM anon;
         REVOKE ALL ON TABLE adventurer.expedition_result_metrics FROM anon;
         REVOKE ALL ON TABLE adventurer.expedition_update_metrics FROM anon;
         REVOKE ALL ON SEQUENCE adventurer.activity_journey_assignments_id_seq FROM anon;
@@ -935,6 +1155,7 @@ BEGIN
         REVOKE ALL ON TABLE adventurer.checkpoint_requirements FROM authenticated;
         REVOKE ALL ON TABLE adventurer.activity_journey_assignments FROM authenticated;
         REVOKE ALL ON TABLE adventurer.journey_credits FROM authenticated;
+        REVOKE ALL ON TABLE adventurer.journey_metric_totals FROM authenticated;
         REVOKE ALL ON TABLE adventurer.expedition_result_metrics FROM authenticated;
         REVOKE ALL ON TABLE adventurer.expedition_update_metrics FROM authenticated;
         REVOKE ALL ON SEQUENCE adventurer.activity_journey_assignments_id_seq FROM authenticated;
