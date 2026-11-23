@@ -14,10 +14,12 @@ import os
 import re
 import secrets
 from datetime import datetime, timezone
+from decimal import Decimal
 
 from flask import current_app
 
 from .db import get_db
+from .journey_progress import CheckpointMark, assess_checkpoints
 from .journeys import JourneyError, activate_for_participation
 
 INVITE_DAYS = 30
@@ -948,8 +950,7 @@ def get_updates(user_id: int, slug: str) -> list[dict]:
         rows = database.execute(
             """
             SELECT feed.id, feed.user_id, profile.display_name, feed.kind,
-                   feed.activity_id, feed.checkpoint_name, feed.elevation_m,
-                   feed.created_at
+                   feed.activity_id, feed.checkpoint_name, feed.created_at
             FROM expedition_updates AS feed
             JOIN user_profiles AS profile ON profile.user_id = feed.user_id
             WHERE feed.expedition_id = ?
@@ -957,7 +958,7 @@ def get_updates(user_id: int, slug: str) -> list[dict]:
             """,
             (expedition["id"],),
         ).fetchall()
-        return [dict(row) for row in rows]
+        return _updates_with_metrics(database, rows)
     except ExpeditionError:
         database.rollback()
         raise
@@ -1302,6 +1303,11 @@ def _close_once(database, expedition_id: int, *, actor_id: int | None, terminal:
 
 
 def _write_snapshot(database, expedition, candidates) -> None:
+    """Store one result per eligible participant and one metric row per requirement.
+
+    The amounts are the credited totals visible to this expedition at close.
+    A later change to the journey does not rewrite a row that already exists.
+    """
     if not candidates:
         return
     existing = {
@@ -1315,54 +1321,52 @@ def _write_snapshot(database, expedition, candidates) -> None:
             (expedition["id"],),
         ).fetchall()
     }
-    checkpoints = database.execute(
-        """
-        SELECT name, elevation_m
-        FROM route_checkpoints
-        WHERE route_id = ?
-        ORDER BY elevation_m, position
-        """,
-        (expedition["route_id"],),
-    ).fetchall()
+    pending = [candidate for candidate in candidates if candidate["id"] not in existing]
+    if not pending:
+        return
+    requirements = _requirements(database, expedition["route_id"])
+    checkpoints = _checkpoint_marks(database, expedition["route_id"])
+    progress = _progress_bundle(database, [candidate["journey_id"] for candidate in pending])
     captured = database.execute("SELECT now() AS captured_at").fetchone()["captured_at"]
     ranked = []
-    for candidate in candidates:
-        if candidate["id"] in existing:
-            continue
-        total, last_credit = _journey_total(
-            database, candidate["journey_id"], candidate["display_credits_after"]
+    for candidate in pending:
+        metrics, reached_at = _visible_metrics(
+            requirements,
+            progress,
+            candidate["journey_id"],
+            candidate["display_credits_after"],
         )
         name = database.execute(
             "SELECT display_name FROM user_profiles WHERE user_id = ?",
             (candidate["user_id"],),
         ).fetchone()
+        journey = progress["journeys"][candidate["journey_id"]]
+        credited = {metric["metric"]: metric["credited_m"] for metric in metrics}
         ranked.append(
             {
                 "participation_id": candidate["id"],
                 "user_id": candidate["user_id"],
                 "journey_id": candidate["journey_id"],
                 "display_name": name["display_name"],
-                "total_m": total,
-                "last_credit_at": last_credit,
+                "completed": journey["status"] == "completed",
+                "completed_at": journey["completed_at"],
+                "credited_m": _primary_amount(requirements, metrics),
+                "reached_at": reached_at,
+                "metrics": metrics,
+                "checkpoint_name": _checkpoint_name(checkpoints, credited),
             }
         )
-    ranked.sort(
-        key=lambda row: (
-            -row["total_m"],
-            row["last_credit_at"] is None,
-            row["last_credit_at"] or datetime.min.replace(tzinfo=timezone.utc),
-            row["display_name"],
-            row["user_id"],
-        )
-    )
-    for rank, row in enumerate(ranked, start=1):
-        database.execute(
+    ordered = _order_standings(ranked, multi=len(requirements) > 1)
+    _assign_final_ranks(ordered, multi=len(requirements) > 1)
+    for row in ordered:
+        inserted = database.execute(
             """
             INSERT INTO expedition_result_entries (
                 expedition_id, participation_id, user_id, journey_id,
-                display_name, total_m, rank, checkpoint_name, captured_at
+                display_name, final_rank, checkpoint_name, captured_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            RETURNING id
             """,
             (
                 expedition["id"],
@@ -1370,12 +1374,21 @@ def _write_snapshot(database, expedition, candidates) -> None:
                 row["user_id"],
                 row["journey_id"],
                 row["display_name"],
-                row["total_m"],
-                rank,
-                _checkpoint_name(checkpoints, row["total_m"]),
+                row["final_rank"],
+                row["checkpoint_name"],
                 captured,
             ),
-        )
+        ).fetchone()
+        for metric in row["metrics"]:
+            database.execute(
+                """
+                INSERT INTO expedition_result_metrics (
+                    result_entry_id, metric_code, total_amount
+                )
+                VALUES (?, ?, ?)
+                """,
+                (inserted["id"], metric["metric"], metric["credited_m"]),
+            )
 
 
 def _candidate_rows(database, expedition_id: int, *, exclude_user_id: int | None = None, withdrawn_only: bool = False):
@@ -1410,96 +1423,404 @@ def _candidate_rows(database, expedition_id: int, *, exclude_user_id: int | None
 
 
 def _live_entries(database, expedition) -> list[dict]:
+    """Rank active participants from journey totals. This read writes nothing.
+
+    A route with one required metric orders unfinished people by that metric.
+    A route with more than one does not invent a projected date: unfinished
+    people stay listed as insufficient data and receive no live rank.
+    """
     rows = database.execute(
         """
-        SELECT participation.user_id, participation.journey_id, profile.display_name,
-               COALESCE(SUM(credit.credited_elevation_m), 0) AS total_m,
-               MAX(credit.created_at) AS last_credit_at
+        SELECT participation.user_id, participation.journey_id,
+               participation.display_credits_after, profile.display_name
         FROM expedition_participations AS participation
         JOIN user_profiles AS profile ON profile.user_id = participation.user_id
-        LEFT JOIN journey_credits AS credit
-          ON credit.journey_id = participation.journey_id
-         AND (
-             participation.display_credits_after IS NULL
-             OR credit.created_at >= participation.display_credits_after
-         )
         WHERE participation.expedition_id = ?
           AND participation.status = 'active'
-        GROUP BY participation.user_id, participation.journey_id, profile.display_name
         """,
         (expedition["id"],),
     ).fetchall()
-    checkpoints = database.execute(
-        """
-        SELECT name, elevation_m
-        FROM route_checkpoints
-        WHERE route_id = ?
-        ORDER BY elevation_m, position
-        """,
-        (expedition["route_id"],),
-    ).fetchall()
-    ordered = sorted(
-        rows,
-        key=lambda row: (
-            -row["total_m"],
-            row["last_credit_at"] is None,
-            row["last_credit_at"] or datetime.min.replace(tzinfo=timezone.utc),
-            row["display_name"],
-            row["user_id"],
-        ),
-    )
+    requirements = _requirements(database, expedition["route_id"])
+    checkpoints = _checkpoint_marks(database, expedition["route_id"])
+    progress = _progress_bundle(database, [row["journey_id"] for row in rows])
+    multi = len(requirements) > 1
+    prepared = []
+    for row in rows:
+        metrics, reached_at = _visible_metrics(
+            requirements,
+            progress,
+            row["journey_id"],
+            row["display_credits_after"],
+        )
+        journey = progress["journeys"][row["journey_id"]]
+        credited = {metric["metric"]: metric["credited_m"] for metric in metrics}
+        prepared.append(
+            {
+                "user_id": row["user_id"],
+                "display_name": row["display_name"],
+                "journey_id": row["journey_id"],
+                "completed": journey["status"] == "completed",
+                "completed_at": journey["completed_at"],
+                "credited_m": _primary_amount(requirements, metrics),
+                "reached_at": reached_at,
+                "checkpoint_name": _checkpoint_name(checkpoints, credited),
+                "metrics": [
+                    {
+                        "metric": metric["metric"],
+                        "target_m": metric["target_m"],
+                        "credited_m": metric["credited_m"],
+                        "remaining_m": metric["remaining_m"],
+                    }
+                    for metric in metrics
+                ],
+            }
+        )
+    ordered = _order_standings(prepared, multi=multi)
+    _assign_live_ranks(ordered, multi=multi)
     return [
         {
             "user_id": row["user_id"],
             "display_name": row["display_name"],
             "journey_id": row["journey_id"],
-            "total_m": row["total_m"],
-            "rank": rank,
-            "checkpoint_name": _checkpoint_name(checkpoints, row["total_m"]),
-            "last_credit_at": row["last_credit_at"],
+            "live_rank": row["live_rank"],
+            "rank_basis": row["rank_basis"],
+            "completed_at": row["completed_at"] if row["completed"] else None,
+            "projected_completion_at": None,
+            "checkpoint_name": row["checkpoint_name"],
+            "metrics": row["metrics"],
         }
-        for rank, row in enumerate(ordered, start=1)
+        for row in ordered
     ]
 
 
 def _final_entries(database, expedition_id: int) -> list[dict]:
     rows = database.execute(
         """
-        SELECT user_id, display_name, journey_id, total_m, rank,
+        SELECT id, user_id, display_name, journey_id, final_rank,
                checkpoint_name, captured_at
         FROM expedition_result_entries
         WHERE expedition_id = ?
-        ORDER BY rank, user_id
+        ORDER BY final_rank NULLS LAST, display_name, user_id
         """,
         (expedition_id,),
     ).fetchall()
-    return [dict(row) for row in rows]
+    metrics = _result_metrics(database, [row["id"] for row in rows])
+    return [
+        {
+            "user_id": row["user_id"],
+            "display_name": row["display_name"],
+            "journey_id": row["journey_id"],
+            "final_rank": row["final_rank"],
+            "checkpoint_name": row["checkpoint_name"],
+            "captured_at": row["captured_at"],
+            "metrics": metrics.get(row["id"], []),
+        }
+        for row in rows
+    ]
+
+
+def _updates_with_metrics(database, rows) -> list[dict]:
+    metrics = _update_metrics(database, [row["id"] for row in rows])
+    return [
+        {
+            "id": row["id"],
+            "user_id": row["user_id"],
+            "display_name": row["display_name"],
+            "kind": row["kind"],
+            "activity_id": row["activity_id"],
+            "checkpoint_name": row["checkpoint_name"],
+            "created_at": row["created_at"],
+            "metrics": metrics.get(row["id"], []),
+        }
+        for row in rows
+    ]
+
+
+def _requirements(database, route_id: int) -> list[tuple[str, Decimal]]:
+    rows = database.execute(
+        """
+        SELECT metric_code, target_amount
+        FROM route_requirements
+        WHERE route_id = ?
+        ORDER BY metric_code
+        """,
+        (route_id,),
+    ).fetchall()
+    return [(row["metric_code"], row["target_amount"]) for row in rows]
+
+
+def _checkpoint_marks(database, route_id: int):
+    rows = database.execute(
+        """
+        SELECT id, slug, name, position
+        FROM route_checkpoints
+        WHERE route_id = ?
+        ORDER BY position, id
+        """,
+        (route_id,),
+    ).fetchall()
+    thresholds: dict[int, list[tuple[str, Decimal]]] = {row["id"]: [] for row in rows}
+    if rows:
+        for row in database.execute(
+            """
+            SELECT checkpoint_id, metric_code, threshold_amount
+            FROM checkpoint_requirements
+            WHERE route_id = ?
+            ORDER BY checkpoint_id, metric_code
+            """,
+            (route_id,),
+        ).fetchall():
+            thresholds[row["checkpoint_id"]].append(
+                (row["metric_code"], row["threshold_amount"])
+            )
+    return tuple(
+        CheckpointMark(
+            id=row["id"],
+            slug=row["slug"],
+            name=row["name"],
+            position=row["position"],
+            reached=False,
+            thresholds=tuple(thresholds[row["id"]]),
+        )
+        for row in rows
+    )
+
+
+def _progress_bundle(database, journey_ids: list[int]) -> dict:
+    unique = sorted({journey_id for journey_id in journey_ids if journey_id is not None})
+    if not unique:
+        return {"journeys": {}, "totals": {}, "credits": {}}
+    journeys = {
+        row["id"]: row
+        for row in database.execute(
+            """
+            SELECT id, status, completed_at
+            FROM route_journeys
+            WHERE id = ANY(?)
+            """,
+            (unique,),
+        ).fetchall()
+    }
+    totals: dict[int, dict[str, Decimal]] = {}
+    for row in database.execute(
+        """
+        SELECT journey_id, metric_code, credited_total
+        FROM journey_metric_totals
+        WHERE journey_id = ANY(?)
+        """,
+        (unique,),
+    ).fetchall():
+        totals.setdefault(row["journey_id"], {})[row["metric_code"]] = row["credited_total"]
+    credits: dict[int, dict[str, list]] = {}
+    for row in database.execute(
+        """
+        SELECT journey_id, metric_code, credited_amount, created_at
+        FROM journey_credits
+        WHERE journey_id = ANY(?)
+        ORDER BY journey_id, metric_code, created_at, id
+        """,
+        (unique,),
+    ).fetchall():
+        credits.setdefault(row["journey_id"], {}).setdefault(row["metric_code"], []).append(row)
+    return {"journeys": journeys, "totals": totals, "credits": credits}
+
+
+def _visible_metrics(requirements, progress, journey_id: int, cutoff):
+    """Return every required metric and the time the single-metric total was reached.
+
+    journey_metric_totals is the journey total. display_credits_after drops
+    credits from before that time and is applied to each metric on its own.
+    """
+    stored = progress["totals"].get(journey_id, {})
+    lines = progress["credits"].get(journey_id, {})
+    metrics = []
+    reached_at = None
+    single = len(requirements) == 1
+    for code, target in requirements:
+        history = lines.get(code, [])
+        if cutoff is not None:
+            history = [row for row in history if row["created_at"] >= cutoff]
+            raw = sum((row["credited_amount"] for row in history), Decimal("0"))
+        else:
+            raw = stored.get(code, Decimal("0"))
+        credited = raw if raw < target else target
+        remaining = target - credited if target > credited else Decimal("0")
+        metrics.append(
+            {
+                "metric": code,
+                "target_m": target,
+                "credited_m": credited,
+                "remaining_m": remaining,
+            }
+        )
+        if single:
+            reached_at = _first_reached(history, credited)
+    return metrics, reached_at
+
+
+def _first_reached(history, credited: Decimal):
+    if credited <= 0:
+        return None
+    running = Decimal("0")
+    for row in history:
+        running += row["credited_amount"]
+        if running >= credited:
+            return row["created_at"]
+    return None
 
 
 def _journey_total(database, journey_id: int, cutoff):
-    row = database.execute(
+    """Elevation total still read by the home presentation.
+
+    Home has not moved to the metrics array. This returns that one metric
+    and does not rank an expedition.
+    """
+    if cutoff is None:
+        stored = database.execute(
+            """
+            SELECT credited_total
+            FROM journey_metric_totals
+            WHERE journey_id = ? AND metric_code = 'elevation'
+            """,
+            (journey_id,),
+        ).fetchone()
+        total = stored["credited_total"] if stored else Decimal("0")
+    else:
+        summed = database.execute(
+            """
+            SELECT COALESCE(SUM(credited_amount), 0) AS credited_total
+            FROM journey_credits
+            WHERE journey_id = ?
+              AND metric_code = 'elevation'
+              AND created_at >= ?
+            """,
+            (journey_id, cutoff),
+        ).fetchone()
+        total = summed["credited_total"]
+    last = database.execute(
         """
-        SELECT COALESCE(SUM(credited_elevation_m), 0) AS total_m,
-               MAX(created_at) AS last_credit_at
+        SELECT MAX(created_at) AS last_credit_at
         FROM journey_credits
         WHERE journey_id = ?
+          AND metric_code = 'elevation'
           AND (?::timestamptz IS NULL OR created_at >= ?::timestamptz)
         """,
         (journey_id, cutoff, cutoff),
     ).fetchone()
-    return row["total_m"], row["last_credit_at"]
+    return total, last["last_credit_at"]
 
 
-def _checkpoint_name(checkpoints, total) -> str:
+def _primary_amount(requirements, metrics) -> Decimal:
+    if len(requirements) != 1:
+        return Decimal("0")
+    code = requirements[0][0]
+    return next(metric["credited_m"] for metric in metrics if metric["metric"] == code)
+
+
+def _order_standings(rows: list[dict], *, multi: bool) -> list[dict]:
+    finishers = [row for row in rows if row["completed"]]
+    unfinished = [row for row in rows if not row["completed"]]
+    finishers.sort(
+        key=lambda row: (
+            row["completed_at"] is None,
+            row["completed_at"] or datetime.min.replace(tzinfo=timezone.utc),
+            row["display_name"],
+            row["user_id"],
+        )
+    )
+    if multi:
+        unfinished.sort(key=lambda row: (row["display_name"], row["user_id"]))
+    else:
+        unfinished.sort(
+            key=lambda row: (
+                -row["credited_m"],
+                row["reached_at"] is None,
+                row["reached_at"] or datetime.min.replace(tzinfo=timezone.utc),
+                row["display_name"],
+                row["user_id"],
+            )
+        )
+    return finishers + unfinished
+
+
+def _assign_live_ranks(rows: list[dict], *, multi: bool) -> None:
+    if multi:
+        place = 0
+        for row in rows:
+            row["projected_completion_at"] = None
+            if row["completed"]:
+                place += 1
+                row["live_rank"] = place
+                row["rank_basis"] = "actual_completion"
+            else:
+                row["live_rank"] = None
+                row["rank_basis"] = "insufficient_data"
+        return
+    for place, row in enumerate(rows, start=1):
+        row["live_rank"] = place
+        row["projected_completion_at"] = None
+        row["rank_basis"] = "actual_completion" if row["completed"] else "credited_amount"
+
+
+def _assign_final_ranks(rows: list[dict], *, multi: bool) -> None:
+    if multi:
+        place = 0
+        for row in rows:
+            if row["completed"]:
+                place += 1
+                row["final_rank"] = place
+            else:
+                row["final_rank"] = None
+        return
+    for place, row in enumerate(rows, start=1):
+        row["final_rank"] = place
+
+
+def _result_metrics(database, entry_ids: list[int]) -> dict[int, list[dict]]:
+    if not entry_ids:
+        return {}
+    grouped: dict[int, list[dict]] = {}
+    for row in database.execute(
+        """
+        SELECT result_entry_id, metric_code, total_amount
+        FROM expedition_result_metrics
+        WHERE result_entry_id = ANY(?)
+        ORDER BY result_entry_id, metric_code
+        """,
+        (entry_ids,),
+    ).fetchall():
+        grouped.setdefault(row["result_entry_id"], []).append(
+            {"metric": row["metric_code"], "total_m": row["total_amount"]}
+        )
+    return grouped
+
+
+def _update_metrics(database, update_ids: list[int]) -> dict[int, list[dict]]:
+    if not update_ids:
+        return {}
+    grouped: dict[int, list[dict]] = {}
+    for row in database.execute(
+        """
+        SELECT update_id, metric_code, credited_amount
+        FROM expedition_update_metrics
+        WHERE update_id = ANY(?)
+        ORDER BY update_id, metric_code
+        """,
+        (update_ids,),
+    ).fetchall():
+        grouped.setdefault(row["update_id"], []).append(
+            {"metric": row["metric_code"], "credited_m": row["credited_amount"]}
+        )
+    return grouped
+
+
+def _checkpoint_name(checkpoints, credited: dict[str, Decimal]) -> str:
     # No checkpoint sits at zero. A participant who has not reached the first
     # stop still needs a name because the result column is required.
-    name = "Start"
-    for checkpoint in checkpoints:
-        if checkpoint["elevation_m"] <= total:
-            name = checkpoint["name"]
-        else:
-            break
-    return name
+    reached = [mark for mark in assess_checkpoints(checkpoints, credited) if mark.reached]
+    if not reached:
+        return "Start"
+    return max(reached, key=lambda mark: (mark.position, mark.id)).name
 
 
 def _reload_for_join(database, user_id: int, slug: str) -> dict:

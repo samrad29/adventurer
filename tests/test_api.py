@@ -393,7 +393,7 @@ def test_private_expedition_invitation_leave_and_privacy(client, app):
     assert rejoined.get_json()["participation"]["display_credits_after"] is None
     still = client.get("/api/v1/expeditions/owen-kili/leaderboard", headers=_auth(owen))
     sam_row = next(row for row in still.get_json()["entries"] if row["user_id"] == _sam)
-    assert Decimal(sam_row["total_m"]) > 0
+    assert Decimal(next(item["credited_m"] for item in sam_row["metrics"] if item["metric"] == "elevation")) > 0
     client.post(
         "/api/v1/expeditions/owen-kili/privacy-removal",
         json={"confirm": True},
@@ -409,7 +409,7 @@ def test_private_expedition_invitation_leave_and_privacy(client, app):
     assert back.get_json()["participation"]["display_credits_after"] is not None
     board = client.get("/api/v1/expeditions/owen-kili/leaderboard", headers=_auth(owen))
     sam_again = next(row for row in board.get_json()["entries"] if row["user_id"] == _sam)
-    assert Decimal(sam_again["total_m"]) == 0
+    assert Decimal(next(item["credited_m"] for item in sam_again["metrics"] if item["metric"] == "elevation")) == 0
     home = client.get("/api/v1/home", headers=_auth(rita))
     invite = home.get_json()["incoming_invitations"][0]
     assert invite["kind"] == "username"

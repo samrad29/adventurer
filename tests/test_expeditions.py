@@ -662,12 +662,12 @@ def test_close_keeps_zeros_and_departed_finishers(app):
         closed = complete_organization_expedition(owner_id, "kili-season")
         by_user = {row["user_id"]: row for row in closed["entries"]}
         assert zero_id in by_user
-        assert by_user[zero_id]["total_m"] == 0
+        assert _amount(by_user[zero_id]) == 0
         assert by_user[zero_id]["checkpoint_name"] == "Start"
         assert finisher_id in by_user
-        assert by_user[finisher_id]["checkpoint_name"] == "Hut"
+        assert by_user[finisher_id]["checkpoint_name"] == "Summit"
         assert leaver_id not in by_user
-        assert [by_user[finisher_id]["rank"], by_user[zero_id]["rank"]] == [1, 2]
+        assert [_place(by_user[finisher_id]), _place(by_user[zero_id])] == [1, 2]
         board = get_leaderboard(owner_id, "kili-season")
         assert board["mode"] == "final"
         assert board["entries"] == closed["entries"]
@@ -688,23 +688,23 @@ def test_live_and_final_boards_use_different_sources(app):
         live = get_leaderboard(sam_id, "sam-kili")
         assert live["mode"] == "live"
         mine = next(row for row in live["entries"] if row["user_id"] == sam_id)
-        assert mine["total_m"] == feet_to_meters(Decimal("100"))
+        assert _amount(mine) == feet_to_meters(Decimal("100"))
         assert mine["checkpoint_name"] == "Hut"
         assert mine["journey_id"] == _participation(sam_id, "sam-kili")["journey_id"]
         owner = next(row for row in live["entries"] if row["user_id"] == owner_id)
-        assert owner["total_m"] == 0
+        assert _amount(owner) == 0
         remove_participation_privacy(sam_id, "sam-kili", confirm=True)
         rejoined = accept_invitation(sam_id, token=link["token"])
         assert rejoined["participation"]["display_credits_after"] is not None
         hidden = get_leaderboard(owner_id, "sam-kili")
         rejoined_row = next(row for row in hidden["entries"] if row["user_id"] == sam_id)
-        assert rejoined_row["total_m"] == 0
+        assert _amount(rejoined_row) == 0
         assert _journey_total(rejoined["journey"]["id"]) == feet_to_meters(Decimal("100"))
         _log(sam_id, "100")
         shown = next(
             row for row in get_leaderboard(owner_id, "sam-kili")["entries"] if row["user_id"] == sam_id
         )
-        assert shown["total_m"] == feet_to_meters(Decimal("100"))
+        assert _amount(shown) == feet_to_meters(Decimal("100"))
         assert _journey_total(rejoined["journey"]["id"]) == feet_to_meters(Decimal("200"))
 
 
@@ -732,7 +732,7 @@ def test_privacy_removal_leaves_a_rank_gap_and_personal_progress(app):
         journeys = _count("route_journeys", "user_id = ?", (second_id,))
         remove_participation_privacy(second_id, "kili-season", confirm=True)
         ranks = {
-            row["user_id"]: row["rank"]
+            row["user_id"]: row["final_rank"]
             for row in get_leaderboard(owner_id, "kili-season")["entries"]
         }
         assert ranks == {first_id: 1, third_id: 3}
@@ -890,7 +890,7 @@ def test_an_activity_that_commits_first_is_in_the_snapshot(app, monkeypatch):
         thread.join(timeout=20)
         assert not thread.is_alive()
         assert "error" not in holder
-        assert holder["result"]["entries"][0]["total_m"] == feet_to_meters(Decimal("100"))
+        assert _amount(holder["result"]["entries"][0]) == feet_to_meters(Decimal("100"))
         assert get_updates(owner_id, "owen-kili")
 
 
@@ -921,10 +921,10 @@ def test_a_close_that_commits_first_keeps_the_snapshot(app, monkeypatch):
         thread.join(timeout=20)
         assert not thread.is_alive()
         assert "error" not in holder
-        assert closed["entries"][0]["total_m"] == 0
+        assert _amount(closed["entries"][0]) == 0
         assert get_updates(owner_id, "owen-kili") == []
         assert _journey_total(holder["result"]["journey"]["id"]) == feet_to_meters(Decimal("100"))
-        assert get_leaderboard(owner_id, "owen-kili")["entries"][0]["total_m"] == 0
+        assert _amount(get_leaderboard(owner_id, "owen-kili")["entries"][0]) == 0
 
 
 def test_leave_and_close_follow_whoever_commits(app, monkeypatch):
@@ -1025,7 +1025,7 @@ def test_restart_before_close_snapshots_the_new_journey(app, monkeypatch):
         assert not thread.is_alive()
         assert "error" not in holder
         entry = holder["result"]["entries"][0]
-        assert entry["total_m"] == 0
+        assert _amount(entry) == 0
         assert entry["journey_id"] == _participation(owner_id, "owen-kili")["journey_id"]
 
 
@@ -1059,7 +1059,7 @@ def test_close_before_restart_keeps_the_old_journey(app, monkeypatch):
         assert "error" not in holder
         entry = closed["entries"][0]
         assert entry["journey_id"] == logged["journey"]["id"]
-        assert entry["total_m"] == feet_to_meters(Decimal("100"))
+        assert _amount(entry) == feet_to_meters(Decimal("100"))
         assert _participation(owner_id, "owen-kili")["journey_id"] == logged["journey"]["id"]
 
 
@@ -1130,10 +1130,10 @@ def test_close_before_privacy_removal_deletes_only_that_result(app, monkeypatch)
         thread.join(timeout=20)
         assert not thread.is_alive()
         assert "error" not in holder
-        owner_rank = next(row["rank"] for row in closed["entries"] if row["user_id"] == owner_id)
+        owner_rank = next(row["final_rank"] for row in closed["entries"] if row["user_id"] == owner_id)
         remaining = get_leaderboard(owner_id, "owen-kili")["entries"]
         assert [row["user_id"] for row in remaining] == [owner_id]
-        assert remaining[0]["rank"] == owner_rank
+        assert remaining[0]["final_rank"] == owner_rank
 
 
 def test_transfer_before_privacy_removal_releases_the_former_owner(app, monkeypatch):
@@ -1222,9 +1222,22 @@ def test_concurrent_organization_joins_take_one_slot(app):
         assert len([row for row in _journeys(sam_id) if row["status"] == "active"]) == 1
 
 
+def _amount(entry: dict, metric: str = "elevation") -> Decimal:
+    row = next(item for item in entry["metrics"] if item["metric"] == metric)
+    if "total_m" in row:
+        return row["total_m"]
+    return row["credited_m"]
+
+
+def _place(entry: dict):
+    if "final_rank" in entry:
+        return entry["final_rank"]
+    return entry["live_rank"]
+
+
 def _board_total(viewer_id: int, slug: str, user_id: int) -> Decimal:
     board = get_leaderboard(viewer_id, slug)
-    return next(row["total_m"] for row in board["entries"] if row["user_id"] == user_id)
+    return _amount(next(row for row in board["entries"] if row["user_id"] == user_id))
 
 
 def test_ordinary_leave_and_rejoin_does_not_reset_the_board(app):
