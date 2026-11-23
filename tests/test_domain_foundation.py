@@ -79,15 +79,75 @@ def _user(conn, name: str) -> int:
 
 
 def _route(conn, slug: str) -> int:
-    return conn.execute(
+    route_id = conn.execute(
         """
-        INSERT INTO adventurer.routes (
-            slug, name, region, summary, target_elevation_m, status
-        )
-        VALUES (%s, %s, 'Test', 'A test route', 1000, 'published')
+        INSERT INTO adventurer.routes (slug, name, region, summary, status)
+        VALUES (%s, %s, 'Test', 'A test route', 'draft')
         RETURNING id
         """,
         (slug, slug),
+    ).fetchone()["id"]
+    conn.execute(
+        """
+        INSERT INTO adventurer.route_requirements (route_id, metric_code, target_amount)
+        VALUES (%s, 'elevation', 1000)
+        """,
+        (route_id,),
+    )
+    checkpoint_id = conn.execute(
+        """
+        INSERT INTO adventurer.route_checkpoints (route_id, slug, name, position)
+        VALUES (%s, 'summit', 'Summit', 0)
+        RETURNING id
+        """,
+        (route_id,),
+    ).fetchone()["id"]
+    conn.execute(
+        """
+        INSERT INTO adventurer.checkpoint_requirements (
+            checkpoint_id, route_id, metric_code, threshold_amount
+        )
+        VALUES (%s, %s, 'elevation', 1000)
+        """,
+        (checkpoint_id, route_id),
+    )
+    conn.execute(
+        "UPDATE adventurer.routes SET status = 'published' WHERE id = %s",
+        (route_id,),
+    )
+    conn.execute(
+        """
+        SET CONSTRAINTS
+            adventurer.route_progress_shape_routes,
+            adventurer.route_progress_shape_requirements,
+            adventurer.route_progress_shape_checkpoints,
+            adventurer.route_progress_shape_checkpoint_requirements
+        IMMEDIATE
+        """
+    )
+    conn.execute(
+        """
+        SET CONSTRAINTS
+            adventurer.route_progress_shape_routes,
+            adventurer.route_progress_shape_requirements,
+            adventurer.route_progress_shape_checkpoints,
+            adventurer.route_progress_shape_checkpoint_requirements
+        DEFERRED
+        """
+    )
+    return route_id
+
+
+def _assign(conn, activity_id: int, journey_id: int, user_id: int, route_id: int) -> int:
+    return conn.execute(
+        """
+        INSERT INTO adventurer.activity_journey_assignments (
+            activity_id, journey_id, user_id, route_id
+        )
+        VALUES (%s, %s, %s, %s)
+        RETURNING id
+        """,
+        (activity_id, journey_id, user_id, route_id),
     ).fetchone()["id"]
 
 
@@ -280,55 +340,57 @@ def test_journey_credit_matches_one_activity_and_one_user(db):
     journey_id = _journey(db, first, route_id, "active", 1, True)
     other_journey = _journey(db, second, route_id, "active", 1, True)
     activity_id = _activity(db, first, "100")
+    assignment_id = _assign(db, activity_id, journey_id, first, route_id)
     db.execute(
         """
         INSERT INTO adventurer.journey_credits (
-            activity_id, journey_id, user_id, credited_elevation_m
+            assignment_id, journey_id, route_id, metric_code, credited_amount
         )
-        VALUES (%s, %s, %s, 40)
+        VALUES (%s, %s, %s, 'elevation', 40)
         """,
-        (activity_id, journey_id, first),
+        (assignment_id, journey_id, route_id),
     )
     _expect_error(
         db,
         """
         INSERT INTO adventurer.journey_credits (
-            activity_id, journey_id, user_id, credited_elevation_m
+            assignment_id, journey_id, route_id, metric_code, credited_amount
         )
-        VALUES (%s, %s, %s, 10)
+        VALUES (%s, %s, %s, 'elevation', 10)
         """,
-        (activity_id, journey_id, first),
+        (assignment_id, journey_id, route_id),
     )
     _expect_error(
         db,
         """
-        INSERT INTO adventurer.journey_credits (
-            activity_id, journey_id, user_id, credited_elevation_m
+        INSERT INTO adventurer.activity_journey_assignments (
+            activity_id, journey_id, user_id, route_id
         )
-        VALUES (%s, %s, %s, 10)
+        VALUES (%s, %s, %s, %s)
         """,
-        (activity_id, journey_id, first),
+        (activity_id, journey_id, first, route_id),
     )
     other_activity = _activity(db, first, "50")
     _expect_error(
         db,
         """
-        INSERT INTO adventurer.journey_credits (
-            activity_id, journey_id, user_id, credited_elevation_m
+        INSERT INTO adventurer.activity_journey_assignments (
+            activity_id, journey_id, user_id, route_id
         )
-        VALUES (%s, %s, %s, 10)
+        VALUES (%s, %s, %s, %s)
         """,
-        (other_activity, other_journey, first),
+        (other_activity, other_journey, first, route_id),
     )
+    other_assignment = _assign(db, other_activity, journey_id, first, route_id)
     _expect_error(
         db,
         """
         INSERT INTO adventurer.journey_credits (
-            activity_id, journey_id, user_id, credited_elevation_m
+            assignment_id, journey_id, route_id, metric_code, credited_amount
         )
-        VALUES (%s, %s, %s, 80)
+        VALUES (%s, %s, %s, 'elevation', 80)
         """,
-        (other_activity, journey_id, first),
+        (other_assignment, journey_id, route_id),
     )
 
 
@@ -509,15 +571,16 @@ def test_completed_journey_credits_stay_until_account_deletion(db):
     ).fetchone()["id"]
     journey_id = _journey(db, user_id, route_id, "active", 1, True)
     activity_id = _activity(db, user_id, "100")
+    assignment_id = _assign(db, activity_id, journey_id, user_id, route_id)
     credit_id = db.execute(
         """
         INSERT INTO adventurer.journey_credits (
-            activity_id, journey_id, user_id, credited_elevation_m
+            assignment_id, journey_id, route_id, metric_code, credited_amount
         )
-        VALUES (%s, %s, %s, 100)
+        VALUES (%s, %s, %s, 'elevation', 100)
         RETURNING id
         """,
-        (activity_id, journey_id, user_id),
+        (assignment_id, journey_id, route_id),
     ).fetchone()["id"]
     db.execute(
         """
@@ -531,7 +594,7 @@ def test_completed_journey_credits_stay_until_account_deletion(db):
         db,
         """
         UPDATE adventurer.journey_credits
-        SET credited_elevation_m = 90
+        SET credited_amount = 90
         WHERE id = %s
         """,
         (credit_id,),
@@ -638,32 +701,60 @@ def test_snapshot_and_feed_rows_delete_only_for_the_subject(db):
         """
         INSERT INTO adventurer.expedition_result_entries (
             expedition_id, participation_id, user_id, journey_id,
-            display_name, total_m, rank, checkpoint_name, captured_at
+            display_name, final_rank, checkpoint_name, captured_at
         )
-        VALUES (%s, %s, %s, %s, 'Lea', 1000, 1, 'Summit', now())
+        VALUES (%s, %s, %s, %s, 'Lea', 1, 'Summit', now())
         RETURNING id
         """,
         (expedition_id, first_participation, first, first_journey),
     ).fetchone()["id"]
+    db.execute(
+        """
+        INSERT INTO adventurer.expedition_result_metrics (
+            result_entry_id, metric_code, total_amount
+        )
+        VALUES (%s, 'elevation', 1000)
+        """,
+        (first_result,),
+    )
     second_result = db.execute(
         """
         INSERT INTO adventurer.expedition_result_entries (
             expedition_id, participation_id, user_id, journey_id,
-            display_name, total_m, rank, checkpoint_name, captured_at
+            display_name, final_rank, checkpoint_name, captured_at
         )
-        VALUES (%s, %s, %s, %s, 'Ned', 500, 2, 'Camp', now())
+        VALUES (%s, %s, %s, %s, 'Ned', 2, 'Camp', now())
         RETURNING id
         """,
         (expedition_id, second_participation, second, second_journey),
     ).fetchone()["id"]
     db.execute(
         """
-        INSERT INTO adventurer.expedition_updates (
-            expedition_id, user_id, participation_id, kind, elevation_m
+        INSERT INTO adventurer.expedition_result_metrics (
+            result_entry_id, metric_code, total_amount
         )
-        VALUES (%s, %s, %s, 'summit_reached', 1000)
+        VALUES (%s, 'elevation', 500)
+        """,
+        (second_result,),
+    )
+    update_id = db.execute(
+        """
+        INSERT INTO adventurer.expedition_updates (
+            expedition_id, user_id, participation_id, kind, checkpoint_name
+        )
+        VALUES (%s, %s, %s, 'summit_reached', 'Summit')
+        RETURNING id
         """,
         (expedition_id, first, first_participation),
+    ).fetchone()["id"]
+    db.execute(
+        """
+        INSERT INTO adventurer.expedition_update_metrics (
+            update_id, metric_code, credited_amount
+        )
+        VALUES (%s, 'elevation', 1000)
+        """,
+        (update_id,),
     )
     _expect_error(
         db,
@@ -702,12 +793,15 @@ def test_snapshot_and_feed_rows_delete_only_for_the_subject(db):
     )
     kept = db.execute(
         """
-        SELECT display_name, total_m, rank
-        FROM adventurer.expedition_result_entries
-        WHERE id = %s
+        SELECT entry.display_name, entry.final_rank, metric.total_amount
+        FROM adventurer.expedition_result_entries AS entry
+        JOIN adventurer.expedition_result_metrics AS metric
+            ON metric.result_entry_id = entry.id
+           AND metric.metric_code = 'elevation'
+        WHERE entry.id = %s
         """,
         (second_result,),
     ).fetchone()
     assert kept["display_name"] == "Ned"
-    assert kept["rank"] == 2
-    assert kept["total_m"] == 500
+    assert kept["final_rank"] == 2
+    assert kept["total_amount"] == 500

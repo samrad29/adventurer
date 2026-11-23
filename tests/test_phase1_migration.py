@@ -139,20 +139,26 @@ def test_phase1_migration_rollback_and_validation():
         assert conn.execute("SELECT COUNT(*) AS n FROM adventurer.competition_seasons").fetchone()["n"] == 0
         stops = conn.execute(
             """
-            SELECT checkpoint.slug, checkpoint.position, checkpoint.elevation_m,
-                   route.target_elevation_m
+            SELECT checkpoint.slug, checkpoint.position, requirement.threshold_amount,
+                   route_requirement.target_amount
             FROM adventurer.route_checkpoints AS checkpoint
             JOIN adventurer.routes AS route
                 ON route.id = checkpoint.route_id
+            JOIN adventurer.checkpoint_requirements AS requirement
+                ON requirement.checkpoint_id = checkpoint.id
+               AND requirement.metric_code = 'elevation'
+            JOIN adventurer.route_requirements AS route_requirement
+                ON route_requirement.route_id = route.id
+               AND route_requirement.metric_code = 'elevation'
             WHERE route.slug = 'everest'
             ORDER BY checkpoint.position
             """
         ).fetchall()
         assert len(stops) == 16
         assert stops[0]["slug"] == "timms-hill"
-        assert stops[0]["elevation_m"] == (Decimal("1951.5") * FOOT).quantize(Decimal("0.00001"))
+        assert stops[0]["threshold_amount"] == (Decimal("1951.5") * FOOT).quantize(Decimal("0.00001"))
         assert stops[-1]["slug"] == "summit"
-        assert stops[-1]["elevation_m"] == stops[-1]["target_elevation_m"]
+        assert stops[-1]["threshold_amount"] == stops[-1]["target_amount"]
         sequence = conn.execute("SELECT last_value, is_called FROM adventurer.users_id_seq").fetchone()
         assert sequence["is_called"] is False
         conn.execute("SELECT adventurer.assert_phase1_legacy_match()")
@@ -289,9 +295,9 @@ def test_phase1_migration_rollback_and_validation():
             conn,
             """
             INSERT INTO adventurer.route_checkpoints (
-                route_id, slug, name, position, elevation_m
+                route_id, slug, name, position
             )
-            VALUES (%s, 'negative', 'Negative', -1, 10)
+            VALUES (%s, 'negative', 'Negative', -1)
             """,
             (route_id,),
         )
@@ -299,9 +305,9 @@ def test_phase1_migration_rollback_and_validation():
             conn,
             """
             INSERT INTO adventurer.route_checkpoints (
-                route_id, slug, name, position, elevation_m
+                route_id, slug, name, position
             )
-            VALUES (%s, 'another-start', 'Another', 0, 10)
+            VALUES (%s, 'another-start', 'Another', 0)
             """,
             (route_id,),
         )
@@ -488,7 +494,13 @@ def test_phase1_migration_rollback_and_validation():
             (activity_id,),
         )
         assert conn.execute(
-            "SELECT COUNT(*) AS n FROM adventurer.journey_credits WHERE activity_id = %s",
+            """
+            SELECT COUNT(*) AS n
+            FROM adventurer.journey_credits AS credit
+            JOIN adventurer.activity_journey_assignments AS assignment
+                ON assignment.id = credit.assignment_id
+            WHERE assignment.activity_id = %s
+            """,
             (activity_id,),
         ).fetchone()["n"] == 0
         conn.execute("SELECT adventurer.reverse_sync_new_rows_to_legacy()")

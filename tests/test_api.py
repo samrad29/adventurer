@@ -39,29 +39,80 @@ def _auth(token):
     return {"Authorization": f"Bearer {token}"}
 
 
+def _check_route_shape(database) -> None:
+    database.execute(
+        """
+        SET CONSTRAINTS
+            adventurer.route_progress_shape_routes,
+            adventurer.route_progress_shape_requirements,
+            adventurer.route_progress_shape_checkpoints,
+            adventurer.route_progress_shape_checkpoint_requirements
+        IMMEDIATE
+        """
+    )
+
+
 def _route(slug: str, feet: str = "1000") -> int:
     database = get_db()
-    row = database.execute(
+    target = feet_to_meters(Decimal(feet))
+    route_id = database.execute(
         """
-        INSERT INTO routes (slug, name, region, summary, target_elevation_m, status)
-        VALUES (?, ?, 'Test', 'A test route', ?, 'published')
+        INSERT INTO routes (slug, name, region, summary, status)
+        VALUES (?, ?, 'Test', 'A test route', 'draft')
         RETURNING id
         """,
-        (slug, slug, feet_to_meters(Decimal(feet))),
-    ).fetchone()
+        (slug, slug),
+    ).fetchone()["id"]
+    database.execute(
+        """
+        INSERT INTO route_requirements (route_id, metric_code, target_amount)
+        VALUES (?, 'elevation', ?)
+        """,
+        (route_id, target),
+    )
+    checkpoint_id = database.execute(
+        """
+        INSERT INTO route_checkpoints (route_id, slug, name, position)
+        VALUES (?, 'summit', 'Summit', 2)
+        RETURNING id
+        """,
+        (route_id,),
+    ).fetchone()["id"]
+    database.execute(
+        """
+        INSERT INTO checkpoint_requirements (
+            checkpoint_id, route_id, metric_code, threshold_amount
+        )
+        VALUES (?, ?, 'elevation', ?)
+        """,
+        (checkpoint_id, route_id, target),
+    )
+    database.execute("UPDATE routes SET status = 'published' WHERE id = ?", (route_id,))
+    _check_route_shape(database)
     database.commit()
-    return row["id"]
+    return route_id
 
 
 def _checkpoint(route_id: int, slug: str, feet: str, position: int) -> None:
     database = get_db()
+    checkpoint_id = database.execute(
+        """
+        INSERT INTO route_checkpoints (route_id, slug, name, position)
+        VALUES (?, ?, ?, ?)
+        RETURNING id
+        """,
+        (route_id, slug, slug, position),
+    ).fetchone()["id"]
     database.execute(
         """
-        INSERT INTO route_checkpoints (route_id, slug, name, position, elevation_m)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO checkpoint_requirements (
+            checkpoint_id, route_id, metric_code, threshold_amount
+        )
+        VALUES (?, ?, 'elevation', ?)
         """,
-        (route_id, slug, slug, position, feet_to_meters(Decimal(feet))),
+        (checkpoint_id, route_id, feet_to_meters(Decimal(feet))),
     )
+    _check_route_shape(database)
     database.commit()
 
 
@@ -529,7 +580,6 @@ def test_home_states_actions_photos_and_no_writes(client, app, tmp_path):
     with app.app_context():
         vista = _route("vista", "1000")
         _checkpoint(vista, "camp", "100", 1)
-        _checkpoint(vista, "summit", "1000", 2)
         _route("other", "1000")
         _route("done", "100")
     _id, token, _csrf = _register(client, "Sam")

@@ -14,10 +14,10 @@ def test_published_routes_hide_draft_and_retired(app):
     with app.app_context():
         get_db().execute(
             """
-            INSERT INTO routes (slug, name, region, summary, target_elevation_m, status)
+            INSERT INTO routes (slug, name, region, summary, status)
             VALUES
-                ('draft-ridge', 'Draft Ridge', 'Test', 'Hidden', 1000, 'draft'),
-                ('old-ridge', 'Old Ridge', 'Test', 'Retired', 1000, 'retired')
+                ('draft-ridge', 'Draft Ridge', 'Test', 'Hidden', 'draft'),
+                ('old-ridge', 'Old Ridge', 'Test', 'Retired', 'retired')
             """
         )
         get_db().commit()

@@ -147,6 +147,12 @@ def create_activity(
 def preview_activity_update(user_id: int, activity_id: int, fields: dict) -> dict:
     """Read-only preview of an edit, including replacement credits.
 
+    For each required metric, ``current_m`` is the journey total minus this
+    activity's existing credit. ``remaining_m``, ``credit_m``, and
+    ``resulting_m`` use that same baseline. ``existing_credit_m`` is the
+    credit the edit would replace. A new activity has no credit to subtract,
+    so its baseline is the journey total.
+
     A paused or abandoned journey that would reach every target sets
     ``resume_required`` and does not issue a token. The token is bound to
     the replacement credits, not to the activity's full measurements.
@@ -763,7 +769,8 @@ def _proposal(journey: dict, measurements: dict[str, Decimal | None], *, previou
         metrics.append(
             {
                 "metric": code,
-                "current_m": stored,
+                "current_m": base,
+                "existing_credit_m": prior,
                 "target_m": target,
                 "remaining_m": target - base if target > base else Decimal("0"),
                 "measurement_m": measurement,

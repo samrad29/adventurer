@@ -51,29 +51,80 @@ def _user(name: str) -> int:
     return create_adventurer(name, "trailhead")["id"]
 
 
+def _check_route_shape(database) -> None:
+    database.execute(
+        """
+        SET CONSTRAINTS
+            adventurer.route_progress_shape_routes,
+            adventurer.route_progress_shape_requirements,
+            adventurer.route_progress_shape_checkpoints,
+            adventurer.route_progress_shape_checkpoint_requirements
+        IMMEDIATE
+        """
+    )
+
+
 def _route(slug: str, feet: str = "1000") -> int:
     database = get_db()
-    row = database.execute(
+    target = feet_to_meters(Decimal(feet))
+    route_id = database.execute(
         """
-        INSERT INTO routes (slug, name, region, summary, target_elevation_m, status)
-        VALUES (?, ?, 'Test', 'A test route', ?, 'published')
+        INSERT INTO routes (slug, name, region, summary, status)
+        VALUES (?, ?, 'Test', 'A test route', 'draft')
         RETURNING id
         """,
-        (slug, slug, feet_to_meters(Decimal(feet))),
-    ).fetchone()
+        (slug, slug),
+    ).fetchone()["id"]
+    database.execute(
+        """
+        INSERT INTO route_requirements (route_id, metric_code, target_amount)
+        VALUES (?, 'elevation', ?)
+        """,
+        (route_id, target),
+    )
+    checkpoint_id = database.execute(
+        """
+        INSERT INTO route_checkpoints (route_id, slug, name, position)
+        VALUES (?, 'summit', 'Summit', 2)
+        RETURNING id
+        """,
+        (route_id,),
+    ).fetchone()["id"]
+    database.execute(
+        """
+        INSERT INTO checkpoint_requirements (
+            checkpoint_id, route_id, metric_code, threshold_amount
+        )
+        VALUES (?, ?, 'elevation', ?)
+        """,
+        (checkpoint_id, route_id, target),
+    )
+    database.execute("UPDATE routes SET status = 'published' WHERE id = ?", (route_id,))
+    _check_route_shape(database)
     database.commit()
-    return row["id"]
+    return route_id
 
 
 def _checkpoint(route_id: int, feet: str, name: str = "Camp") -> None:
     database = get_db()
+    checkpoint_id = database.execute(
+        """
+        INSERT INTO route_checkpoints (route_id, slug, name, position)
+        VALUES (?, ?, ?, 1)
+        RETURNING id
+        """,
+        (route_id, name.casefold(), name),
+    ).fetchone()["id"]
     database.execute(
         """
-        INSERT INTO route_checkpoints (route_id, slug, name, position, elevation_m)
-        VALUES (?, ?, ?, 1, ?)
+        INSERT INTO checkpoint_requirements (
+            checkpoint_id, route_id, metric_code, threshold_amount
+        )
+        VALUES (?, ?, 'elevation', ?)
         """,
-        (route_id, name.casefold(), name, feet_to_meters(Decimal(feet))),
+        (checkpoint_id, route_id, feet_to_meters(Decimal(feet))),
     )
+    _check_route_shape(database)
     database.commit()
 
 
@@ -107,10 +158,14 @@ def _journeys(user_id: int) -> list[dict]:
 
 def _journey_total(journey_id: int) -> Decimal:
     row = get_db().execute(
-        "SELECT COALESCE(SUM(credited_elevation_m), 0) AS total_m FROM journey_credits WHERE journey_id = ?",
+        """
+        SELECT credited_total
+        FROM journey_metric_totals
+        WHERE journey_id = ? AND metric_code = 'elevation'
+        """,
         (journey_id,),
     ).fetchone()
-    return row["total_m"]
+    return row["credited_total"] if row else Decimal("0")
 
 
 def _count(table: str, where: str = "TRUE", params: tuple = ()) -> int:
@@ -558,9 +613,12 @@ def test_restart_does_not_repoint_withdrawn_or_closed_expeditions(app):
         closed_journey = _participation(sam_id, "old-kili")["journey_id"]
         closed_result = get_db().execute(
             """
-            SELECT journey_id, total_m
-            FROM expedition_result_entries
-            WHERE user_id = ?
+            SELECT entry.journey_id, metric.total_amount
+            FROM expedition_result_entries AS entry
+            LEFT JOIN expedition_result_metrics AS metric
+                ON metric.result_entry_id = entry.id
+               AND metric.metric_code = 'elevation'
+            WHERE entry.user_id = ?
               AND expedition_id = (SELECT id FROM expeditions WHERE slug = 'old-kili')
             """,
             (sam_id,),
@@ -570,9 +628,12 @@ def test_restart_does_not_repoint_withdrawn_or_closed_expeditions(app):
         assert _participation(sam_id, "old-kili")["journey_id"] == closed_journey
         assert get_db().execute(
             """
-            SELECT journey_id, total_m
-            FROM expedition_result_entries
-            WHERE user_id = ?
+            SELECT entry.journey_id, metric.total_amount
+            FROM expedition_result_entries AS entry
+            LEFT JOIN expedition_result_metrics AS metric
+                ON metric.result_entry_id = entry.id
+               AND metric.metric_code = 'elevation'
+            WHERE entry.user_id = ?
               AND expedition_id = (SELECT id FROM expeditions WHERE slug = 'old-kili')
             """,
             (sam_id,),
@@ -663,7 +724,11 @@ def test_privacy_removal_leaves_a_rank_gap_and_personal_progress(app):
             _log(user_id, feet)
         complete_organization_expedition(owner_id, "kili-season")
         before = _count("activities", "user_id = ?", (second_id,))
-        credits = _count("journey_credits", "user_id = ?", (second_id,))
+        credits = _count(
+            "journey_credits",
+            "assignment_id IN (SELECT id FROM activity_journey_assignments WHERE user_id = ?)",
+            (second_id,),
+        )
         journeys = _count("route_journeys", "user_id = ?", (second_id,))
         remove_participation_privacy(second_id, "kili-season", confirm=True)
         ranks = {
@@ -672,7 +737,11 @@ def test_privacy_removal_leaves_a_rank_gap_and_personal_progress(app):
         }
         assert ranks == {first_id: 1, third_id: 3}
         assert _count("activities", "user_id = ?", (second_id,)) == before
-        assert _count("journey_credits", "user_id = ?", (second_id,)) == credits
+        assert _count(
+            "journey_credits",
+            "assignment_id IN (SELECT id FROM activity_journey_assignments WHERE user_id = ?)",
+            (second_id,),
+        ) == credits
         assert _count("route_journeys", "user_id = ?", (second_id,)) == journeys
         assert _participation(second_id, "kili-season") is None
         assert _count(

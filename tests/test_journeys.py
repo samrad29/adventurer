@@ -33,16 +33,62 @@ def _user(name: str) -> int:
 
 def _route(slug: str, status: str = "published") -> int:
     database = get_db()
-    row = database.execute(
+    route_id = database.execute(
         """
-        INSERT INTO routes (slug, name, region, summary, target_elevation_m, status)
-        VALUES (?, ?, 'Test', 'A test route', 1000, ?)
+        INSERT INTO routes (slug, name, region, summary, status)
+        VALUES (?, ?, 'Test', 'A test route', 'draft')
         RETURNING id
         """,
-        (slug, slug, status),
-    ).fetchone()
+        (slug, slug),
+    ).fetchone()["id"]
+    if status != "published":
+        database.execute(
+            "UPDATE routes SET status = ? WHERE id = ?",
+            (status, route_id),
+        )
+        database.commit()
+        return route_id
+    database.execute(
+        """
+        INSERT INTO route_requirements (route_id, metric_code, target_amount)
+        VALUES (?, 'elevation', 1000)
+        """,
+        (route_id,),
+    )
+    checkpoint_id = database.execute(
+        """
+        INSERT INTO route_checkpoints (route_id, slug, name, position)
+        VALUES (?, 'summit', 'Summit', 0)
+        RETURNING id
+        """,
+        (route_id,),
+    ).fetchone()["id"]
+    database.execute(
+        """
+        INSERT INTO checkpoint_requirements (
+            checkpoint_id, route_id, metric_code, threshold_amount
+        )
+        VALUES (?, ?, 'elevation', 1000)
+        """,
+        (checkpoint_id, route_id),
+    )
+    database.execute("UPDATE routes SET status = 'published' WHERE id = ?", (route_id,))
+    _check_route_shape(database)
     database.commit()
-    return row["id"]
+    return route_id
+
+
+def _check_route_shape(database) -> None:
+    database.execute(
+        """
+        SET CONSTRAINTS
+            adventurer.route_progress_shape_routes,
+            adventurer.route_progress_shape_requirements,
+            adventurer.route_progress_shape_checkpoints,
+            adventurer.route_progress_shape_checkpoint_requirements
+        IMMEDIATE
+        """
+    )
 
 
 def _everest() -> int:
@@ -100,12 +146,28 @@ def _credit(user_id: int, journey_id: int) -> None:
         """,
         (activity_id,),
     )
+    route_id = database.execute(
+        "SELECT route_id FROM route_journeys WHERE id = ?",
+        (journey_id,),
+    ).fetchone()["route_id"]
+    assignment_id = database.execute(
+        """
+        INSERT INTO activity_journey_assignments (
+            activity_id, journey_id, user_id, route_id
+        )
+        VALUES (?, ?, ?, ?)
+        RETURNING id
+        """,
+        (activity_id, journey_id, user_id, route_id),
+    ).fetchone()["id"]
     database.execute(
         """
-        INSERT INTO journey_credits (activity_id, journey_id, user_id, credited_elevation_m)
-        VALUES (?, ?, ?, 100)
+        INSERT INTO journey_credits (
+            assignment_id, journey_id, route_id, metric_code, credited_amount
+        )
+        VALUES (?, ?, ?, 'elevation', 100)
         """,
-        (activity_id, journey_id, user_id),
+        (assignment_id, journey_id, route_id),
     )
     database.commit()
 
@@ -289,7 +351,13 @@ def test_restart_creates_a_new_attempt_and_preserves_history(app):
         assert attempts[0]["is_current"] is False
         assert attempts[1]["id"] == created["id"]
         credited = get_db().execute(
-            "SELECT journey_id FROM journey_credits WHERE user_id = ?",
+            """
+            SELECT credit.journey_id
+            FROM journey_credits AS credit
+            JOIN activity_journey_assignments AS assignment
+                ON assignment.id = credit.assignment_id
+            WHERE assignment.user_id = ?
+            """,
             (user_id,),
         ).fetchone()
         assert credited["journey_id"] == completed_id

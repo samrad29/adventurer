@@ -325,6 +325,118 @@ def test_a_second_summit_attempt_does_not_complete_again(app):
         assert first["journey"]["progress_version"] == 2
 
 
+def test_an_edit_preview_increases_credit_from_the_replacement_baseline(app):
+    with app.app_context():
+        user_id = _user("Preview Up")
+        route_id = _route(
+            "life-preview-up",
+            {"elevation": _feet("1000")},
+            [("summit", 0, {"elevation": _feet("1000")})],
+        )
+        journey = start_journey(user_id, route_id)
+        create_activity(user_id, _fields(elevation="200"))
+        saved = create_activity(user_id, _fields(elevation="100"))
+        before = _edit_snapshot(journey["id"], saved["activity"]["id"])
+        preview = preview_activity_update(user_id, saved["activity"]["id"], {"elevation_ft": "250"})
+        assert _edit_snapshot(journey["id"], saved["activity"]["id"]) == before
+        metric = _metric(preview, "elevation")
+        assert metric["existing_credit_m"] == _feet("100")
+        assert metric["current_m"] == _feet("200")
+        assert metric["remaining_m"] == _feet("800")
+        assert metric["credit_m"] == _feet("250")
+        assert metric["resulting_m"] == _feet("450")
+        _assert_preview_baseline(preview)
+
+
+def test_an_edit_preview_decreases_credit_from_the_replacement_baseline(app):
+    with app.app_context():
+        user_id = _user("Preview Down")
+        route_id = _route(
+            "life-preview-down",
+            {"elevation": _feet("1000")},
+            [("summit", 0, {"elevation": _feet("1000")})],
+        )
+        journey = start_journey(user_id, route_id)
+        create_activity(user_id, _fields(elevation="200"))
+        saved = create_activity(user_id, _fields(elevation="100"))
+        before = _edit_snapshot(journey["id"], saved["activity"]["id"])
+        preview = preview_activity_update(user_id, saved["activity"]["id"], {"elevation_ft": "40"})
+        assert _edit_snapshot(journey["id"], saved["activity"]["id"]) == before
+        metric = _metric(preview, "elevation")
+        assert metric["existing_credit_m"] == _feet("100")
+        assert metric["current_m"] == _feet("200")
+        assert metric["remaining_m"] == _feet("800")
+        assert metric["credit_m"] == _feet("40")
+        assert metric["resulting_m"] == _feet("240")
+        _assert_preview_baseline(preview)
+
+
+def test_an_edit_preview_keeps_a_credit_that_is_already_capped(app):
+    with app.app_context():
+        user_id = _user("Preview Cap")
+        route_id = _route(
+            "life-preview-cap",
+            {"elevation": _feet("1000"), "distance": _miles("2")},
+            [
+                (
+                    "summit",
+                    0,
+                    {"elevation": _feet("1000"), "distance": _miles("2")},
+                )
+            ],
+        )
+        journey = start_journey(user_id, route_id)
+        create_activity(user_id, _fields(elevation="700"))
+        saved = create_activity(user_id, _fields(elevation="500", distance="0.5"))
+        before = _edit_snapshot(journey["id"], saved["activity"]["id"])
+        preview = preview_activity_update(user_id, saved["activity"]["id"], {"elevation_ft": "800"})
+        assert _edit_snapshot(journey["id"], saved["activity"]["id"]) == before
+        elevation = _metric(preview, "elevation")
+        assert elevation["existing_credit_m"] == _feet("300")
+        assert elevation["current_m"] == _feet("700")
+        assert elevation["remaining_m"] == _feet("300")
+        assert elevation["measurement_m"] == _feet("800")
+        assert elevation["credit_m"] == _feet("300")
+        assert elevation["resulting_m"] == _feet("1000")
+        distance = _metric(preview, "distance")
+        assert distance["credit_m"] == distance["existing_credit_m"] == _miles("0.5")
+        assert preview["will_complete"] is False
+        _assert_preview_baseline(preview)
+
+
+def test_an_edit_preview_changes_one_metric_and_leaves_the_other(app):
+    with app.app_context():
+        user_id = _user("Preview Half")
+        route_id = _route(
+            "life-preview-half",
+            {"elevation": _feet("1000"), "distance": _miles("2")},
+            [
+                (
+                    "summit",
+                    0,
+                    {"elevation": _feet("1000"), "distance": _miles("2")},
+                )
+            ],
+        )
+        journey = start_journey(user_id, route_id)
+        create_activity(user_id, _fields(elevation="50", distance="0.25"))
+        saved = create_activity(user_id, _fields(elevation="100", distance="0.5"))
+        before = _edit_snapshot(journey["id"], saved["activity"]["id"])
+        preview = preview_activity_update(user_id, saved["activity"]["id"], {"distance_mi": "1"})
+        assert _edit_snapshot(journey["id"], saved["activity"]["id"]) == before
+        elevation = _metric(preview, "elevation")
+        distance = _metric(preview, "distance")
+        assert elevation["current_m"] == _feet("50")
+        assert elevation["existing_credit_m"] == _feet("100")
+        assert elevation["credit_m"] == _feet("100")
+        assert elevation["resulting_m"] == _feet("150")
+        assert distance["current_m"] == _miles("0.25")
+        assert distance["existing_credit_m"] == _miles("0.5")
+        assert distance["credit_m"] == _miles("1")
+        assert distance["resulting_m"] == _miles("1.25")
+        _assert_preview_baseline(preview)
+
+
 def test_edits_recalculate_each_metric_and_the_progress_version(app):
     with app.app_context():
         user_id = _user("Edit Logger")
@@ -791,6 +903,49 @@ def _fields(**extra) -> dict:
 
 def _metric(preview: dict, code: str) -> dict:
     return next(item for item in preview["metrics"] if item["metric"] == code)
+
+
+def _assert_preview_baseline(preview: dict) -> None:
+    """Every reported amount for a metric comes from one replacement baseline."""
+    stored = {item["metric"]: item["credited_m"] for item in preview["journey"]["metrics"]}
+    for metric in preview["metrics"]:
+        current = metric["current_m"]
+        remaining = metric["remaining_m"]
+        credit = metric["credit_m"]
+        resulting = metric["resulting_m"]
+        target = metric["target_m"]
+        measurement = metric["measurement_m"]
+        assert current + metric["existing_credit_m"] == stored[metric["metric"]]
+        assert remaining == (target - current if target > current else Decimal("0"))
+        assert credit == _portion(measurement, target, current)
+        assert resulting == current + credit
+        assert resulting <= target
+
+
+def _edit_snapshot(journey_id: int, activity_id: int) -> tuple:
+    activity = get_db().execute(
+        """
+        SELECT elevation_gain_m, distance_m, note
+        FROM activities
+        WHERE id = ?
+        """,
+        (activity_id,),
+    ).fetchone()
+    credits = tuple(
+        (row["metric_code"], row["credited_amount"])
+        for row in get_db().execute(
+            """
+            SELECT credit.metric_code, credit.credited_amount
+            FROM journey_credits AS credit
+            JOIN activity_journey_assignments AS assignment
+                ON assignment.id = credit.assignment_id
+            WHERE assignment.activity_id = ?
+            ORDER BY credit.metric_code
+            """,
+            (activity_id,),
+        ).fetchall()
+    )
+    return (_fingerprint(journey_id), dict(activity), credits)
 
 
 def _credit_map(saved: dict) -> dict[str, Decimal]:
