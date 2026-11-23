@@ -1004,6 +1004,194 @@ def test_media_roles_ordering_and_publication_rights(db):
     assert _other_route
 
 
+def test_published_media_rejects_null_rights_metadata(db):
+    route_id, stops = _route(db, "narrative-null-rights")
+    checkpoint_id = stops[0]
+    _media(
+        db,
+        route_id,
+        checkpoint_id=checkpoint_id,
+        role="journal",
+        rights_basis="public_domain",
+        license="Public domain",
+        source_url="https://example.com/pd",
+        asset_path="/static/photos/null-pd.jpg",
+        alt_text="Public domain",
+        position=0,
+        status="published",
+    )
+    _media(
+        db,
+        route_id,
+        checkpoint_id=checkpoint_id,
+        role="journal",
+        rights_basis="cc0",
+        license="CC0",
+        license_url="https://creativecommons.org/publicdomain/zero/1.0/",
+        source_url="https://example.com/cc0",
+        asset_path="/static/photos/null-cc0.jpg",
+        alt_text="CC0",
+        position=1,
+        status="published",
+    )
+    _media(
+        db,
+        route_id,
+        checkpoint_id=checkpoint_id,
+        role="journal",
+        rights_basis="creative_commons",
+        author="Ada",
+        license="CC BY 4.0",
+        license_url="https://creativecommons.org/licenses/by/4.0",
+        source_url="https://example.com/by",
+        asset_path="/static/photos/null-by.jpg",
+        alt_text="CC BY",
+        position=2,
+        status="published",
+    )
+    _media(
+        db,
+        route_id,
+        checkpoint_id=checkpoint_id,
+        role="journal",
+        rights_basis="commissioned",
+        license="Commission grant",
+        author="Sam",
+        permission_note="Grant from Sam for commercial use",
+        asset_path="/static/photos/null-grant.jpg",
+        alt_text="Commissioned",
+        position=3,
+        status="published",
+    )
+    _media(
+        db,
+        route_id,
+        checkpoint_id=checkpoint_id,
+        role="journal",
+        rights_basis="public_domain",
+        license=None,
+        source_url="https://example.com/draft",
+        asset_path="/static/photos/null-draft.jpg",
+        alt_text="Draft",
+        position=4,
+        status="draft",
+    )
+    _media(
+        db,
+        route_id,
+        checkpoint_id=checkpoint_id,
+        role="journal",
+        rights_basis="public_domain",
+        license=None,
+        source_url=None,
+        asset_path="/static/photos/null-retired.jpg",
+        alt_text="Retired",
+        position=4,
+        status="retired",
+    )
+    incomplete = (
+        (
+            "public_domain",
+            {"source_url": "https://example.com/pd"},
+        ),
+        (
+            "public_domain",
+            {"license": "Public domain"},
+        ),
+        (
+            "cc0",
+            {
+                "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+                "source_url": "https://example.com/cc0",
+            },
+        ),
+        (
+            "cc0",
+            {"license": "CC0", "source_url": "https://example.com/cc0"},
+        ),
+        (
+            "cc0",
+            {
+                "license": "CC0",
+                "license_url": "https://creativecommons.org/publicdomain/zero/1.0/",
+            },
+        ),
+        (
+            "creative_commons",
+            {
+                "author": "Ada",
+                "license_url": "https://creativecommons.org/licenses/by/4.0",
+                "source_url": "https://example.com/by",
+            },
+        ),
+        (
+            "creative_commons",
+            {
+                "license": "CC BY 4.0",
+                "license_url": "https://creativecommons.org/licenses/by/4.0",
+                "source_url": "https://example.com/by",
+            },
+        ),
+        (
+            "creative_commons",
+            {
+                "author": "Ada",
+                "license": "CC BY 4.0",
+                "source_url": "https://example.com/by",
+            },
+        ),
+        (
+            "creative_commons",
+            {
+                "author": "Ada",
+                "license": "CC BY 4.0",
+                "license_url": "https://creativecommons.org/licenses/by/4.0",
+            },
+        ),
+        (
+            "commissioned",
+            {
+                "author": "Sam",
+                "permission_note": "Grant from Sam for commercial use",
+            },
+        ),
+        (
+            "commissioned",
+            {
+                "license": "Commission grant",
+                "permission_note": "Grant from Sam for commercial use",
+            },
+        ),
+        (
+            "commissioned",
+            {"license": "Commission grant", "author": "Sam"},
+        ),
+    )
+    for basis, fields in incomplete:
+        _expect_error(
+            db,
+            """
+            INSERT INTO adventurer.route_media (
+                route_id, checkpoint_id, role, asset_path, alt_text, rights_basis,
+                author, license, license_url, source_url, permission_note, position, status
+            )
+            VALUES (%s, %s, 'journal', %s, 'Incomplete', %s, %s, %s, %s, %s, %s, 9, 'published')
+            """,
+            (
+                route_id,
+                checkpoint_id,
+                f"/static/photos/incomplete-{basis}.jpg",
+                basis,
+                fields.get("author"),
+                fields.get("license"),
+                fields.get("license_url"),
+                fields.get("source_url"),
+                fields.get("permission_note"),
+            ),
+            "route_media_publish_rights",
+        )
+
+
 def test_acknowledgments_follow_the_journey_attempt(db):
     route_id, stops = _route(db, "narrative-ack")
     _other_id, other_stops = _route(db, "narrative-ack-other")

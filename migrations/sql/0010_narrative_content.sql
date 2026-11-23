@@ -272,29 +272,35 @@ CREATE TABLE adventurer.route_media (
         CHECK (source_url IS NULL OR char_length(btrim(source_url)) > 0),
     CONSTRAINT route_media_permission_note_chk
         CHECK (permission_note IS NULL OR char_length(btrim(permission_note)) > 0),
+    -- A CHECK passes on TRUE or NULL. Comparisons with a missing license
+    -- are NULL, so the eligibility expression is forced to FALSE unless one
+    -- complete category matches.
     CONSTRAINT route_media_publish_rights CHECK (
         status <> 'published'
-        OR (rights_basis = 'public_domain' AND license = 'Public domain' AND source_url IS NOT NULL)
-        OR (rights_basis = 'cc0' AND license = 'CC0' AND license_url IS NOT NULL AND source_url IS NOT NULL)
-        OR (
-            rights_basis = 'creative_commons'
-            AND license IN (
-                'CC BY 2.0', 'CC BY-SA 2.0',
-                'CC BY 2.5', 'CC BY-SA 2.5',
-                'CC BY 3.0', 'CC BY-SA 3.0',
-                'CC BY 4.0', 'CC BY-SA 4.0'
+        OR COALESCE(
+            (rights_basis = 'public_domain' AND license = 'Public domain' AND source_url IS NOT NULL)
+            OR (rights_basis = 'cc0' AND license = 'CC0' AND license_url IS NOT NULL AND source_url IS NOT NULL)
+            OR (
+                rights_basis = 'creative_commons'
+                AND license IN (
+                    'CC BY 2.0', 'CC BY-SA 2.0',
+                    'CC BY 2.5', 'CC BY-SA 2.5',
+                    'CC BY 3.0', 'CC BY-SA 3.0',
+                    'CC BY 4.0', 'CC BY-SA 4.0'
+                )
+                AND position('NC' in license) = 0
+                AND position('ND' in license) = 0
+                AND author IS NOT NULL
+                AND license_url IS NOT NULL
+                AND source_url IS NOT NULL
             )
-            AND position('NC' in license) = 0
-            AND position('ND' in license) = 0
-            AND author IS NOT NULL
-            AND license_url IS NOT NULL
-            AND source_url IS NOT NULL
-        )
-        OR (
-            rights_basis = 'commissioned'
-            AND license IS NOT NULL
-            AND author IS NOT NULL
-            AND permission_note IS NOT NULL
+            OR (
+                rights_basis = 'commissioned'
+                AND license IS NOT NULL
+                AND author IS NOT NULL
+                AND permission_note IS NOT NULL
+            ),
+            FALSE
         )
     ),
     CONSTRAINT route_media_hero_chk
