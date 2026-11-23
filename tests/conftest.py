@@ -81,6 +81,10 @@ def _prepare_database() -> None:
                 ).fetchone()[0]
                 is not None
                 and conn.execute(
+                    "SELECT to_regclass('adventurer.route_chapters') AS name"
+                ).fetchone()[0]
+                is not None
+                and conn.execute(
                     """
                     SELECT 1
                     FROM information_schema.columns
