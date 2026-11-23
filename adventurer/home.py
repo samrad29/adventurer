@@ -3,6 +3,12 @@
 Journey lifecycle, credits, and invitations stay in their services. This
 module only reads them and chooses the scene. It does not resume, restart,
 accept, or complete anything.
+
+One home response is one repeatable-read, read-only transaction, so journey
+status, progress version, metric totals, and pending arrivals come from the
+same snapshot. That setting ends when the transaction rolls back. Later work
+on the connection stays read committed. Helpers that commit or roll back are
+not called after the snapshot starts.
 """
 
 from __future__ import annotations
@@ -13,32 +19,33 @@ from pathlib import Path
 from flask import current_app
 
 from .db import get_db
-from .expeditions import board_metrics, list_received_invitations
+from .expeditions import board_metrics, read_received_invitations
 from .journey_progress import CheckpointMark, read_journey_progress
-from .journeys import JourneyError, list_journeys
+from .journeys import JourneyError, read_journeys
 from .metrics import MetricProgress, assess_metric
 from .narrative import pending_arrivals
 from .scene import select_scene
-from .services import get_adventurer
+from .services import read_adventurer
 
 
 def compose_home(user_id: int) -> dict:
-    viewer = get_adventurer(user_id)
-    if viewer is None:
-        raise JourneyError("not_found", "That account does not exist.")
-    journeys = list_journeys(user_id)
-    current = [row for row in journeys if row["is_current"]]
-    active = next((row for row in current if row["status"] == "active"), None)
-    paused = sorted(
-        (row for row in current if row["status"] == "paused"),
-        key=lambda row: row["route_slug"],
-    )
-    finished = [
-        row for row in current if row["status"] in ("completed", "abandoned")
-    ]
-    finished.sort(key=_finished_order)
     database = get_db()
     try:
+        _begin_consistent_read(database)
+        viewer = read_adventurer(database, user_id)
+        if viewer is None:
+            raise JourneyError("not_found", "That account does not exist.")
+        journeys = read_journeys(database, user_id)
+        current = [row for row in journeys if row["is_current"]]
+        active = next((row for row in current if row["status"] == "active"), None)
+        paused = sorted(
+            (row for row in current if row["status"] == "paused"),
+            key=lambda row: row["route_slug"],
+        )
+        finished = [
+            row for row in current if row["status"] in ("completed", "abandoned")
+        ]
+        finished.sort(key=_finished_order)
         journey_body = None if active is None else _presentation(database, active)
         paused_bodies = [_presentation(database, row) for row in paused]
         if active is not None:
@@ -60,8 +67,11 @@ def compose_home(user_id: int) -> dict:
             None if active is None else active["id"],
         )
         invitations = _invitations(database, user_id)
+    except JourneyError:
+        database.rollback()
+        raise
     finally:
-        get_db().rollback()
+        database.rollback()
     return {
         "you": {"id": viewer["id"], "name": viewer["name"]},
         "state": state,
@@ -149,9 +159,9 @@ def _presentation(database, journey: dict, *, focus: bool = False) -> dict:
     current = _checkpoint_body(progress.highest_checkpoint)
     nxt = _checkpoint_body(progress.next_checkpoint)
     body = {
-        "status": journey["status"],
+        "status": progress.status,
         "attempt_number": journey["attempt_number"],
-        "progress_version": journey["progress_version"],
+        "progress_version": progress.progress_version,
         "metrics": [metric_payload(metric) for metric in progress.metrics],
         "route": {
             "slug": route["slug"],
@@ -174,7 +184,7 @@ def _presentation(database, journey: dict, *, focus: bool = False) -> dict:
             _photos_root(),
         ),
     }
-    if not focus and journey["status"] == "active":
+    if not focus and progress.status == "active":
         body["pending_arrivals"] = pending_arrivals(
             database, progress.journey_id, progress.checkpoints
         )
@@ -281,8 +291,14 @@ def _expeditions(database, user_id: int, active_journey_id: int | None) -> list[
     return cards
 
 
+def _begin_consistent_read(database) -> None:
+    """One snapshot for every select in this read. Does not change the session default."""
+    database.rollback()
+    database.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+
+
 def _invitations(database, user_id: int) -> list[dict]:
-    received = list_received_invitations(user_id)
+    received = read_received_invitations(database, user_id)
     if not received:
         return []
     ids = [row["expedition_id"] for row in received]

@@ -440,26 +440,31 @@ def revoke_invitation(user_id: int, invitation_id: int) -> dict:
     return _commit(write)
 
 
+def read_received_invitations(database, user_id: int) -> list[dict]:
+    """Pending invitations for one account. Selects only. The caller owns the transaction."""
+    rows = database.execute(
+        """
+        SELECT invitation.id, invitation.expedition_id, invitation.status,
+               invitation.expires_at, invitation.invited_user_id,
+               invitation.invited_by_user_id, invitation.token_hash,
+               account.username
+        FROM expedition_invitations AS invitation
+        JOIN users AS account ON account.id = invitation.invited_user_id
+        WHERE invitation.invited_user_id = ?
+          AND invitation.status = 'pending'
+          AND invitation.expires_at > now()
+        ORDER BY invitation.id
+        """,
+        (user_id,),
+    ).fetchall()
+    return [_invitation_body(database, row, token=None) for row in rows]
+
+
 def list_received_invitations(user_id: int) -> list[dict]:
     database = get_db()
     try:
         _require_account(database, user_id)
-        rows = database.execute(
-            """
-            SELECT invitation.id, invitation.expedition_id, invitation.status,
-                   invitation.expires_at, invitation.invited_user_id,
-                   invitation.invited_by_user_id, invitation.token_hash,
-                   account.username
-            FROM expedition_invitations AS invitation
-            JOIN users AS account ON account.id = invitation.invited_user_id
-            WHERE invitation.invited_user_id = ?
-              AND invitation.status = 'pending'
-              AND invitation.expires_at > now()
-            ORDER BY invitation.id
-            """,
-            (user_id,),
-        ).fetchall()
-        return [_invitation_body(database, row, token=None) for row in rows]
+        return read_received_invitations(database, user_id)
     finally:
         database.rollback()
 

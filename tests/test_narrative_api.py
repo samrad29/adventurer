@@ -840,11 +840,14 @@ def test_media_paths_stay_inside_curated_photos(client, app, monkeypatch):
             return Path("C:/outside/escaped.jpg")
         if self.name == "broken.jpg":
             raise OSError("cannot resolve")
+        if self.name == "loop.jpg":
+            raise RuntimeError("Symlink loop from 'loop.jpg'")
         return real_resolve(self, *args, **kwargs)
 
     monkeypatch.setattr(Path, "resolve", resolve)
     assert _asset_is_readable("/static/photos/escaped.jpg") is False
     assert _asset_is_readable("/static/photos/broken.jpg") is False
+    assert _asset_is_readable("/static/photos/loop.jpg") is False
     monkeypatch.undo()
     assert _asset_is_readable(PHOTO) is True
     link = None

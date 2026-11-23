@@ -391,7 +391,7 @@ def _asset_is_readable(asset_path: str) -> bool:
 
     Returned paths are site-relative. The client resolves them against the
     backend origin. A remote URL, a path outside /static/photos/, a missing
-    file, or a symlink that leaves that directory is omitted.
+    file, a symlink that leaves that directory, or a symlink loop is omitted.
     """
     relative = _photo_relative(asset_path)
     if relative is None:
@@ -402,7 +402,7 @@ def _asset_is_readable(asset_path: str) -> bool:
         if not candidate.is_relative_to(root):
             return False
         return candidate.is_file()
-    except OSError:
+    except (OSError, RuntimeError):
         return False
 
 

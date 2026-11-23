@@ -5,10 +5,13 @@ from __future__ import annotations
 import threading
 from decimal import Decimal
 
-from adventurer.activities import create_activity
+from adventurer.activities import create_activity, preview_activity
 from adventurer.db import DB, get_db
+from adventurer.home import compose_home
+from adventurer.journeys import start_journey
 from adventurer.measures import feet_to_meters
 from adventurer.metrics import MILE_IN_METERS
+from adventurer.services import create_adventurer
 
 DAY = "2026-06-01"
 REVEAL = " reveal."
@@ -828,6 +831,80 @@ def test_concurrent_creates_attribute_a_checkpoint_to_the_write_that_reached_it(
             ("checkpoint_reached", "Gate"),
             ("activity_logged", None),
         ]
+
+
+def test_home_read_keeps_one_snapshot_when_an_activity_commits(app, monkeypatch):
+    target = feet_to_meters(Decimal("100"))
+    with app.app_context():
+        route_id = _route("home-snapshot", [("elevation", target)])
+        gate = _stop(route_id, "gate", 0, [("elevation", target)], name="Gate")
+        _story(gate, route_id, "Gate")
+        _publish(route_id)
+        user_id = create_adventurer("HomeSnap", "trailhead")["id"]
+        journey = start_journey(user_id, route_id)
+        version = journey["progress_version"]
+        main = get_db()
+        reached = threading.Event()
+        allow = threading.Event()
+        original = DB.execute
+        seen = {"paused": False}
+
+        def wrapped(self, sql, params=()):
+            normalized = " ".join(sql.split()).lower()
+            if (
+                not seen["paused"]
+                and self is not main
+                and "from journey_metric_totals" in normalized
+            ):
+                seen["paused"] = True
+                reached.set()
+                assert allow.wait(timeout=10)
+            return original(self, sql, params)
+
+        monkeypatch.setattr(DB, "execute", wrapped)
+        holder: dict = {}
+
+        def run() -> None:
+            with app.app_context():
+                try:
+                    holder["result"] = compose_home(user_id)
+                except Exception as exc:
+                    holder["error"] = exc
+                finally:
+                    get_db().close()
+
+        thread = threading.Thread(target=run)
+        thread.start()
+        try:
+            assert reached.wait(timeout=10)
+            preview = preview_activity(
+                user_id, {"elevation_ft": "100", "happened_on": DAY}
+            )
+            create_activity(
+                user_id,
+                {"elevation_ft": "100", "happened_on": DAY},
+                confirmation_token=preview["confirmation_token"],
+            )
+        finally:
+            allow.set()
+            thread.join(timeout=20)
+            monkeypatch.undo()
+        assert not thread.is_alive()
+        assert seen["paused"] is True
+        assert "error" not in holder
+        body = holder["result"]
+        assert body["state"] == "active"
+        assert body["journey"]["status"] == "active"
+        assert body["journey"]["progress_version"] == version
+        elevation = next(item for item in body["journey"]["metrics"] if item["metric"] == "elevation")
+        assert elevation["credited"] == "0"
+        assert elevation["complete"] is False
+        assert body["journey"]["pending_arrivals"] == []
+        later = compose_home(user_id)
+        assert later["journey"] is None
+        assert later["focus"]["status"] == "completed"
+        assert later["focus"]["journey_id"] == journey["id"]
+        assert "pending_arrivals" not in later["focus"]
 
 
 def _race_creates(app, monkeypatch, first_write, second_write) -> dict:

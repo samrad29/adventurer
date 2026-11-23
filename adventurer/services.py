@@ -92,8 +92,9 @@ def current_viewer() -> dict | None:
     return g.viewer
 
 
-def get_adventurer(adventurer_id: int) -> dict | None:
-    row = get_db().execute(
+def read_adventurer(database, adventurer_id: int) -> dict | None:
+    """One account's public profile. Selects only. The caller owns the transaction."""
+    row = database.execute(
         """
         SELECT users.id, users.created_at, profiles.display_name AS name
         FROM users
@@ -105,6 +106,10 @@ def get_adventurer(adventurer_id: int) -> dict | None:
     if row is None:
         return None
     return _viewer(row)
+
+
+def get_adventurer(adventurer_id: int) -> dict | None:
+    return read_adventurer(get_db(), adventurer_id)
 
 
 def _viewer(row: dict) -> dict:

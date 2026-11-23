@@ -50,24 +50,29 @@ def active_journey(user_id: int) -> dict | None:
         database.rollback()
 
 
+def read_journeys(database, user_id: int, route_id: int | None = None) -> list[dict]:
+    """The caller's journeys. Selects only. The caller owns the transaction."""
+    _require_user(database, user_id, lock=False)
+    if route_id is not None:
+        _require_route(database, route_id)
+    rows = database.execute(
+        f"""
+        SELECT {_JOURNEY}
+        FROM route_journeys AS journey
+        JOIN routes AS route ON route.id = journey.route_id
+        WHERE journey.user_id = ?
+          AND (?::bigint IS NULL OR journey.route_id = ?)
+        ORDER BY route.slug, journey.attempt_number
+        """,
+        (user_id, route_id, route_id),
+    ).fetchall()
+    return [dict(row) for row in rows]
+
+
 def list_journeys(user_id: int, route_id: int | None = None) -> list[dict]:
     database = get_db()
     try:
-        _require_user(database, user_id, lock=False)
-        if route_id is not None:
-            _require_route(database, route_id)
-        rows = database.execute(
-            f"""
-            SELECT {_JOURNEY}
-            FROM route_journeys AS journey
-            JOIN routes AS route ON route.id = journey.route_id
-            WHERE journey.user_id = ?
-              AND (?::bigint IS NULL OR journey.route_id = ?)
-            ORDER BY route.slug, journey.attempt_number
-            """,
-            (user_id, route_id, route_id),
-        ).fetchall()
-        return [dict(row) for row in rows]
+        return read_journeys(database, user_id, route_id)
     except JourneyError:
         database.rollback()
         raise
