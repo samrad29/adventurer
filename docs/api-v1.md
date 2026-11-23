@@ -417,7 +417,7 @@ A reached checkpoint with a published story and no published chapter stays in th
 }
 ```
 
-`GET /api/v1/journeys/<id>/journal/<checkpoint_slug>` returns the unlocked published story. `journal` is null when the checkpoint has no journal pair. `discoveries` are published rows in position order. `media` lists published journal and discovery images only. The checkpoint scene image is not repeated here. Home already selected it. Every returned media row has `alt_text`, `rights_basis`, and the attribution section 18.4 required before publication. `permission_note` is not returned. A missing file is omitted rather than returned with empty rights.
+`GET /api/v1/journeys/<id>/journal/<checkpoint_slug>` returns the unlocked published story. `journal` is null when the checkpoint has no journal pair. `discoveries` are published rows in position order. Each discovery carries its own published images. The story `media` array is the published journal images only. The checkpoint scene image is not repeated here. Home already selected it. Every returned media row has `alt_text`, `rights_basis`, `license`, and the other attribution section 18.4 required for that basis. `author`, `license_url`, and `source_url` are omitted when that basis does not require them and the stored value is null. `permission_note` is not returned. `path` is a site-relative URL. The client resolves it against the backend origin. It is not a remote URL. The server returns a path only when the file is inside the curated `/static/photos/` directory. A missing file, a path outside that directory, a malformed or remote path, or a symlink that leaves the directory is omitted rather than returned with empty rights.
 
 ```json
 {

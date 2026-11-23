@@ -3,16 +3,23 @@
 Reach comes from the journey's capped personal totals. This module does not
 award credits, complete a journey, or write expedition feed rows. Reads take
 no locks. An acknowledgment locks the acting user, then that journey.
+
+A journal read is one repeatable-read, read-only transaction, so progress,
+stories, and acknowledgments come from the same snapshot. That setting ends
+with the transaction. Later work on the connection stays read committed.
 """
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 from .db import get_db
 from .journey_progress import ProgressError, read_journey_progress
 
-_STATIC_ROOT = Path(__file__).resolve().parent / "static"
+_PHOTOS_ROOT = Path(__file__).resolve().parent / "static" / "photos"
+_PHOTO_PREFIX = "/static/photos/"
+_PHOTO_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _STORY_MISSING = "That story does not exist."
 _JOURNEY_MISSING = "That journey does not exist."
 _FORBIDDEN = "You cannot open another person's journey."
@@ -66,6 +73,7 @@ def journal_timeline(actor_id: int, journey_id: int) -> dict:
     """Reached published stories for one journey. The read commits nothing."""
     database = get_db()
     try:
+        _begin_consistent_read(database)
         _require_actor(database, actor_id, lock=False)
         progress = _own_progress(database, actor_id, journey_id)
         return _timeline(database, progress)
@@ -79,6 +87,7 @@ def journal_story(actor_id: int, journey_id: int, checkpoint_slug: str) -> dict:
     """One unlocked published story. The read commits nothing."""
     database = get_db()
     try:
+        _begin_consistent_read(database)
         _require_actor(database, actor_id, lock=False)
         progress = _own_progress(database, actor_id, journey_id)
         checkpoint, story = _open_story(database, progress, checkpoint_slug)
@@ -271,6 +280,12 @@ def _story_payload(database, journey_id: int, checkpoint: dict, story: dict) -> 
     }
 
 
+def _begin_consistent_read(database) -> None:
+    """One snapshot for every select in this read. Does not change the session default."""
+    database.rollback()
+    database.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY")
+
+
 def _media_payload(row: dict) -> dict | None:
     if not _asset_is_readable(row["asset_path"]):
         return None
@@ -289,16 +304,35 @@ def _media_payload(row: dict) -> dict | None:
 
 
 def _asset_is_readable(asset_path: str) -> bool:
-    if not isinstance(asset_path, str) or not asset_path.startswith("/static/"):
+    """True when the path is a real file inside the curated photos directory.
+
+    Returned paths are site-relative. The client resolves them against the
+    backend origin. A remote URL, a path outside /static/photos/, a missing
+    file, or a symlink that leaves that directory is omitted.
+    """
+    relative = _photo_relative(asset_path)
+    if relative is None:
         return False
-    relative = asset_path[len("/static/") :]
-    if not relative or "\\" in relative or relative.startswith("/"):
+    try:
+        root = _PHOTOS_ROOT.resolve()
+        candidate = (root / relative).resolve()
+        if not candidate.is_relative_to(root):
+            return False
+        return candidate.is_file()
+    except OSError:
         return False
-    root = _STATIC_ROOT.resolve()
-    candidate = (root / relative).resolve()
-    if not candidate.is_relative_to(root):
-        return False
-    return candidate.is_file()
+
+
+def _photo_relative(asset_path: str) -> str | None:
+    if not isinstance(asset_path, str) or asset_path != asset_path.strip():
+        return None
+    if not asset_path.startswith(_PHOTO_PREFIX):
+        return None
+    relative = asset_path[len(_PHOTO_PREFIX) :]
+    segments = relative.split("/")
+    if not segments or any(_PHOTO_SEGMENT.fullmatch(segment) is None for segment in segments):
+        return None
+    return relative
 
 
 def _open_story(database, progress, checkpoint_slug: str) -> tuple[dict, dict]:

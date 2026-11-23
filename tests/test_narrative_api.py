@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import threading
 from decimal import Decimal
+from pathlib import Path
 
-from adventurer.db import get_db
+from adventurer.db import DB, get_db
 from adventurer.measures import feet_to_meters
 from adventurer.metrics import MILE_IN_METERS
-from adventurer.narrative import acknowledge_arrival
+from adventurer.narrative import _asset_is_readable, acknowledge_arrival, journal_timeline
 
 DAY = "2026-06-01"
 PHOTO = "/static/photos/lukla.jpg"
@@ -697,6 +698,205 @@ def test_concurrent_acknowledgments_share_one_row(app):
             (journey_id,),
         ).fetchone()["n"]
     assert count == 1
+
+
+def test_journal_read_keeps_one_snapshot_when_a_story_is_published(app, monkeypatch):
+    target = feet_to_meters(Decimal("100"))
+    with app.app_context():
+        route_id = _route("narrative-snapshot", [("elevation", target)])
+        gate = _stop(route_id, "gate", 0, [("elevation", target)])
+        _story(gate, route_id, status="draft")
+        _publish(route_id)
+        user_id = get_db().execute(
+            """
+            INSERT INTO users (username, username_key, password_hash)
+            VALUES ('SnapUser', 'snapuser', 'hash')
+            RETURNING id
+            """
+        ).fetchone()["id"]
+        journey_id = get_db().execute(
+            """
+            INSERT INTO route_journeys (user_id, route_id, status, attempt_number, is_current)
+            VALUES (?, ?, 'active', 1, true)
+            RETURNING id
+            """,
+            (user_id, route_id),
+        ).fetchone()["id"]
+        activity_id = get_db().execute(
+            """
+            INSERT INTO activities (user_id, activity_date, elevation_gain_m, note)
+            VALUES (?, DATE '2026-06-01', ?, 'note')
+            RETURNING id
+            """,
+            (user_id, target),
+        ).fetchone()["id"]
+        get_db().execute(
+            """
+            INSERT INTO activity_verification_events (
+                activity_id, from_status, to_status, reason, actor_type
+            )
+            VALUES (
+                ?, NULL, 'not_required',
+                'Manual entry. Manual entries are not independently verified.',
+                'system'
+            )
+            """,
+            (activity_id,),
+        )
+        assignment_id = get_db().execute(
+            """
+            INSERT INTO activity_journey_assignments (
+                activity_id, journey_id, user_id, route_id
+            )
+            VALUES (?, ?, ?, ?)
+            RETURNING id
+            """,
+            (activity_id, journey_id, user_id, route_id),
+        ).fetchone()["id"]
+        get_db().execute(
+            """
+            INSERT INTO journey_credits (
+                assignment_id, journey_id, route_id, metric_code, credited_amount
+            )
+            VALUES (?, ?, ?, 'elevation', ?)
+            """,
+            (assignment_id, journey_id, route_id, target),
+        )
+        get_db().commit()
+        main = get_db()
+    reached = threading.Event()
+    allow = threading.Event()
+    original = DB.execute
+    seen = {"paused": False}
+
+    def wrapped(self, sql, params=()):
+        normalized = " ".join(sql.split()).lower()
+        if (
+            not seen["paused"]
+            and self is not main
+            and "from checkpoint_stories" in normalized
+        ):
+            seen["paused"] = True
+            reached.set()
+            assert allow.wait(timeout=10)
+        return original(self, sql, params)
+
+    monkeypatch.setattr(DB, "execute", wrapped)
+    holder: dict = {}
+
+    def run() -> None:
+        with app.app_context():
+            try:
+                holder["result"] = journal_timeline(user_id, journey_id)
+            except Exception as exc:
+                holder["error"] = exc
+            finally:
+                get_db().close()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert reached.wait(timeout=10)
+        with app.app_context():
+            get_db().execute(
+                """
+                UPDATE checkpoint_stories
+                SET status = 'published'
+                WHERE route_id = ?
+                """,
+                (route_id,),
+            )
+            get_db().commit()
+    finally:
+        allow.set()
+        thread.join(timeout=20)
+    assert not thread.is_alive()
+    assert "error" not in holder
+    assert seen["paused"] is True
+    assert _entries(holder["result"]) == []
+    with app.app_context():
+        later = journal_timeline(user_id, journey_id)
+    assert [entry["checkpoint_slug"] for entry in _entries(later)] == ["gate"]
+
+
+def test_media_paths_stay_inside_curated_photos(client, app, monkeypatch):
+    target = feet_to_meters(Decimal("100"))
+    outside = [
+        "/static/photos/../photo_credits.json",
+        "/static/css/site.css",
+        "/static/favicon.svg",
+        "https://example.com/lukla.jpg",
+        "//example.com/lukla.jpg",
+        "/static/photos/lukla.jpg?download=1",
+        "/static/photos/does-not-exist.jpg",
+        "/static/photos/%2e%2e/photo_credits.json",
+    ]
+    assert _asset_is_readable(PHOTO) is True
+    assert all(_asset_is_readable(path) is False for path in outside)
+    real_resolve = Path.resolve
+
+    def resolve(self, *args, **kwargs):
+        if self.name == "escaped.jpg":
+            return Path("C:/outside/escaped.jpg")
+        if self.name == "broken.jpg":
+            raise OSError("cannot resolve")
+        return real_resolve(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+    assert _asset_is_readable("/static/photos/escaped.jpg") is False
+    assert _asset_is_readable("/static/photos/broken.jpg") is False
+    monkeypatch.undo()
+    assert _asset_is_readable(PHOTO) is True
+    link = None
+    try:
+        link_path = Path(__file__).resolve().parents[1] / "adventurer" / "static" / "photos" / "_narrative_escape.jpg"
+        link_path.symlink_to(link_path.parents[2] / "photo_credits.json")
+        link = link_path
+    except OSError:
+        link = None
+    if link is not None:
+        try:
+            assert _asset_is_readable("/static/photos/_narrative_escape.jpg") is False
+        finally:
+            link.unlink()
+    with app.app_context():
+        route_id = _route("narrative-paths", [("elevation", target)])
+        gate = _stop(route_id, "gate", 0, [("elevation", target)])
+        _story(gate, route_id, journal=True)
+        database = get_db()
+        database.execute(
+            """
+            INSERT INTO route_media (
+                route_id, checkpoint_id, role, asset_path, alt_text, rights_basis,
+                author, license, license_url, source_url, permission_note, position, status
+            )
+            VALUES
+                (
+                    ?, ?, 'journal', ?, 'The gate', 'creative_commons',
+                    'Ada', 'CC BY 4.0', 'https://creativecommons.org/licenses/by/4.0',
+                    'https://example.com/gate', ?, 0, 'published'
+                ),
+                (
+                    ?, ?, 'journal', '/static/photos/../photo_credits.json', 'Escape',
+                    'public_domain', NULL, 'Public domain', NULL, 'https://example.com/pd',
+                    NULL, 1, 'published'
+                ),
+                (
+                    ?, ?, 'journal', 'https://example.com/remote.jpg', 'Remote',
+                    'public_domain', NULL, 'Public domain', NULL, 'https://example.com/remote',
+                    NULL, 2, 'published'
+                )
+            """,
+            (route_id, gate, PHOTO, SECRET_NOTE, route_id, gate, route_id, gate),
+        )
+        _publish(route_id)
+    _id, token, _csrf = _register(client, "PathReader")
+    journey = _start(client, token, "narrative-paths")
+    _credit(client, token, elevation_ft="100")
+    body = _story_response(client, token, journey["id"], "gate").get_json()
+    assert [item["path"] for item in body["media"]] == [PHOTO]
+    assert SECRET_NOTE not in str(body)
+    assert "permission_note" not in str(body)
 
 
 def _snapshot(journey_id: int) -> dict:
