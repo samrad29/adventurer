@@ -1,12 +1,12 @@
 # API v1
 
-The mobile client should call these routes and ignore the HTML pages. Domain rules live in `adventurer/journeys.py`, `adventurer/activities.py`, and `adventurer/expeditions.py`. Handlers in `adventurer/api.py` only authenticate, validate the JSON body, and return what those services already decided.
+The mobile client calls these routes. The server-rendered HTML pages have been removed. Domain rules live in `adventurer/journeys.py`, `adventurer/activities.py`, and `adventurer/expeditions.py`. Handlers in `adventurer/api.py` only authenticate, validate the JSON body, and return what those services already decided.
 
 ## Authentication
 
 Two credentials identify the same user. They are not interchangeable.
 
-- Cookie `session`, set by `POST /api/v1/auth/register`, `POST /api/v1/auth/login`, and the existing HTML join and login forms. The cookie is HttpOnly, SameSite=Lax, and a thirty-day permanent session. Every state-changing cookie request must send the CSRF token from `GET /api/v1/session` or from the `csrf` field of the register or login response, in the form field `csrf` or the header `X-CSRF-Token`.
+- Cookie `session`, set by `POST /api/v1/auth/register` and `POST /api/v1/auth/login`. The cookie is HttpOnly, SameSite=Lax, and a thirty-day permanent session. Every state-changing cookie request must send the CSRF token from `GET /api/v1/session` or from the `csrf` field of the register or login response, in the form field `csrf` or the header `X-CSRF-Token`. A missing token is a JSON `csrf` error.
 - Bearer token, returned once as `token` from register and login. The database stores only the SHA-256 hash in `api_tokens`. Send `Authorization: Bearer <token>`. A valid bearer request skips CSRF. The token lasts thirty days.
 
 If an `Authorization` header is present and the token is missing, unknown, revoked, expired, or belongs to an account being deleted, the response is 401. The cookie is not consulted. `POST /api/v1/auth/logout` with a bearer token revokes that token and leaves the cookie alone. The same path with only a cookie clears the browser session. `POST /api/v1/auth/revoke` revokes every token for the user and does not clear the cookie.
@@ -167,7 +167,7 @@ Another person's activity or journey returns 403 `forbidden`, which is the servi
 
 `next_actions` lists every eligible journey action in this order: `continue_journey`, `resume_journey` by route slug, `start_new_attempt` by route slug, `choose_route`. Invitation `accept_invitation` and `decline_invitation` stay on `incoming_invitations` and are not copied into `next_actions`. A share link has no decline action.
 
-The implemented scene uses the capped personal elevation in meters. The target scene uses every required metric and the checkpoint thresholds, then the same fallback: the reached checkpoint's file, then the nearest lower checkpoint by position, then `photos/<route>/hero` or `photos/<route>`, then null. It never uses an unmet checkpoint's file. The implemented expedition card field `displayed_total_ft` follows the board rule, including `display_credits_after`. The target card uses `displayed_metrics` for the same rule and does not feed that number into the scene. Until a curated file exists, `image` is null rather than a borrowed checkpoint.
+The home scene uses every required metric and the checkpoint thresholds, then the fallback: the reached checkpoint's file, then the nearest lower checkpoint by position, then `photos/<route>/hero` or `photos/<route>`, then null. It never uses an unmet checkpoint's file. Expedition cards use `displayed_metrics` and the board rule, including `display_credits_after`. That filtered total is not fed into the scene. Until a curated file exists, `image` is null rather than a borrowed checkpoint.
 
 ```json
 {
@@ -184,7 +184,7 @@ The implemented scene uses the capped personal elevation in meters. The target s
 
 ## Target metric contract
 
-The routes above are the implemented elevation-only API. Phase 4A section 16 is the progress contract those payloads move to. Authentication, CSRF, status codes, and error bodies do not change. Do not build a screen against both shapes. Until that revision is implemented, clients still send `elevation_ft` and still receive `total_ft`, `remaining_ft`, `percent`, and `summit_ft`.
+Home, route catalog, and journey reads use the metric objects below. Activity writes still require `elevation_ft` at the HTTP boundary. A distance-only activity body is not accepted yet. Authentication, CSRF, status codes, and error bodies do not change. Do not send `total_ft`, `remaining_ft`, `percent`, or `summit_ft`. Those fields are not returned.
 
 The target shape gives every required metric the same object. Amounts are decimal strings in the display unit named by `unit`. `ft` is the international foot. `mi` is the statute mile. Storage and confirmation stay in meters. There is no route-level percent. A metric the route does not require is omitted.
 

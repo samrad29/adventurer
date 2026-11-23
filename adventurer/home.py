@@ -7,15 +7,16 @@ accept, or complete anything.
 
 from __future__ import annotations
 
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal
 from pathlib import Path
 
 from flask import current_app
 
 from .db import get_db
-from .expeditions import _journey_total, list_received_invitations
+from .expeditions import board_metrics, list_received_invitations
+from .journey_progress import CheckpointMark, read_journey_progress
 from .journeys import JourneyError, list_journeys
-from .measures import feet_number
+from .metrics import MetricProgress, assess_metric
 from .scene import select_scene
 from .services import get_adventurer
 
@@ -59,7 +60,7 @@ def compose_home(user_id: int) -> dict:
         )
         invitations = _invitations(database, user_id)
     finally:
-        database.rollback()
+        get_db().rollback()
     return {
         "you": {"id": viewer["id"], "name": viewer["name"]},
         "state": state,
@@ -70,6 +71,30 @@ def compose_home(user_id: int) -> dict:
         "expeditions": expeditions,
         "incoming_invitations": invitations,
     }
+
+
+def progress_metrics(database, journey_id: int) -> list[dict]:
+    """Display metrics for one journey. The caller owns the transaction."""
+    progress = read_journey_progress(database, journey_id)
+    return [metric_payload(metric) for metric in progress.metrics]
+
+
+def metric_payload(metric: MetricProgress) -> dict:
+    return {
+        "metric": metric.code,
+        "unit": metric.display_unit,
+        "target": plain_display(metric.target_display),
+        "credited": plain_display(metric.credited_display),
+        "remaining": plain_display(metric.remaining_display),
+        "complete": metric.complete,
+    }
+
+
+def plain_display(value: Decimal) -> str:
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
 
 
 def _actions(active, paused, finished, current) -> list[dict]:
@@ -112,43 +137,41 @@ def _finished_order(journey: dict):
 def _presentation(database, journey: dict, *, focus: bool = False) -> dict:
     route = database.execute(
         """
-        SELECT id, slug, name, region, target_elevation_m
+        SELECT id, slug, name, region
         FROM routes
         WHERE id = ?
         """,
         (journey["route_id"],),
     ).fetchone()
-    checkpoints = list(
-        database.execute(
-            """
-            SELECT slug, name, position, elevation_m
-            FROM route_checkpoints
-            WHERE route_id = ?
-            ORDER BY elevation_m, position
-            """,
-            (route["id"],),
-        ).fetchall()
-    )
-    total_m, _last = _journey_total(database, journey["id"], None)
-    target = route["target_elevation_m"]
-    capped = total_m if total_m <= target else target
-    current, nxt = _checkpoints(checkpoints, capped)
+    progress = read_journey_progress(database, journey["id"])
+    credited = {metric.code: metric.credited_m for metric in progress.metrics}
+    current = _checkpoint_body(progress.highest_checkpoint)
+    nxt = _checkpoint_body(progress.next_checkpoint)
     body = {
         "status": journey["status"],
         "attempt_number": journey["attempt_number"],
         "progress_version": journey["progress_version"],
-        "total_ft": feet_number(capped),
-        "remaining_ft": feet_number(target - capped),
-        "percent": _percent(capped, target),
-        "summited": capped >= target and target > 0,
+        "metrics": [metric_payload(metric) for metric in progress.metrics],
         "route": {
             "slug": route["slug"],
             "name": route["name"],
             "region": route["region"],
-            "summit_ft": feet_number(target),
+            "requirements": [
+                {
+                    "metric": metric.code,
+                    "unit": metric.display_unit,
+                    "target": plain_display(metric.target_display),
+                }
+                for metric in progress.metrics
+            ],
         },
         "checkpoint": {"current": current, "next": nxt},
-        "scene": select_scene(route["slug"], checkpoints, capped, _photos_root()),
+        "scene": select_scene(
+            route["slug"],
+            [_scene_checkpoint(mark) for mark in progress.checkpoints],
+            credited,
+            _photos_root(),
+        ),
     }
     if focus:
         body["journey_id"] = journey["id"]
@@ -157,29 +180,42 @@ def _presentation(database, journey: dict, *, focus: bool = False) -> dict:
     return body
 
 
-def _checkpoints(checkpoints, total_m: Decimal):
-    current = None
-    nxt = None
-    for checkpoint in checkpoints:
-        item = {
-            "slug": checkpoint["slug"],
-            "name": checkpoint["name"],
-            "elevation_ft": feet_number(checkpoint["elevation_m"]),
-        }
-        if checkpoint["elevation_m"] <= total_m:
-            current = item
-        elif nxt is None:
-            nxt = item
-    return current, nxt
+def _checkpoint_body(mark: CheckpointMark | None) -> dict | None:
+    if mark is None:
+        return None
+    return {
+        "slug": mark.slug,
+        "name": mark.name,
+        "position": mark.position,
+        "requirements": _threshold_payload(mark.thresholds),
+    }
 
 
-def _percent(capped: Decimal, target: Decimal) -> float:
-    if target <= 0:
-        return 0.0
-    ratio = (capped / target * Decimal("100")).quantize(
-        Decimal("0.1"), rounding=ROUND_HALF_UP
-    )
-    return float(ratio)
+def _scene_checkpoint(mark: CheckpointMark) -> dict:
+    return {
+        "id": mark.id,
+        "slug": mark.slug,
+        "position": mark.position,
+        "thresholds": mark.thresholds,
+    }
+
+
+def _threshold_payload(thresholds) -> list[dict]:
+    rows = []
+    for code, amount in sorted(thresholds, key=lambda item: item[0]):
+        shown = assess_metric(code, amount, Decimal("0"))
+        rows.append(
+            {
+                "metric": code,
+                "unit": shown.display_unit,
+                "threshold": plain_display(shown.target_display),
+            }
+        )
+    return rows
+
+
+def _metric_from_amounts(code: str, target_m: Decimal, credited_m: Decimal) -> dict:
+    return metric_payload(assess_metric(code, target_m, credited_m))
 
 
 def _expeditions(database, user_id: int, active_journey_id: int | None) -> list[dict]:
@@ -187,7 +223,7 @@ def _expeditions(database, user_id: int, active_journey_id: int | None) -> list[
         """
         SELECT expedition.slug, expedition.name, expedition.kind, expedition.status,
                expedition.accent_color, expedition.welcome_override, expedition.image_ref,
-               route.slug AS route_slug, route.target_elevation_m,
+               route.id AS route_id, route.slug AS route_slug,
                participation.journey_id, participation.display_credits_after,
                organization.slug AS organization_slug,
                organization.name AS organization_name,
@@ -206,11 +242,9 @@ def _expeditions(database, user_id: int, active_journey_id: int | None) -> list[
     ).fetchall()
     cards = []
     for row in rows:
-        total_m, _last = _journey_total(
-            database, row["journey_id"], row["display_credits_after"]
+        visible = board_metrics(
+            database, row["journey_id"], row["route_id"], row["display_credits_after"]
         )
-        target = row["target_elevation_m"]
-        capped = total_m if total_m <= target else target
         card = {
             "slug": row["slug"],
             "name": row["name"],
@@ -218,8 +252,10 @@ def _expeditions(database, user_id: int, active_journey_id: int | None) -> list[
             "status": row["status"],
             "route_slug": row["route_slug"],
             "contributing": row["journey_id"] == active_journey_id,
-            "displayed_total_ft": feet_number(capped),
-            "organization": None,
+            "displayed_metrics": [
+                _metric_from_amounts(item["metric"], item["target_m"], item["credited_m"])
+                for item in visible
+            ],
         }
         if row["kind"] == "private":
             card["accent_color"] = row["accent_color"]
@@ -234,6 +270,8 @@ def _expeditions(database, user_id: int, active_journey_id: int | None) -> list[
                 "colors": row["colors"],
                 "welcome_message": row["welcome_message"],
             }
+        else:
+            card["organization"] = None
         cards.append(card)
     return cards
 
@@ -287,3 +325,4 @@ def _photos_root() -> Path:
     if configured:
         return Path(configured)
     return Path(current_app.static_folder) / "photos"
+

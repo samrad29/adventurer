@@ -1,17 +1,13 @@
-"""Accounts, activities, and the casual expedition leaderboard."""
+"""Account records used by the JSON API and the cookie session."""
 
 from __future__ import annotations
 
-from datetime import date, datetime
+from datetime import datetime
 
-from flask import g, has_request_context, session
+from flask import g, session
 from werkzeug.security import check_password_hash, generate_password_hash
 
-from .challenges import PLACE_LABELS
 from .db import get_db, is_unique_violation
-from .measures import feet_number
-
-MANUAL_EVENT_REASON = "Manual entry. Manual entries are not independently verified."
 
 
 class AccountError(ValueError):
@@ -111,81 +107,12 @@ def get_adventurer(adventurer_id: int) -> dict | None:
     return _viewer(row)
 
 
-def load_route(slug: str) -> dict:
-    """Expedition page: route structure from the database, narrative from challenges.py."""
-    from .platform import present_expedition
-
-    user_id = None
-    if has_request_context():
-        viewer = current_viewer()
-        user_id = viewer["id"] if viewer else None
-    return present_expedition(slug, user_id)
-
-
-def list_routes() -> list[dict]:
-    from .platform import list_public_expeditions
-
-    return [
-        {
-            "slug": row["slug"],
-            "name": row["name"],
-            "region": row["region"],
-            "summit_ft": row["summit_ft"],
-        }
-        for row in list_public_expeditions()
-    ]
-
-
-def total_elevation(adventurer_id: int, challenge_slug: str) -> float:
-    from .platform import expedition_total_m
-
-    return float(feet_number(expedition_total_m(adventurer_id, challenge_slug)))
-
-
-def add_log(adventurer_id: int, challenge_slug: str, entry: dict) -> float:
-    from .platform import create_activity
-
-    create_activity(adventurer_id, entry, challenge_slug)
-    return total_elevation(adventurer_id, challenge_slug)
-
-
-def delete_log(adventurer_id: int, challenge_slug: str, log_id: int) -> bool:
-    """Remove this expedition's credit. The activity row stays."""
-    from .platform import remove_credit
-
-    return remove_credit(adventurer_id, log_id, challenge_slug)
-
-
-def list_logs(adventurer_id: int, challenge_slug: str) -> list[dict]:
-    from .platform import journal_entries
-
-    return journal_entries(adventurer_id, challenge_slug)
-
-
-def leaderboard(challenge: dict) -> list[dict]:
-    from .platform import leaderboard_rows
-
-    return leaderboard_rows(challenge)
-
-
-def place_label(place: str) -> str:
-    return PLACE_LABELS.get(place, place)
-
-
 def _viewer(row: dict) -> dict:
     return {
         "id": row["id"],
         "name": row["name"],
         "created_at": _timestamp_text(row["created_at"]),
     }
-
-
-def _date_text(value) -> str:
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    if isinstance(value, date):
-        return value.isoformat()
-    return str(value)
 
 
 def _timestamp_text(value) -> str:

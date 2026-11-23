@@ -1673,45 +1673,16 @@ def _first_reached(history, credited: Decimal):
     return None
 
 
-def _journey_total(database, journey_id: int, cutoff):
-    """Elevation total still read by the home presentation.
+def board_metrics(database, journey_id: int, route_id: int, cutoff) -> list[dict]:
+    """Required-metric totals for one expedition board.
 
-    Home has not moved to the metrics array. This returns that one metric
-    and does not rank an expedition.
+    A null cutoff reads journey_metric_totals. display_credits_after limits
+    each metric on its own. This read does not rank and does not lock.
     """
-    if cutoff is None:
-        stored = database.execute(
-            """
-            SELECT credited_total
-            FROM journey_metric_totals
-            WHERE journey_id = ? AND metric_code = 'elevation'
-            """,
-            (journey_id,),
-        ).fetchone()
-        total = stored["credited_total"] if stored else Decimal("0")
-    else:
-        summed = database.execute(
-            """
-            SELECT COALESCE(SUM(credited_amount), 0) AS credited_total
-            FROM journey_credits
-            WHERE journey_id = ?
-              AND metric_code = 'elevation'
-              AND created_at >= ?
-            """,
-            (journey_id, cutoff),
-        ).fetchone()
-        total = summed["credited_total"]
-    last = database.execute(
-        """
-        SELECT MAX(created_at) AS last_credit_at
-        FROM journey_credits
-        WHERE journey_id = ?
-          AND metric_code = 'elevation'
-          AND (?::timestamptz IS NULL OR created_at >= ?::timestamptz)
-        """,
-        (journey_id, cutoff, cutoff),
-    ).fetchone()
-    return total, last["last_credit_at"]
+    requirements = _requirements(database, route_id)
+    progress = _progress_bundle(database, [journey_id])
+    metrics, _reached = _visible_metrics(requirements, progress, journey_id, cutoff)
+    return metrics
 
 
 def _capped_totals(requirements, stored: dict[str, Decimal]) -> dict[str, Decimal]:

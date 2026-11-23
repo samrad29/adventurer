@@ -59,8 +59,8 @@ from .expeditions import (
     update_organization_role,
     update_private_expedition,
 )
-from .home import compose_home
-from .measures import feet_number
+from .home import compose_home, plain_display, progress_metrics
+from .metrics import assess_metric
 from .journeys import (
     JourneyError,
     abandon_journey,
@@ -183,17 +183,18 @@ def home():
 
 @bp.get("/journeys")
 def journeys_list():
-    return _ok(journeys=list_journeys(_actor()))
+    return _ok(journeys=_with_metrics(list_journeys(_actor())))
 
 
 @bp.get("/journeys/active")
 def journeys_active():
-    return _ok(journey=active_journey(_actor()))
+    journey = active_journey(_actor())
+    return _ok(journey=None if journey is None else _with_metrics([journey])[0])
 
 
 @bp.get("/journeys/<int:journey_id>")
 def journeys_get(journey_id: int):
-    return _ok(journey=get_journey(_actor(), journey_id))
+    return _ok(journey=_with_metrics([get_journey(_actor(), journey_id)])[0])
 
 
 @bp.post("/journeys/start")
@@ -273,16 +274,29 @@ def activities_delete(activity_id: int):
 
 @bp.get("/routes")
 def routes_list():
-    rows = get_db().execute(
+    database = get_db()
+    rows = database.execute(
         """
-        SELECT slug, name, region, summary, target_elevation_m
+        SELECT id, slug, name, region, summary
         FROM routes
         WHERE status = 'published'
         ORDER BY slug
         """
     ).fetchall()
-    get_db().rollback()
-    return _ok(routes=[dict(row) for row in rows])
+    requirements = _requirements_by_route(database, [row["id"] for row in rows])
+    database.rollback()
+    return _ok(
+        routes=[
+            {
+                "slug": row["slug"],
+                "name": row["name"],
+                "region": row["region"],
+                "summary": row["summary"],
+                "requirements": requirements.get(row["id"], []),
+            }
+            for row in rows
+        ]
+    )
 
 
 @bp.get("/routes/<slug>")
@@ -290,7 +304,7 @@ def routes_get(slug: str):
     database = get_db()
     route = database.execute(
         """
-        SELECT id, slug, name, region, summary, target_elevation_m
+        SELECT id, slug, name, region, summary
         FROM routes
         WHERE slug = ? AND status = 'published'
         """,
@@ -301,10 +315,10 @@ def routes_get(slug: str):
         raise ApiError("not_found", "That route does not exist.", status=404)
     checkpoints = database.execute(
         """
-        SELECT slug, name, position, elevation_m
+        SELECT id, slug, name, position
         FROM route_checkpoints
         WHERE route_id = ?
-        ORDER BY position
+        ORDER BY position, id
         """,
         (route["id"],),
     ).fetchall()
@@ -331,25 +345,19 @@ def routes_get(slug: str):
         """,
         (route["id"],),
     ).fetchall()
+    requirements = _requirements_by_route(database, [route["id"]]).get(route["id"], [])
+    checkpoint_bodies = _checkpoint_catalog(database, checkpoints)
     database.rollback()
     journeys = []
     if g.get("actor_id"):
-        journeys = list_journeys(g.actor_id, route["id"])
+        journeys = _with_metrics(list_journeys(g.actor_id, route["id"]))
     return _ok(
         slug=route["slug"],
         name=route["name"],
         region=route["region"],
         summary=route["summary"],
-        summit_ft=feet_number(route["target_elevation_m"]),
-        checkpoints=[
-            {
-                "slug": row["slug"],
-                "name": row["name"],
-                "position": row["position"],
-                "elevation_m": row["elevation_m"],
-            }
-            for row in checkpoints
-        ],
+        requirements=requirements,
+        checkpoints=checkpoint_bodies,
         expeditions=[dict(row) for row in expeditions],
         journeys=journeys,
     )
@@ -657,6 +665,77 @@ def _activity_fields(body: dict, *, creating: bool = True) -> dict:
     if creating and "elevation_ft" not in fields:
         raise ApiError("invalid", "Add elevation.")
     return fields
+
+
+def _with_metrics(journeys: list[dict]) -> list[dict]:
+    if not journeys:
+        return []
+    database = get_db()
+    try:
+        return [
+            {**dict(row), "metrics": progress_metrics(database, row["id"])}
+            for row in journeys
+        ]
+    finally:
+        database.rollback()
+
+
+def _requirements_by_route(database, route_ids: list[int]) -> dict[int, list[dict]]:
+    if not route_ids:
+        return {}
+    grouped: dict[int, list[dict]] = {}
+    rows = database.execute(
+        """
+        SELECT route_id, metric_code, target_amount
+        FROM route_requirements
+        WHERE route_id = ANY(?)
+        ORDER BY route_id, metric_code
+        """,
+        (route_ids,),
+    ).fetchall()
+    for row in rows:
+        shown = assess_metric(row["metric_code"], row["target_amount"], Decimal("0"))
+        grouped.setdefault(row["route_id"], []).append(
+            {
+                "metric": row["metric_code"],
+                "unit": shown.display_unit,
+                "target": plain_display(shown.target_display),
+            }
+        )
+    return grouped
+
+
+def _checkpoint_catalog(database, checkpoints) -> list[dict]:
+    if not checkpoints:
+        return []
+    thresholds: dict[int, list[dict]] = {}
+    rows = database.execute(
+        """
+        SELECT checkpoint_id, metric_code, threshold_amount
+        FROM checkpoint_requirements
+        WHERE checkpoint_id = ANY(?)
+        ORDER BY metric_code
+        """,
+        ([row["id"] for row in checkpoints],),
+    ).fetchall()
+    for row in rows:
+        shown = assess_metric(row["metric_code"], row["threshold_amount"], Decimal("0"))
+        thresholds.setdefault(row["checkpoint_id"], []).append(
+            {
+                "metric": row["metric_code"],
+                "unit": shown.display_unit,
+                "threshold": plain_display(shown.target_display),
+            }
+        )
+    return [
+        {
+            "slug": row["slug"],
+            "name": row["name"],
+            "position": row["position"],
+            "requirements": thresholds.get(row["id"], []),
+        }
+        for row in checkpoints
+    ]
 
 
 def _route_id(body: dict) -> int:

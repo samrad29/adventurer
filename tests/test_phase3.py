@@ -32,15 +32,17 @@ def test_published_routes_hide_draft_and_retired(app):
     detail = client.get("/api/v1/routes/everest").get_json()
     assert detail["name"] == "Everest"
     assert detail["region"] == "Khumbu, Nepal"
-    assert detail["summit_ft"] == 29032
+    elevation = next(item for item in detail["requirements"] if item["metric"] == "elevation")
+    assert elevation["unit"] == "ft"
+    assert elevation["target"] == "29032"
+    assert "summit_ft" not in detail
     assert len(detail["checkpoints"]) == 16
     assert [stop["slug"] for stop in detail["checkpoints"]][:2] == ["timms-hill", "four-thousand"]
     assert detail["checkpoints"][-1]["slug"] == "summit"
+    assert detail["checkpoints"][-1]["requirements"][-1]["threshold"] == "29032"
     assert detail["expeditions"][0]["slug"] == "everest"
-    page = client.get("/routes/everest")
-    assert page.status_code == 200
-    assert "Global Everest Challenge" in page.get_data(as_text=True)
-    assert "Timms Hill" in page.get_data(as_text=True)
+    listed = next(row for row in client.get("/api/v1/routes").get_json()["routes"] if row["slug"] == "everest")
+    assert listed["requirements"] == detail["requirements"]
 
 
 def test_account_creation_does_not_join_an_expedition_or_start_a_journey(app):

@@ -1,8 +1,8 @@
 """Route scene selection for the home payload.
 
-The journey total, in meters and capped at the route target, is the only
-progress input. A checkpoint photograph is used only after that elevation
-has been reached. This module does not read or write the database.
+Checkpoint reach uses each stop's requirement thresholds and the journey's
+capped storage totals. A photograph is used only after that stop is reached.
+This module does not read or write the database.
 """
 
 from __future__ import annotations
@@ -15,11 +15,17 @@ from .photos import credit_for
 PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp")
 
 
-def select_scene(route_slug: str, checkpoints: list[dict], total_m: Decimal, root: Path) -> dict:
-    ordered = sorted(checkpoints, key=lambda row: (row["elevation_m"], row.get("position", 0)))
+def select_scene(
+    route_slug: str,
+    checkpoints: list[dict],
+    credited_m: dict[str, Decimal],
+    root: Path,
+) -> dict:
+    """Choose the reached place, then the nearest usable photograph behind it."""
+    ordered = sorted(checkpoints, key=lambda row: (row["position"], row.get("id", 0)))
     reached_index = None
     for index, checkpoint in enumerate(ordered):
-        if checkpoint["elevation_m"] <= total_m:
+        if _reached(checkpoint, credited_m):
             reached_index = index
         else:
             break
@@ -56,6 +62,13 @@ def select_scene(route_slug: str, checkpoints: list[dict], total_m: Decimal, roo
         "image": None,
         "fallback": "none",
     }
+
+
+def _reached(checkpoint: dict, credited_m: dict[str, Decimal]) -> bool:
+    thresholds = checkpoint.get("thresholds") or ()
+    return bool(thresholds) and all(
+        credited_m.get(metric, Decimal("0")) >= amount for metric, amount in thresholds
+    )
 
 
 def _checkpoint_image(route_slug: str, checkpoint_slug: str, root: Path) -> dict | None:

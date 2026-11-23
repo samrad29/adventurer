@@ -126,26 +126,30 @@ def _count(table: str, where: str = "TRUE", params: tuple = ()) -> int:
 
 def test_scene_never_uses_an_unreached_checkpoint(tmp_path: Path):
     checkpoints = [
-        {"slug": "low", "elevation_m": Decimal("10"), "position": 1},
-        {"slug": "high", "elevation_m": Decimal("50"), "position": 2},
+        {"slug": "low", "position": 1, "thresholds": (("elevation", Decimal("10")),)},
+        {"slug": "high", "position": 2, "thresholds": (("elevation", Decimal("50")),)},
     ]
     (tmp_path / "ridge").mkdir()
     (tmp_path / "ridge" / "hero.jpg").write_bytes(b"hero")
     (tmp_path / "ridge" / "low.jpg").write_bytes(b"low")
     (tmp_path / "high.jpg").write_bytes(b"locked")
-    below = select_scene("ridge", checkpoints, Decimal("0"), tmp_path)
+    below = select_scene("ridge", checkpoints, {}, tmp_path)
     assert below["role"] == "route_hero"
     assert below["checkpoint_slug"] is None
+    assert below["fallback"] is None
     assert below["image"]["path"].endswith("/ridge/hero.jpg")
     assert "high" not in below["image"]["path"]
-    reached = select_scene("ridge", checkpoints, Decimal("10"), tmp_path)
+    reached = select_scene("ridge", checkpoints, {"elevation": Decimal("10")}, tmp_path)
     assert reached["role"] == "checkpoint"
     assert reached["checkpoint_slug"] == "low"
     assert reached["fallback"] is None
     missing = select_scene(
         "ridge",
-        [{"slug": "bare", "elevation_m": Decimal("40"), "position": 1}, checkpoints[0]],
-        Decimal("40"),
+        [
+            {"slug": "low", "position": 1, "thresholds": (("elevation", Decimal("10")),)},
+            {"slug": "bare", "position": 2, "thresholds": (("elevation", Decimal("40")),)},
+        ],
+        {"elevation": Decimal("40")},
         tmp_path,
     )
     assert missing["checkpoint_slug"] == "bare"
@@ -407,6 +411,14 @@ def test_private_expedition_invitation_leave_and_privacy(client, app):
         headers=_auth(sam),
     )
     assert back.get_json()["participation"]["display_credits_after"] is not None
+    hidden_card = client.get("/api/v1/home", headers=_auth(sam)).get_json()
+    card = next(row for row in hidden_card["expeditions"] if row["slug"] == "owen-kili")
+    shown = next(item for item in card["displayed_metrics"] if item["metric"] == "elevation")
+    assert shown["credited"] == "0"
+    assert shown["unit"] == "ft"
+    personal = client.get("/api/v1/journeys/active", headers=_auth(sam)).get_json()["journey"]
+    kept = next(item for item in personal["metrics"] if item["metric"] == "elevation")
+    assert kept["credited"] == "100"
     board = client.get("/api/v1/expeditions/owen-kili/leaderboard", headers=_auth(owen))
     sam_again = next(row for row in board.get_json()["entries"] if row["user_id"] == _sam)
     assert Decimal(next(item["credited_m"] for item in sam_again["metrics"] if item["metric"] == "elevation")) == 0
@@ -612,6 +624,12 @@ def test_home_states_actions_photos_and_no_writes(client, app, tmp_path):
     )
     camp = client.get("/api/v1/home", headers=headers).get_json()
     assert camp["journey"]["checkpoint"]["current"]["slug"] == "camp"
+    elevation = next(item for item in camp["journey"]["metrics"] if item["metric"] == "elevation")
+    assert elevation["unit"] == "ft"
+    assert elevation["credited"] == "100"
+    assert elevation["complete"] is False
+    assert "total_ft" not in camp["journey"]
+    assert "summit_ft" not in camp["journey"]["route"]
     assert camp["journey"]["scene"]["checkpoint_slug"] == "camp"
     assert camp["journey"]["scene"]["image"]["path"].endswith("/vista/camp.jpg")
     assert "summit" not in camp["journey"]["scene"]["image"]["path"]
