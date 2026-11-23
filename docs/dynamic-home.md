@@ -100,13 +100,13 @@ Image resolver
 
   The flat names keep the current Everest files working. The route-scoped names are how a later route can reuse a slug such as summit without sharing Everest's picture. Checkpoint slugs are unique per route, not globally.
 
-  Alt text and credit stay in photo_credits.json. The key is the checkpoint slug, or the route slug for the hero. The home response copies author, license, license_url, source_url, and alt when an entry exists. A file with no credit entry is still returned, with credit null. A credit entry with no file is ignored, because the response only names a file the resolver found.
+  Alt text and credit stay in photo_credits.json for this resolver. The key is the checkpoint slug, or the route slug for the hero. The home response copies author, license, license_url, source_url, and alt when an entry exists. A file with no credit entry is still returned, with credit null. A credit entry with no file is ignored, because the response only names a file the resolver found. That null credit is the implemented lookup. It is not a right to publish the file. docs/architecture.md section 18.4 is the later publication gate for route_media. This resolver does not read that table, and its fallback order does not change.
 
 Optional later columns
 
   Nullable routes.hero_image_ref and route_checkpoints.image_ref, used only when a curator needs a path that the convention cannot express. Null means "use the convention." They are not required for Everest or for the first home implementation.
 
-  Do not add a route-media table, an asset library, upload, or a CMS. One image per checkpoint and one hero per route is the whole model. Ordering is the checkpoint position. A priority column would be a second way to answer the same question.
+  This home model does not add an asset library, an upload path, or a CMS. One scene image per reached checkpoint, then the fallback, is the whole scene. Ordering is checkpoint position. A priority column would be a second way to answer the same question. docs/architecture.md section 18 proposes route_media for editorial references, including extra journal images that this payload does not show. Those rows do not replace this fallback and do not select an unreached photograph.
 
 What home must not store
 
@@ -569,7 +569,7 @@ Settled
   next_actions is an array of eligible journey actions. Invitation accept and decline live once, on the invitation row. Home returns every eligible action and does not pick a winner. The client chooses prominence. Reading home performs none of them.
   Scene selection is the highest reached checkpoint, then the nearest lower position with an image, then the route hero, then null. A checkpoint with several thresholds is reached only when all of them are met. The scene never uses a locked checkpoint's image. Everest's hero is a broader Everest and Khumbu photograph, not Lukla or another checkpoint. The file is added with the route-aware resolver.
   The personal scene uses the full capped totals of the journey. Expedition cards use the board totals. Those numbers can differ after privacy rejoin, and the scene follows the personal totals.
-  Home adds no media table of its own. The metric tables belong to docs/architecture.md section 16. The implemented files stay curated static assets, and the implemented credits and alt text stay in photo_credits.json. docs/architecture.md section 18 proposes route_media as later editorial metadata. It does not put a second photograph on this scene, and it does not put journal bodies in this payload.
+  Home adds no media table of its own. The metric tables belong to docs/architecture.md section 16. The implemented files stay curated static assets, and the implemented credits and alt text stay in photo_credits.json. docs/architecture.md section 18 proposes route_media as later editorial metadata. A published scene row from that table already has the rights in section 18.4. It does not put a second photograph on this scene, and it does not put journal bodies in this payload. A later pending_arrivals list may name unacknowledged reached checkpoints by slug and arrival title. It is not in the implemented response. It carries no arrival body, journal body, or discovery. Acknowledgment stays on the journey attempt in section 18 and does not change this scene. Restart leaves those acknowledgments on the old attempt.
   Organization branding and expedition image_ref are card fields. They do not own or override route imagery. Participation does not require organization membership. Where those image bytes live is deferred until branding and image display are implemented. The nullable refs stay as they are.
   The home module is a composer. Journey lifecycle, route content, and expedition rules stay in their own services. Activity writes do not select images.
 

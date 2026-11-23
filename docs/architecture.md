@@ -1157,12 +1157,31 @@ route_chapters
   Check char_length(btrim(title)) > 0
   Check summary is null or char_length(btrim(summary)) > 0
 
-route_checkpoints gains one nullable column, chapter_id bigint. This column is editorial. The position immutability trigger and the requirement immutability trigger do not include it. Changing a chapter assignment does not change a threshold.
+route_checkpoints gains one nullable column, chapter_id bigint. This column is editorial. Changing it does not change a threshold, a position, or a credit.
 
-  Foreign key (chapter_id, route_id) to route_chapters (id, route_id) on delete set null
-  A checkpoint belongs to at most one chapter because the column holds one id.
-  A chapter and its checkpoints share a route because the foreign key includes route_id.
-  Checkpoints in one chapter occupy a contiguous span of position. A later chapter's checkpoints all have a greater position than an earlier chapter's checkpoints. A constraint trigger checks that shape. It does not change route_progress_shape. SET CONSTRAINTS ALL IMMEDIATE stays forbidden. The new trigger is named and set immediate on its own when a curation transaction needs it.
+  The foreign key is composite so a checkpoint cannot point at another route's chapter:
+
+    FOREIGN KEY (chapter_id, route_id)
+      REFERENCES route_chapters (id, route_id)
+      ON UPDATE NO ACTION
+
+  route_chapters unique (id, route_id) is required. The primary key on id is not a valid target for a two-column reference. route_checkpoints.route_id is already NOT NULL. Migration 0009 already has route_checkpoints_id_route_key on (id, route_id), which is the target for the story, discovery, and media foreign keys below. Migration 0007 already has route_journeys_id_user_route_key on (id, user_id, route_id), which is the target for journey_story_views.
+
+  Unqualified ON DELETE SET NULL is rejected. PostgreSQL would null every column of the key, including route_id, and the NOT NULL constraint on route_id would then abort the chapter delete.
+
+  The declaration that nulls only chapter_id is valid PostgreSQL 15:
+
+    ON DELETE SET NULL (chapter_id)
+
+  The isolated database is PostgreSQL 14.20. That column list was added in PostgreSQL 15, so migration 0010 cannot parse it there. 0010 uses the same foreign key with ON DELETE NO ACTION and a BEFORE DELETE trigger on route_chapters. The trigger sets route_checkpoints.chapter_id null where chapter_id equals the chapter being deleted. It does not assign route_id and it does not delete checkpoints. NO ACTION then finds no referencing row. A later upgrade to PostgreSQL 15 can replace that trigger with ON DELETE SET NULL (chapter_id). The effect is the same.
+
+  MATCH SIMPLE applies. A null chapter_id does not consult the foreign key, so a checkpoint with no chapter is valid. ON UPDATE NO ACTION rejects moving a chapter onto another route while a checkpoint still names it. It does not rewrite route_checkpoints.route_id.
+
+  route_checkpoints_position_immutable is BEFORE UPDATE OF position only. Assigning chapter_id does not fire it. route_progress_shape_checkpoints does fire on any update of route_checkpoints, including chapter_id. That function rechecks requirement shape and does not read chapter_id, so the assignment stays allowed after a journey exists. Requirement immutability is unchanged.
+
+  A checkpoint belongs to at most one chapter because the column holds one id. Deleting a chapter leaves checkpoint_stories, story_discoveries, and route_media in place. Those rows follow the checkpoint.
+
+  Checkpoints that share a chapter occupy one contiguous span of position. A checkpoint lying strictly between two members of a chapter belongs to that same chapter. A chapter with a lower position has only checkpoints whose positions are lower than every checkpoint of a later chapter. An unassigned checkpoint may sit before, between, or after those spans, and not inside one. The constraint trigger is route_chapter_spans. It is DEFERRABLE INITIALLY DEFERRED, and it is not route_progress_shape. SET CONSTRAINTS ALL IMMEDIATE stays forbidden. A curation transaction sets route_chapter_spans immediate by name when it needs the check before commit.
 
 A route may have zero chapters. A checkpoint may have a null chapter_id. Progress and the scene do not wait for a chapter. A published route is not required to narrate every checkpoint.
 
@@ -1219,10 +1238,12 @@ route_media
   role text not null
   asset_path text not null
   alt_text text not null
+  rights_basis text not null default 'undocumented'
   author text null
   license text null
   license_url text null
   source_url text null
+  permission_note text null
   position integer not null default 0
   status text not null default 'draft'
   created_at timestamptz not null default now()
@@ -1233,19 +1254,25 @@ route_media
   Check position >= 0
   Check status in ('draft', 'published', 'retired')
   Check role in ('route_hero', 'checkpoint_scene', 'journal', 'discovery')
+  Check rights_basis in ('public_domain', 'cc0', 'creative_commons', 'commissioned', 'undocumented')
   Check char_length(btrim(asset_path)) > 0
   Check char_length(btrim(alt_text)) > 0
+  Check author is null or char_length(btrim(author)) > 0
+  Check license is null or char_length(btrim(license)) > 0
   Check license_url is null or char_length(btrim(license_url)) > 0
   Check source_url is null or char_length(btrim(source_url)) > 0
+  Check permission_note is null or char_length(btrim(permission_note)) > 0
+  A published row must satisfy route_media_publish_rights, stated in section 18.4. Draft and retired rows may be undocumented. The check uses equality and position(), not a pattern that needs a percent sign, so the later migration can copy it.
   Check (role <> 'route_hero' OR (checkpoint_id IS NULL AND discovery_id IS NULL))
   Check (role <> 'checkpoint_scene' OR (checkpoint_id IS NOT NULL AND discovery_id IS NULL))
   Check (role <> 'journal' OR (checkpoint_id IS NOT NULL AND discovery_id IS NULL))
   Check (role <> 'discovery' OR (checkpoint_id IS NOT NULL AND discovery_id IS NOT NULL))
   Partial unique index on (route_id) WHERE role = 'route_hero' AND status = 'published'
   Partial unique index on (checkpoint_id) WHERE role = 'checkpoint_scene' AND status = 'published'
+  Partial unique index on (checkpoint_id, position) WHERE role = 'journal' AND status <> 'retired'
+  Partial unique index on (discovery_id, position) WHERE discovery_id IS NOT NULL AND status <> 'retired'
   Index (route_id, role, position)
   Index (checkpoint_id, role, position)
-  Index (discovery_id, position)
 
 asset_path is a reference, such as /static/photos/lukla.jpg. The table does not store bytes, width, or a binary thumbnail. Extra journal and discovery images use position. They are not the home scene. The home scene remains the one published checkpoint_scene, or the route_hero, under the fallback in docs/dynamic-home.md.
 
@@ -1257,10 +1284,13 @@ journey_story_views
   checkpoint_id bigint not null
   acknowledged_at timestamptz not null default now()
   Unique (journey_id, checkpoint_id)
-  Foreign key (journey_id, user_id, route_id) to route_journeys (id, user_id, route_id) on delete cascade
-  Foreign key (checkpoint_id, route_id) to route_checkpoints (id, route_id) on delete cascade
+  Foreign key (journey_id, user_id, route_id) to route_journeys (id, user_id, route_id) on delete cascade, on update no action
+  Foreign key (checkpoint_id, route_id) to route_checkpoints (id, route_id) on delete cascade, on update no action
   Index (user_id, journey_id)
   The row has no metric amount, no progress_version, and no expedition id.
+  Both foreign keys carry route_id, so the checkpoint and the journey are on the same route. user_id is the journey owner because it is part of route_journeys_id_user_route_key. A separate foreign key to users is not added. Account deletion already cascades from the user to the journey and then to these rows. There is no second cascade path.
+
+Editorial tables reuse adventurer.set_updated_at. They do not add another timestamp function. Story, discovery, and media foreign keys to a checkpoint are ON DELETE CASCADE and ON UPDATE NO ACTION. A route delete is already rejected while a journey or an expedition still points at it, so those cascades are the cleanup for a route that has no attempts. They do not run during privacy removal.
 
 Deleting a route cascades its chapters, and cascades its checkpoints, which cascade stories, discoveries, media, and views. Deleting a chapter sets checkpoint.chapter_id null and does not delete checkpoints. Deleting a journey deletes its views and does not delete stories. Account deletion already deletes the user's journeys, so the views go with them. Privacy removal does not delete journeys, activities, or credits, and it does not delete views. Expedition close, leave, and restart do not delete views on the attempt they leave behind.
 
@@ -1268,13 +1298,13 @@ Deleting a route cascades its chapters, and cascades its checkpoints, which casc
 
 Reach is the capped personal totals compared with checkpoint_requirements, in storage meters. A checkpoint with several thresholds unlocks only when every threshold is met. Display rounding does not unlock it. display_credits_after does not apply. Restart begins an attempt with none reached.
 
-One activity can cross several checkpoints. The create response lists every checkpoint that write newly satisfied, in position order. An update that increases credit and newly satisfies one or more checkpoints lists those checkpoints the same way. That list is for the client. It does not add expedition_updates. Section 16.4 still appends checkpoint_reached only on create, and a completing edit still appends summit_reached and no checkpoint rows. A delete lists nothing. The following journal read shows whatever the totals still reach.
+One activity can cross several checkpoints. Reach does not depend on which metrics the route uses. An elevation-only route, a distance-only route, and a combined route all unlock a checkpoint only when every one of its thresholds is met. The create response lists every checkpoint that write newly satisfied, in position order. An update lists the checkpoints newly satisfied on the journey that activity already credits, including a paused or abandoned journey whose totals moved without completing. An edit that would complete a paused or abandoned journey is still 409 resume_required and still writes nothing, so it returns no arrivals. That list is for the client. It does not add expedition_updates. Section 16.4 still appends checkpoint_reached only on create, and a completing edit still appends summit_reached and no checkpoint rows. A delete lists nothing. The following journal read shows whatever the totals still reach.
 
 Acknowledgment is one insert for the caller's journey and one checkpoint. The service locks the user, then that journey, in the order section 5 already uses for a journey write. It does not lock expeditions, participations, activities, or journey_metric_totals. It reads the existing progress totals. If the checkpoint is not reached, or the story is not published, the insert is rejected and no view row is written. A second acknowledgment of the same pair returns the existing acknowledged_at and writes nothing. The insert does not change route_journeys.
 
 Previously unlocked journal content stays readable after the journey is completed, because the completed totals stay. It also stays readable while the journey is paused or abandoned. New activities still do not credit a paused or abandoned journey, so they do not unlock further checkpoints on it. An edit that would complete a paused or abandoned journey is still 409 resume_required and still writes nothing. An edit or delete that lowers a paused or abandoned journey's totals below a threshold locks that checkpoint again, which is the existing credit rule. The view row is kept. While the checkpoint is locked, journal endpoints omit it. If the same attempt reaches it again, the content returns and the arrival is already acknowledged, so the client does not present the automatic reveal a second time.
 
-Restart creates a new journey. Views belong to the old journey id. The new attempt has no views, so its arrivals can be shown again. The abandoned attempt keeps its views and its credits. Its journal remains readable on that journey id.
+Restart creates a new journey. Views belong to the old journey id and are not copied. The new attempt has no views, so its arrivals can be shown again. The abandoned attempt keeps its views and its credits. Its journal remains readable on that journey id.
 
 Home, for the active journey only, may list unacknowledged reached checkpoints as identifiers and arrival titles. It does not include journal_body, discovery bodies, or extra journal images. A paused or abandoned journey's unacknowledged arrivals are not placed on the home scene. They are available from that journey's journal endpoint. docs/dynamic-home.md remains the scene contract. Narrative reads do not choose the photograph.
 
@@ -1289,9 +1319,45 @@ Roles:
   journal. Additional images for a reached checkpoint's journal entry. Ordered by position. Absent from home.
   discovery. Images for one photographic or other discovery. Ordered by position. Absent from home and absent until that checkpoint is reached.
 
-A missing or unpublished asset is omitted. The selector does not borrow a later checkpoint, and it does not invent a path. A published row whose file is absent is treated as missing. Alt text is required on every row. Author, license, license_url, and source_url are the attribution photo_credits.json already stores. A row may omit attribution. The client still shows alt text.
+A missing or unpublished asset is omitted. The selector does not borrow a later checkpoint, and it does not invent a path. A published row whose file is absent is treated as missing. Scene selection order is unchanged. docs/dynamic-home.md still allows the current resolver to return a file whose photo_credits.json entry is missing, with credit null. That is the implemented lookup. It is not permission to publish a route_media row.
 
-Until 0010 is applied and a later cutover reads route_media, adventurer/scene.py continues to resolve adventurer/static/photos and adventurer/photo_credits.json. This design does not move, download, or replace those files. asset_path can name those static paths. A later move to object storage or a CDN replaces the path and the file host. It does not put bytes in PostgreSQL and it does not change unlock rules. Organization logo bytes remain the separate open question in section 15.
+Publication is a commercial-use gate. A file being on the public web is not a right to use it. rights_basis records which of these cases the row actually is.
+
+  public_domain. The work is public domain where the service operates. license is the text Public domain. source_url is required. author is optional when the author is unknown.
+  cc0. The rights holder dedicated the work under CC0. license is the text CC0. license_url and source_url are required. author is optional.
+  creative_commons. The license permits commercial use. The accepted license texts are CC BY 2.0, CC BY-SA 2.0, CC BY 2.5, CC BY-SA 2.5, CC BY 3.0, CC BY-SA 3.0, CC BY 4.0, and CC BY-SA 4.0. license_url, source_url, and author are required. A license that contains NC or ND is not accepted. Those conditions do not permit this commercial use, or they prohibit the way a scene image is displayed. The current Everest credits are CC BY or CC BY-SA at 2.5, 3.0, or 4.0, which this list accepts. A missing credit entry still cannot be published.
+  commissioned. Someone granted this service the right to use the photograph, and that grant includes commercial use. license, author, and permission_note are required. permission_note names the grant. It is curation data and is not returned by the API. source_url is optional.
+  undocumented. The rights are unknown or the record is incomplete. This is the default. A row with this basis cannot be published.
+
+route_media_publish_rights is this check. status = 'published' is allowed only for the four granted bases, and only when the fields that basis requires are non-empty. The creative-commons branch also requires position('NC' in license) = 0 and position('ND' in license) = 0. Draft and retired rows may stay undocumented. Alt text is required on every row, including drafts.
+
+  CHECK (
+    status <> 'published'
+    OR (rights_basis = 'public_domain' AND license = 'Public domain' AND source_url IS NOT NULL)
+    OR (rights_basis = 'cc0' AND license = 'CC0' AND license_url IS NOT NULL AND source_url IS NOT NULL)
+    OR (
+      rights_basis = 'creative_commons'
+      AND license IN (
+        'CC BY 2.0', 'CC BY-SA 2.0',
+        'CC BY 2.5', 'CC BY-SA 2.5',
+        'CC BY 3.0', 'CC BY-SA 3.0',
+        'CC BY 4.0', 'CC BY-SA 4.0'
+      )
+      AND position('NC' in license) = 0
+      AND position('ND' in license) = 0
+      AND author IS NOT NULL
+      AND license_url IS NOT NULL
+      AND source_url IS NOT NULL
+    )
+    OR (
+      rights_basis = 'commissioned'
+      AND license IS NOT NULL
+      AND author IS NOT NULL
+      AND permission_note IS NOT NULL
+    )
+  )
+
+Until 0010 is applied and a later cutover reads route_media, adventurer/scene.py continues to resolve adventurer/static/photos and adventurer/photo_credits.json. This design does not move, download, or replace those files. asset_path can name those static paths. Seeding a published row from an existing file copies a complete rights record from photo_credits.json. A file with no credit entry, or with a license this section does not accept, stays unpublished. A later move to object storage or a CDN replaces the path and the file host. It does not put bytes in PostgreSQL and it does not change unlock rules. Organization logo bytes remain the separate open question in section 15.
 
 18.5 Authorization
 
@@ -1316,7 +1382,7 @@ This sequence does not start until this section is reviewed. It does not modify 
 
   1. Apply 0010_narrative_content on the isolated test database only.
   2. Read services and PostgreSQL tests for reach, hidden unreached bodies, acknowledgment idempotence, restart, and an edit that relocks a checkpoint.
-  3. Seed published rows for Everest and one distance-only route from the existing prose and photo files. Do not treat Everest as the only shape.
+  3. Seed rows for Everest and one distance-only route from the existing prose and photo files. Publish a photograph only when section 18.4 accepts its rights. Do not treat Everest as the only shape.
   4. Add the proposed API fields. Home still omits journal bodies.
   5. Point scene selection at published route_hero and checkpoint_scene rows, keeping the current fallback and the current files until each asset_path resolves.
 
@@ -1325,7 +1391,7 @@ This sequence does not start until this section is reviewed. It does not modify 
 These are not settled by the rest of this document.
 
   1. The per-account trail name in challenges.py. Section 18.6 leaves it out of 0010. Retiring the draw, or keeping it as a label beside the shared checkpoint name, needs a product decision.
-  2. A retired story or media row is hidden from every caller, including an attempt that already acknowledged it. The alternative is to keep serving it to attempts that have a view row. Hiding it is what lets a license problem pull an asset.
+  2. A retired story or media row is hidden from every caller, including an attempt that already acknowledged it. The alternative is to keep serving it to attempts that have a view row. Section 18.4 already blocks publishing an undocumented or noncommercial photograph. Retirement is how a published asset is pulled later.
   3. Route photography bytes stay in adventurer/static/photos until a later move to object storage or a CDN. The column is only a path. Organization logo storage remains section 15 and is a separate choice.
   4. Published chapter titles and their checkpoint slugs are public on the route catalog. Bodies are not. If a title would spoil a later place, the catalog rule needs to change before implementation.
   5. A view row survives an edit or delete that drops the checkpoint below its thresholds. The content is hidden until the same attempt reaches it again, and the automatic reveal does not play twice. Deleting the view on relock would show the reveal again.

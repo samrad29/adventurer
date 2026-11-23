@@ -383,11 +383,11 @@ An activity may send `elevation_ft`, `distance_mi`, or both. Omit a metric that 
 
 Not implemented. These shapes are specified so a later change can add them without inventing a second progress model. Existing routes keep their current responses until that change. `docs/architecture.md` section 18 is the domain rule. `docs/dynamic-home.md` remains the scene rule. Amounts stay out of these payloads. Story text does not award credit.
 
-A checkpoint is unlocked only when the caller's own journey totals meet every one of its thresholds. Unreached arrivals, journal bodies, and discoveries are not returned. Another person's journey is 403 `forbidden`. An unreached checkpoint, a draft or retired story, and an unknown slug are 404 `not_found` with the same message. Anonymous callers can see published chapter structure on the route. They cannot see arrival text, journal text, or discoveries.
+A checkpoint is unlocked only when the caller's own journey totals meet every one of its thresholds. That rule is the same for an elevation-only route, a distance-only route, and a combined route. Unreached arrivals, journal bodies, and discoveries are not returned. Another person's journey is 403 `forbidden`. An unreached checkpoint, a draft or retired story, and an unknown slug are 404 `not_found` with the same message. Anonymous callers can see published chapter structure on the route. They cannot see arrival text, journal text, or discoveries.
 
-`GET /api/v1/routes` and `GET /api/v1/routes/<slug>` gain a `chapters` array on the published route. Each item is `slug`, `title`, `position`, and `checkpoints` as slugs in checkpoint position order. No `arrival_body`, `journal_body`, or discovery list. The existing `requirements` and `checkpoints` arrays stay.
+`GET /api/v1/routes` and `GET /api/v1/routes/<slug>` gain a `chapters` array on the published route. The array contains only published chapters. Each item is `slug`, `title`, `position`, and `checkpoints` as slugs in checkpoint position order. No `arrival_body`, `journal_body`, discovery, or image. The existing `requirements` and `checkpoints` arrays stay. A draft or retired chapter is omitted.
 
-`GET /api/v1/journeys/<id>/journal` is the Field Journal timeline for a journey the caller owns. It works for an active, paused, completed, or abandoned attempt. It lists only reached checkpoints that have a published story, in position order. It includes the short arrival and whether a journal entry and discoveries exist. It does not include `journal_body` or discovery bodies.
+`GET /api/v1/journeys/<id>/journal` is the Field Journal timeline for a journey the caller owns. It works for an active, paused, completed, or abandoned attempt. Restart does not copy acknowledgments onto the new attempt. The old attempt keeps its own timeline. The list contains only reached checkpoints that have a published story, in position order. It includes the short arrival and whether a journal entry and discoveries exist. It does not include `journal_body` or discovery bodies. A reached checkpoint whose story is draft or retired is omitted.
 
 ```json
 {
@@ -415,7 +415,7 @@ A checkpoint is unlocked only when the caller's own journey totals meet every on
 }
 ```
 
-`GET /api/v1/journeys/<id>/journal/<checkpoint_slug>` returns the unlocked story. `journal` is null when the checkpoint has no journal pair. `discoveries` are published rows in position order. `media` lists published journal and discovery images only. The checkpoint scene image is not repeated here. Home already selected it. `alt_text` is always present on a media row. Attribution fields are null when the credit is missing.
+`GET /api/v1/journeys/<id>/journal/<checkpoint_slug>` returns the unlocked published story. `journal` is null when the checkpoint has no journal pair. `discoveries` are published rows in position order. `media` lists published journal and discovery images only. The checkpoint scene image is not repeated here. Home already selected it. Every returned media row has `alt_text`, `rights_basis`, and the attribution section 18.4 required before publication. `permission_note` is not returned. A missing file is omitted rather than returned with empty rights.
 
 ```json
 {
@@ -440,10 +440,11 @@ A checkpoint is unlocked only when the caller's own journey totals meet every on
       "role": "journal",
       "path": "/static/photos/gate-journal.jpg",
       "alt_text": "The gate from the path",
-      "author": null,
-      "license": null,
-      "license_url": null,
-      "source_url": null,
+      "rights_basis": "creative_commons",
+      "author": "Ada Lovelace",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0",
+      "source_url": "https://commons.wikimedia.org/wiki/File:Example.jpg",
       "position": 0
     }
   ],
@@ -451,13 +452,13 @@ A checkpoint is unlocked only when the caller's own journey totals meet every on
 }
 ```
 
-`POST /api/v1/journeys/<id>/journal/<checkpoint_slug>/acknowledgment` records that this attempt has seen the arrival. Cookie callers send the CSRF token. The body is empty. The response is the existing `acknowledged_at` when the row is already there. A second call does not change `progress_version`, metrics, or the expedition feed. A checkpoint this journey has not reached is 404 and writes nothing.
+`POST /api/v1/journeys/<id>/journal/<checkpoint_slug>/acknowledgment` records that this attempt has seen the arrival. The row is unique to this journey id and checkpoint. A restarted attempt is a different journey and does not see this row. Cookie callers send the CSRF token. The body is empty. The response is the existing `acknowledged_at` when the row is already there. A second call does not change `progress_version`, metrics, journey status, or the expedition feed. A checkpoint this journey has not reached, or a story that is not published, is 404 and writes nothing.
 
 ```json
 {"journey_id": 10, "checkpoint_slug": "gate", "acknowledged_at": "2026-06-01T15:04:00+00:00"}
 ```
 
-`POST /api/v1/activities` and `PATCH /api/v1/activities/<id>` add `arrivals` for checkpoints that write newly unlocked on the caller's active journey. One activity that crosses two checkpoints returns both, in position order. The objects are the short reveal only. `journal_body` and discoveries are not included. The client loads those from the journal detail route. An ordinary edit that unlocks nothing, and every delete, returns `"arrivals": []`. This list does not create `expedition_updates`. The feed rule in `docs/architecture.md` section 16.4 stays as it is.
+`POST /api/v1/activities` and `PATCH /api/v1/activities/<id>` add `arrivals` for checkpoints that write newly unlocked. A create uses the active journey. An update uses the journey that activity already credits, which may be paused or abandoned when the edit does not complete it. One activity that crosses two checkpoints returns both, in position order, for whichever metrics that route requires. The objects are the short reveal only. `journal_body` and discoveries are not included. The client loads those from the journal detail route. An edit that unlocks nothing, a 409 `resume_required` rejection, and every delete return `"arrivals": []` and write no acknowledgment. This list does not create `expedition_updates`. The feed rule in `docs/architecture.md` section 16.4 stays as it is.
 
 ```json
 {
@@ -474,7 +475,7 @@ A checkpoint is unlocked only when the caller's own journey totals meet every on
 }
 ```
 
-`GET /api/v1/home` may later add `pending_arrivals` on the active journey: `checkpoint_slug`, `chapter_slug`, and `arrival_title` for reached checkpoints that this attempt has not acknowledged. It does not add `arrival_body`, `journal_body`, discoveries, or extra images. Paused and finished journeys do not put those titles on the home scene. That field is not in the implemented home response.
+`GET /api/v1/home` may later add `pending_arrivals` on the active journey: `checkpoint_slug`, `chapter_slug`, and `arrival_title` for reached checkpoints that this attempt has not acknowledged. It does not add `arrival_body`, `journal_body`, discoveries, or extra images, and it does not change scene selection. Paused and finished journeys do not put those titles on the home scene. That field is not in the implemented home response. The implemented scene may still carry a null credit when `photo_credits.json` has no entry. A later scene row read from `route_media` is a published row, so its credit already meets section 18.4.
 
 ## What the Expo client needs first
 
