@@ -379,15 +379,17 @@ A final leaderboard returns the snapshotted amounts and `final_rank`. It does no
 
 An activity may send `elevation_ft`, `distance_mi`, or both. Omit a metric that was not measured. Do not send zero to mean "unknown." Zero is a measured zero and does not by itself earn credit. A negative is rejected. An update may change either metric or both. Omitted progress fields stay as they are. The preview lists, for each required metric, the current total, the remaining amount, the proposed credit, and the resulting total. The token covers that whole result. A distance-only body is valid. An elevation-only body is valid.
 
-## Proposed narrative contract
+## Narrative contract
 
-Not implemented. These shapes are specified so a later change can add them without inventing a second progress model. Existing routes keep their current responses until that change. `docs/architecture.md` section 18 is the domain rule. `docs/dynamic-home.md` remains the scene rule. Amounts stay out of these payloads. Story text does not award credit.
+Published chapters, the field journal, and arrival acknowledgments are implemented. Activity `arrivals` and home `pending_arrivals` below are still proposed. `docs/architecture.md` section 18 is the domain rule. `docs/dynamic-home.md` remains the scene rule. Amounts stay out of these payloads. Story text does not award credit.
 
 A checkpoint is unlocked only when the caller's own journey totals meet every one of its thresholds. That rule is the same for an elevation-only route, a distance-only route, and a combined route. Unreached arrivals, journal bodies, and discoveries are not returned. Another person's journey is 403 `forbidden`. An unreached checkpoint, a draft or retired story, and an unknown slug are 404 `not_found` with the same message. Anonymous callers can see published chapter structure on the route. They cannot see arrival text, journal text, or discoveries.
 
 `GET /api/v1/routes` and `GET /api/v1/routes/<slug>` gain a `chapters` array on the published route. The array contains only published chapters. Each item is `slug`, `title`, `position`, and `checkpoints` as slugs in checkpoint position order. No `arrival_body`, `journal_body`, discovery, or image. The existing `requirements` and `checkpoints` arrays stay. A draft or retired chapter is omitted.
 
 `GET /api/v1/journeys/<id>/journal` is the Field Journal timeline for a journey the caller owns. It works for an active, paused, completed, or abandoned attempt. Restart does not copy acknowledgments onto the new attempt. The old attempt keeps its own timeline. The list contains only reached checkpoints that have a published story, in position order. It includes the short arrival and whether a journal entry and discoveries exist. It does not include `journal_body` or discovery bodies. A reached checkpoint whose story is draft or retired is omitted.
+
+A reached checkpoint with a published story and no published chapter stays in the timeline. A draft or retired chapter counts as no chapter. Consecutive checkpoints in that state form one chapter object whose `slug`, `title`, and `position` are null, placed where those checkpoints fall in route order. The story detail returns `chapter_slug: null` for the same checkpoint.
 
 ```json
 {
@@ -458,7 +460,7 @@ A checkpoint is unlocked only when the caller's own journey totals meet every on
 {"journey_id": 10, "checkpoint_slug": "gate", "acknowledged_at": "2026-06-01T15:04:00+00:00"}
 ```
 
-`POST /api/v1/activities` and `PATCH /api/v1/activities/<id>` add `arrivals` for checkpoints that write newly unlocked. A create uses the active journey. An update uses the journey that activity already credits, which may be paused or abandoned when the edit does not complete it. One activity that crosses two checkpoints returns both, in position order, for whichever metrics that route requires. The objects are the short reveal only. `journal_body` and discoveries are not included. The client loads those from the journal detail route. An edit that unlocks nothing, a 409 `resume_required` rejection, and every delete return `"arrivals": []` and write no acknowledgment. This list does not create `expedition_updates`. The feed rule in `docs/architecture.md` section 16.4 stays as it is.
+Not implemented. `POST /api/v1/activities` and `PATCH /api/v1/activities/<id>` add `arrivals` for checkpoints that write newly unlocked. A create uses the active journey. An update uses the journey that activity already credits, which may be paused or abandoned when the edit does not complete it. One activity that crosses two checkpoints returns both, in position order, for whichever metrics that route requires. The objects are the short reveal only. `journal_body` and discoveries are not included. The client loads those from the journal detail route. An edit that unlocks nothing, a 409 `resume_required` rejection, and every delete return `"arrivals": []` and write no acknowledgment. This list does not create `expedition_updates`. The feed rule in `docs/architecture.md` section 16.4 stays as it is.
 
 ```json
 {
@@ -483,4 +485,4 @@ A checkpoint is unlocked only when the caller's own journey totals meet every on
 2. Send `Authorization: Bearer` on later requests. Native clients do not need CSRF. A browser client that uses the cookie must send `X-CSRF-Token`.
 3. Treat 409 `restart_required` and `confirmation_required` as instructions to show a confirmation step, then call restart or resubmit with the new token. Do not retry a stale summit token.
 4. Use `GET /api/v1/home` for the first screen. The implemented payload reports elevation in feet. The target payload in the metric section reports one object per required metric, in feet or miles, and does not add those objects together. Activity elevation is feet. The target distance field is miles.
-5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API. Achievement and trophy-case routes are not in this contract. The domain is `docs/architecture.md` section 17. Narrative routes in the next section are not in the implemented client.
+5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API. Achievement and trophy-case routes are not in this contract. The domain is `docs/architecture.md` section 17. Chapter, journal, and acknowledgment routes below are implemented. Activity arrivals and home pending arrivals are not.

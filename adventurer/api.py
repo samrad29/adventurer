@@ -72,6 +72,13 @@ from .journeys import (
     start_journey,
     switch_journey,
 )
+from .narrative import (
+    NarrativeError,
+    acknowledge_arrival,
+    chapters_for_routes,
+    journal_story,
+    journal_timeline,
+)
 from .services import AccountError, authenticate, create_adventurer, current_viewer, get_adventurer
 from .tokens import issue_token, revoke_all, revoke_token
 
@@ -100,6 +107,7 @@ def init_app(app) -> None:
     app.register_error_handler(JourneyError, _render_journey)
     app.register_error_handler(ActivityError, _render_service)
     app.register_error_handler(ExpeditionError, _render_service)
+    app.register_error_handler(NarrativeError, _render_service)
 
 
 @bp.get("/session")
@@ -197,6 +205,21 @@ def journeys_get(journey_id: int):
     return _ok(journey=_with_metrics([get_journey(_actor(), journey_id)])[0])
 
 
+@bp.get("/journeys/<int:journey_id>/journal")
+def journeys_journal(journey_id: int):
+    return _ok(**journal_timeline(_actor(), journey_id))
+
+
+@bp.get("/journeys/<int:journey_id>/journal/<checkpoint_slug>")
+def journeys_journal_story(journey_id: int, checkpoint_slug: str):
+    return _ok(**journal_story(_actor(), journey_id, checkpoint_slug))
+
+
+@bp.post("/journeys/<int:journey_id>/journal/<checkpoint_slug>/acknowledgment")
+def journeys_journal_acknowledge(journey_id: int, checkpoint_slug: str):
+    return _ok(**acknowledge_arrival(_actor(), journey_id, checkpoint_slug))
+
+
 @bp.post("/journeys/start")
 def journeys_start():
     return _ok(journey=start_journey(_actor(), _route_id(_object()))), 201
@@ -283,7 +306,9 @@ def routes_list():
         ORDER BY slug
         """
     ).fetchall()
-    requirements = _requirements_by_route(database, [row["id"] for row in rows])
+    route_ids = [row["id"] for row in rows]
+    requirements = _requirements_by_route(database, route_ids)
+    chapters = chapters_for_routes(database, route_ids)
     database.rollback()
     return _ok(
         routes=[
@@ -293,6 +318,7 @@ def routes_list():
                 "region": row["region"],
                 "summary": row["summary"],
                 "requirements": requirements.get(row["id"], []),
+                "chapters": chapters.get(row["id"], []),
             }
             for row in rows
         ]
@@ -347,6 +373,7 @@ def routes_get(slug: str):
     ).fetchall()
     requirements = _requirements_by_route(database, [route["id"]]).get(route["id"], [])
     checkpoint_bodies = _checkpoint_catalog(database, checkpoints)
+    chapters = chapters_for_routes(database, [route["id"]]).get(route["id"], [])
     database.rollback()
     journeys = []
     if g.get("actor_id"):
@@ -358,6 +385,7 @@ def routes_get(slug: str):
         summary=route["summary"],
         requirements=requirements,
         checkpoints=checkpoint_bodies,
+        chapters=chapters,
         expeditions=[dict(row) for row in expeditions],
         journeys=journeys,
     )
