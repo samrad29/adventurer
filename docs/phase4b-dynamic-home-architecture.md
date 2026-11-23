@@ -41,6 +41,9 @@ Scene function
 Activity service
   Later work writes activities and journey credits. After commit, the next home read sees the new metric totals and, only when a checkpoint's thresholds are all met, a different scene. The activity transaction does not resolve a photograph.
 
+Trophy case
+  A personal collection of earned achievements, specified in Phase 4A section 17. Home does not read it and does not select a scene from it. A leaderboard place and a participation are not awards on this payload.
+
 
 3. Dynamic scene-selection rules
 
@@ -630,7 +633,7 @@ Open questions
 
 Deferred
 
-  More than one photograph per checkpoint, user photographs, a CMS, and a general asset library.
+  More than one photograph per checkpoint, user photographs, a CMS, and a general asset library. Collectible files, when they exist, use that later asset decision. Phase 4A section 17 defines them as achievement presentation. They are not home scene files.
   Where organization logo and expedition image bytes are stored. The nullable refs remain. Journey and activity services do not depend on that choice. It is made when branding and image upload or display are implemented.
   Image paths that do not match the slug convention, until a route actually needs the optional ref columns.
   Screen layout, navigation, and interaction, except for the rule that home shows one place and one indicator per required metric. The payload names the place and the file. It does not describe how they are drawn.

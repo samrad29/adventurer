@@ -4,6 +4,8 @@ This replaces the earlier Phase 4A draft. There is no live expedition or journey
 
 Section 16 revises progress. A route requires one or more metrics, and a journey completes only when every required metric has reached its own target. That section supersedes every elevation-only progress, checkpoint, confirmation, feed, and leaderboard rule in this document. It does not change ownership, lock order, one-activity-one-journey, restart, leave flags, privacy removal, or authentication.
 
+Section 17 adds achievements, collectibles, and a personal trophy case. It does not change journeys, activity credits, expedition participation, leaderboards, the privacy-removal deletes in section 5.9, lock order, or authentication.
+
 
 1. Executive summary
 
@@ -199,6 +201,7 @@ Ownership boundaries:
   An organization owns its memberships and its organization expeditions.
   A private expedition is owned by owner_user_id until the owner-release path clears it.
   A journey and an activity are owned by the user.
+  An earned achievement is owned by the user. Section 17. The expedition does not own it, and it does not require a participation row to remain.
   A final result row is owned by the expedition. The user may delete their own row through privacy removal or account deletion.
   A bearer token is owned by the user. Logout revokes one token. Revoke-all revokes every token for that user.
 
@@ -408,6 +411,7 @@ For everyone else, one transaction:
   Delete their feed rows and result rows for this expedition.
   Delete the participation. An organization slot held by that row is free.
   Do not delete activities, journey credits, or journeys.
+  Do not delete earned achievements. Section 17 keeps those with the person. They are not a substitute for the deleted feed or result, and they do not put the person back on the roster or the board.
   Do not insert a substitute anonymous total.
 
 Rejoin inserts a new participation because the old row is gone. Journey activation runs. The same transaction finds this user and expedition in expedition_privacy_removals, deletes that row, and sets display_credits_after to the participation's insert time. The live board sums only credits created at or after that time, so the removed total does not reappear. Home and the personal journey still show the full journey. A later restart still resets active expeditions, including this new participation. retained_read_access and final_standings_eligible do not survive, because the row that held them was deleted. New credits after the rejoin count normally.
@@ -426,7 +430,7 @@ Refuse when the user owns a private expedition that still has another active par
 
 When those refusals do not apply, a short transaction sets deletion_state to deleting, revokes every API token, and commits. Cookie and bearer authentication both fail from then on. That commit is the point of no return.
 
-Later transactions are idempotent deletes by user id. They may be retried by the same request and by the lazy pass that also completes due expeditions. Each batch sets adventurer.account_deletion and locks in the global order, then deletes feed rows, result rows, participations, journey credits, verification events, activities, journeys, invitations where they are the inviter or the invitee, memberships, and tokens. expedition_privacy_removals for that user disappear when the user row is deleted, because the foreign key cascades. Share links they created are deleted, so the hash stops matching. invited_by_user_id is ON DELETE RESTRICT, so those invitation rows are removed rather than left in place.
+Later transactions are idempotent deletes by user id. They may be retried by the same request and by the lazy pass that also completes due expeditions. Each batch sets adventurer.account_deletion and locks in the global order, then deletes feed rows, result rows, participations, journey credits, verification events, activities, journeys, invitations where they are the inviter or the invitee, memberships, and tokens. When earned-achievement rows exist, that batch deletes them too. Their limited-edition sequence numbers are not reassigned. Section 17 states that rule. expedition_privacy_removals for that user disappear when the user row is deleted, because the foreign key cascades. Share links they created are deleted, so the hash stops matching. invited_by_user_id is ON DELETE RESTRICT, so those invitation rows are removed rather than left in place.
 
 For a private expedition they still own, with no other active participant, the batch uses the owner-release path from 5.9 before the user row can go. The owner column is null, or the expedition is gone. It does not keep a foreign key to the deleted user.
 
@@ -608,6 +612,8 @@ Account
     409 ownership_transfer_required and a still-working account, when a refusal applies
     after the deleting commit, a repeat call continues the batches and does not log anyone in
 
+Achievement and trophy-case routes are not in this contract. Section 17 is the domain. This section does not add them.
+
 Browser /join stops calling join_public for Global Everest. Invitation signup already skips that enroll. Login and logout forms stay. Cookie CSRF stays.
 
 CORS is added only if the Expo web build calls Flask from a browser. Native iOS and Android calls do not need it.
@@ -617,7 +623,7 @@ Login and register, and repeated bad bearer presentations, share a process-local
 
 8. Concurrency
 
-The lock order in section 5 is the only order. Close, credit, join, leave, switch, restart, privacy removal, account deletion, organization-expedition creation, and organization suspension all use it. Creation and suspension take the same organization-row lock after their acting user lock. The transaction that locks the organization first decides whether the new expedition is closed by suspension or never inserted.
+The lock order in section 5 is the only order. Close, credit, join, leave, switch, restart, privacy removal, account deletion, organization-expedition creation, and organization suspension all use it. Limited-edition achievement numbers, when that issuance exists, lock their own edition only after every lock this order already requires. Section 17 states that. They do not move ahead of users, expeditions, journeys, participations, or activities, and they do not lock journey_metric_totals. Creation and suspension take the same organization-row lock after their acting user lock. The transaction that locks the organization first decides whether the new expedition is closed by suspension or never inserted.
 
 Deadlock is avoided because a later resource is never locked before an earlier one, and ids within one resource are always sorted. PostgreSQL waits instead of cycling.
 
@@ -802,7 +808,7 @@ Organization profiles supply the branded place a Community tab can open: name, c
 
 13. Deferred
 
-Competitive seasons, official rankings, provider imports, automated validation, appeals, moderation, comments, chat, direct messages, social posts, authored announcements, automated milestone announcements, and email invitations. competition_seasons and the verification-event table stay. No competitive feature is built on them. Manual activities continue to record a single not_required verification event.
+Competitive seasons, official rankings, provider imports, automated validation, appeals, moderation, comments, chat, direct messages, social posts, authored announcements, automated milestone announcements, and email invitations. competition_seasons and the verification-event table stay. No competitive feature is built on them. Manual activities continue to record a single not_required verification event. Personal achievements, collectibles, and trophy cases are section 17. They are not a competitive season, an official ranking, or an automated announcement.
 
 
 14. Consistency audit
@@ -952,3 +958,133 @@ No migration in this revision. The sequence below is the order that avoids a sec
 3. Tests. Replace assertions that a journey has one elevation total. Keep the elevation-only cases as one configuration. Add a distance-only route and a combined route, including one metric finishing first, the capped credit example, a stale multi-metric token, a distance edit that completes, and a completed journey that refuses both metrics.
 
 4. API. The endpoints in section 7 and docs/api-v1.md gain the metrics arrays. Authentication, CSRF, and error codes stay. Mobile screens wait until those payloads exist. They do not build against total_ft, remaining_ft, percent, or summit_ft.
+
+
+17. Achievements, Collectibles & Trophy Cases
+
+This section is the award contract. It adds no tables, services, endpoints, or issuance. Journey progress, activity credits, expedition standings, and leaderboard rank stay what sections 3, 5, and 16 already define. An achievement is not a second progress total and not a standing. Current journey, activity, and expedition work continues without waiting on this domain.
+
+17.1 Definitions and earned awards
+
+An achievement definition describes an award a participant can earn. An earned achievement is one issuance of a definition to one user. The two records are different. A later change to the definition leaves awards already issued as they were.
+
+An earned achievement records the user, the definition, and the time it was issued. It records the route, expedition, activity, organization, or other context that applies to that issuance. A limited edition also records the sequence number and the edition size. It records the issuance source or the authorized grant. It keeps enough of the awarded name, description, and presentation to render the same award after the definition or the expedition changes.
+
+A definition carries:
+
+  A stable identifier.
+  A name and a description.
+  A scope, from 17.2.
+  Eligibility criteria that a later implementation can evaluate one source at a time. This is not a general-purpose rules engine. The sources are the ones in 17.5. A definition does not embed a programmable rule language. A later source adds its own check.
+  Availability: active, inactive, or retired. Active definitions may be issued. Inactive definitions are withheld. Retired definitions accept no further issuance. All three leave awards already issued in place.
+  Optional collectible presentation, from 17.3.
+  Optional limited-edition issuance policy, from 17.4. That policy is not a scope.
+  Creation and modification metadata for the definition itself: who changed it and when. That metadata is not the earned timestamp.
+
+17.2 Scopes
+
+Scope says what the accomplishment is about. The scopes named here are:
+
+  Global. An accomplishment across the platform or across one person's own history. It does not require an expedition.
+  Route. An accomplishment tied to one curated route.
+  Expedition. An accomplishment tied to one expedition.
+  Community. Participation or contribution tied to one community or organization.
+
+A later scope is another named value on the same model. It is not a second award system. Limited-edition status is not a scope. A limited edition is an issuance policy that may attach to a definition of any scope.
+
+17.3 Collectibles
+
+A collectible is how one achievement is shown or rewarded. One earned record may have a digital badge or medal in the trophy case, a shareable graphic, and an associated physical collectible. Those are presentations of one accomplishment. Issuance does not create a separate earned row for each format.
+
+Rendering, file storage, and asset management are not part of this revision. Collectible bytes wait with the unresolved organization and expedition image storage in section 15. Phase 4B already defers a general asset library. This section does not create one.
+
+17.4 Limited editions
+
+A definition may carry one optional limited-edition policy. The policy fixes an edition size. Founding Finisher with a size of 25 is the example. Each issued award receives one sequence number from 1 through 25, and a trophy case may show 07 / 25.
+
+  The edition size stays fixed once issuance of that edition has begun. An ordinary definition edit does not change that size and does not renumber awards already issued.
+  Sequence numbers are unique within that edition.
+  Allocation is concurrency-safe. Two qualifying completions at once receive different numbers, and the edition does not pass its size.
+  The number and the earned record commit in one transaction. A failed transaction leaves no earned row without its number and consumes no edition slot.
+  A number is taken only when the award is issued. Eligibility does not reserve a number.
+  Issued numbers stay consumed. If a later revocation removes or marks an award, the number is not given to anyone else. A permanent gap is the rule. Revocation, if it is built, is an explicit audited action. It is not a silent delete, and this revision does not build it.
+  A limited edition is not by itself a verified accomplishment. Verification, when a definition needs it, is a separate future policy. This section does not assume one.
+
+There is no inventory, trade, resale, or marketplace.
+
+17.5 Issuance
+
+Five steps stay separate. None of them is inferred from the others, and they do not share one status.
+
+  1. Eligibility. The person meets the definition. Nothing has been written.
+  2. Issuance. An earned achievement row exists.
+  3. Collectible presentation. How that row is drawn.
+  4. Physical reward claim. The person asked for a physical item, when one is offered.
+  5. Physical reward fulfillment. Shipment or delivery of that item.
+
+Issuance is durable, idempotent, transactional, and traceable.
+
+  The earned row remains after the expedition ends, after the person leaves, after they lose access to that expedition's active experience, after an organization membership changes, and after the expedition is archived. It does not depend on an active participation row.
+  The same user, the same definition, and the same qualifying event produce one award, unless that definition explicitly allows repeats. A repeatable definition says so.
+  The earned row, the historical context it keeps, and any edition number commit together.
+  The row records its source: the qualifying event, or an authorized grant.
+
+Issuance sources this domain can accept later are route completion, expedition completion, a global personal milestone, a community award, and an authorized administrative grant. None of those issuers is implemented here.
+
+Expedition completion may be the reason an award is issued. The earned row still belongs to the user. Issuance does not change journey progress, activity credits, participation, live standings, or final_rank. It does not write expedition_updates. It does not take the journey credit lock and it does not lock journey_metric_totals. When a later completion transaction also issues an award, it writes that award after the credit writes section 5 already requires. An edition allocation locks only its own edition, and only after any user, expedition, journey, participation, and activity locks that transaction already holds.
+
+17.6 Physical rewards
+
+A physical reward is optional. It is associated with an achievement or with that achievement's collectible. Earning the achievement does not claim the item and does not deliver it. Reward eligibility may be narrower than earning, so a person can hold the award and still be ineligible for the object. Claim and fulfillment are later records, including shipment or delivery status when that work exists.
+
+Merchandise inventory, orders, payments, and shipping stay outside this domain. The earned achievement does not wait on them.
+
+17.7 Trophy case
+
+The trophy case is the user's collection of earned achievements. It presents those rows. It is not a store of route progress or expedition standings.
+
+It holds awards of every scope and stays available when the person has no active participation. A later interface may order the case by the time each award was earned, or by another presentation order. That order is not a rank and it is not final_rank. Limited-edition numbers and collectible presentation come from the earned record.
+
+Current journey progress, a live or final place, and an active participation are not earned achievements. Retained read access after leaving remains the participation flag in section 4. A departed finisher may keep that read access and may also hold an earned award. Losing read access leaves the award in place. Keeping read access does not create one.
+
+17.8 History
+
+Retiring a definition stops future issuance and leaves earned rows in place.
+
+An ordinary edit of a definition leaves the name, description, presentation, edition size, and sequence numbers of awards already issued unchanged. The earned row keeps enough of what was awarded to render it after the definition or the expedition changes. The schema phase chooses how that history is stored. This section requires the outcome.
+
+Administrative correction or revocation, if added later, is its own audited action. It is not an edit of the definition and it is not a silent delete.
+
+17.9 Privacy and deletion
+
+Ordinary leave leaves earned achievements in place. Expedition completion and archival leave them in place. An organization membership change leaves them in place.
+
+Expedition privacy removal remains section 5.9. It still deletes that person's feed rows, result rows, and participation for that expedition. It still leaves activities, journey credits, and journeys in place, and it still leaves every other person's final_rank as it was. It also leaves earned achievements in place. The trophy case is not a way to rebuild the removed board total, feed, or result, and it does not return the person to that expedition's roster or leaderboard. A shareable graphic of an expedition award is not a public stand-in for the deleted result. After the removal, the owner's trophy case may still show the award, using only the expedition or route context section 5.9 still permits. The removal does not restore display_credits_after, retained_read_access, or final_standings_eligible.
+
+Account deletion remains section 5.10. When earned achievements exist, the deleting batch removes them with the rest of that user's personal records. Sequence numbers already issued stay consumed. Other people's awards, journeys, and result rows stay. Routes, expeditions, and organizations stay.
+
+A later request to erase one earned record is its own audited delete. It does not recycle the sequence number. Leaving an expedition does not perform that delete.
+
+17.10 Boundaries
+
+  An achievement is separate from a route journey.
+  An achievement is separate from an activity and from a journey credit.
+  An achievement is separate from a participation, a live standing, and a final snapshot.
+  Expedition completion may be the occasion for issuance. The earned record belongs to the user.
+  Retained read access stays the leave flag. The trophy case is the earned rows.
+  Issuance leaves journey progress, activity credits, expedition standings, and leaderboard rank unchanged.
+  A global or community award does not require an expedition.
+  A field-journal entry stays an activity. An achievement is not a journal row.
+  competition_seasons, official rankings, and automated milestone announcements stay deferred in section 13.
+
+17.11 Implementation sequence
+
+This sequence does not reorder or block the journey, activity, and expedition work already underway.
+
+  1. Architecture foundation. This section.
+  2. Database schema and a transactional issuance foundation. Definitions are not seeded in that step unless a later product decision names them.
+  3. A basic personal trophy case.
+  4. Route-specific collectible presentation and shareable achievement cards.
+  5. Limited-edition numbering, then physical reward claim and fulfillment.
+
+No migration, service, API, or interface is part of the current change.
