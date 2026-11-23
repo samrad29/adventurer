@@ -20,13 +20,14 @@ from adventurer.activities import (
     _portion,
     create_activity,
     delete_activity,
+    get_activity,
     list_activities,
     preview_activity,
     preview_activity_update,
     update_activity,
 )
 from adventurer.db import DB, get_db
-from adventurer.journeys import abandon_journey, start_journey, switch_journey
+from adventurer.journeys import abandon_journey, restart_journey, start_journey, switch_journey
 from adventurer.metrics import parse_measurement
 from adventurer.services import create_adventurer
 
@@ -889,6 +890,322 @@ def test_mixed_timezone_times_are_rejected(app):
                 user_id,
                 _fields(elevation="1", started_at=aware, ended_at=naive),
             )
+
+
+def test_starting_a_journey_does_not_credit_an_older_activity(app):
+    with app.app_context():
+        user_id = _user("Before Start")
+        route_id = _route(
+            "life-before",
+            {"elevation": _feet("1000")},
+            [("summit", 0, {"elevation": _feet("1000")})],
+        )
+        saved = create_activity(user_id, _fields(elevation="125"))
+        journey = start_journey(user_id, route_id)
+        assert saved["credits"] == []
+        assert _assignment_count(saved["activity"]["id"]) == 0
+        assert _totals(journey["id"]) == {}
+        assert _journey_row(journey["id"])["progress_version"] == 1
+        assert get_activity(user_id, saved["activity"]["id"])["credit"] is None
+
+
+def test_deleting_a_paused_or_abandoned_credit_leaves_that_status(app):
+    with app.app_context():
+        user_id = _user("Pause Delete")
+        paused_route = _route(
+            "life-pause-delete",
+            {"elevation": _feet("1000")},
+            [("summit", 0, {"elevation": _feet("1000")})],
+        )
+        other_route = _route(
+            "life-pause-other",
+            {"elevation": _feet("1000")},
+            [("summit", 0, {"elevation": _feet("1000")})],
+        )
+        paused = start_journey(user_id, paused_route)
+        paused_activity = create_activity(user_id, _fields(elevation="300"))
+        switch_journey(user_id, other_route)
+        version = _journey_row(paused["id"])["progress_version"]
+        removed = delete_activity(user_id, paused_activity["activity"]["id"])
+        assert removed["journey"]["id"] == paused["id"]
+        assert removed["journey"]["status"] == "paused"
+        assert _totals(paused["id"]) == {}
+        assert _journey_row(paused["id"])["progress_version"] == version + 1
+        assert _journey_row(paused["id"])["status"] == "paused"
+
+        switch_journey(user_id, paused_route)
+        abandoned_activity = create_activity(user_id, _fields(elevation="120"))
+        abandoned = abandon_journey(user_id, paused_route)
+        version = _journey_row(abandoned["id"])["progress_version"]
+        removed = delete_activity(user_id, abandoned_activity["activity"]["id"])
+        assert removed["journey"]["id"] == abandoned["id"]
+        assert removed["journey"]["status"] == "abandoned"
+        assert _totals(abandoned["id"]) == {}
+        assert _journey_row(abandoned["id"])["progress_version"] == version + 1
+        assert _journey_row(abandoned["id"])["status"] == "abandoned"
+
+
+def test_a_paused_participation_receives_no_feed_row(app):
+    with app.app_context():
+        user_id = _user("Feed Split")
+        paused_route = _route(
+            "life-feed-paused",
+            {"elevation": _feet("2000")},
+            [("summit", 0, {"elevation": _feet("2000")})],
+        )
+        active_route = _route(
+            "life-feed-active",
+            {"elevation": _feet("2000")},
+            [
+                ("gate", 0, {"elevation": _feet("100")}),
+                ("summit", 1, {"elevation": _feet("2000")}),
+            ],
+        )
+        paused = start_journey(user_id, paused_route)
+        paused_expedition = _expedition("life-feed-paused-club", paused_route, user_id)
+        _participation(user_id, paused_expedition, paused_route, paused["id"])
+        switch_journey(user_id, active_route)
+        active = get_db().execute(
+            """
+            SELECT id FROM route_journeys
+            WHERE user_id = ? AND status = 'active'
+            """,
+            (user_id,),
+        ).fetchone()["id"]
+        active_expedition = _expedition("life-feed-active-club", active_route, user_id)
+        _participation(user_id, active_expedition, active_route, active)
+        saved = create_activity(user_id, _fields(elevation="150"))
+        rows = get_db().execute(
+            """
+            SELECT expedition_id, kind, checkpoint_name
+            FROM expedition_updates
+            WHERE user_id = ?
+            ORDER BY id
+            """,
+            (user_id,),
+        ).fetchall()
+        assert [row["expedition_id"] for row in rows] == [active_expedition, active_expedition]
+        assert rows[0]["kind"] == "activity_logged"
+        assert rows[1]["kind"] == "checkpoint_reached"
+        assert rows[1]["checkpoint_name"] == "gate"
+        assert _event_amounts(user_id, "activity_logged") == [{"elevation": _feet("150")}]
+        assert saved["journey"]["id"] == active
+        assert _journey_row(paused["id"])["status"] == "paused"
+        assert _totals(paused["id"]) == {}
+
+
+def test_a_feed_insert_failure_rolls_back_the_activity(app, monkeypatch):
+    with app.app_context():
+        user_id = _user("Feed Fail")
+        route_id = _route(
+            "life-feed-fail",
+            {"elevation": _feet("1000")},
+            [("summit", 0, {"elevation": _feet("1000")})],
+        )
+        journey = start_journey(user_id, route_id)
+        expedition_id = _expedition("life-feed-fail-club", route_id, user_id)
+        _participation(user_id, expedition_id, route_id, journey["id"])
+        database = get_db()
+        original = database.execute
+
+        def fail_feed(sql, params=()):
+            if "INSERT INTO expedition_updates" in sql:
+                raise RuntimeError("feed failed")
+            return original(sql, params)
+
+        monkeypatch.setattr(database, "execute", fail_feed)
+        with pytest.raises(RuntimeError, match="feed failed"):
+            create_activity(user_id, _fields(elevation="100"))
+        monkeypatch.undo()
+        assert _count("activities") == 0
+        assert _count("journey_credits") == 0
+        assert _count("expedition_updates") == 0
+        assert _journey_row(journey["id"])["progress_version"] == 1
+        saved = create_activity(user_id, _fields(elevation="100"))
+        assert _credit_map(saved) == {"elevation": _feet("100")}
+        assert _event_kinds(user_id) == ["activity_logged"]
+
+
+def test_personal_history_is_owner_scoped(app):
+    with app.app_context():
+        owner = _user("Owner Logger")
+        other = _user("Other Logger")
+        route_id = _route(
+            "life-owner",
+            {"elevation": _feet("1000")},
+            [("summit", 0, {"elevation": _feet("1000")})],
+        )
+        journey = start_journey(owner, route_id)
+        older = create_activity(
+            owner,
+            _fields(elevation="100", happened_on=date(2024, 6, 1), note="older"),
+        )
+        newer = create_activity(
+            owner,
+            _fields(elevation="50", happened_on=date(2024, 6, 3), note="newer"),
+        )
+        same_day = create_activity(
+            owner,
+            _fields(elevation="25", happened_on=date(2024, 6, 3), note="later"),
+        )
+        create_activity(other, _fields(elevation="70", note="private"))
+        history = list_activities(owner)
+        assert [row["note"] for row in history] == ["later", "newer", "older"]
+        assert history[0]["elevation_gain_m"] == _feet("25")
+        assert history[2]["credit"]["metrics"] == [
+            {"metric": "elevation", "credited_m": _feet("100")}
+        ]
+        assert history[2]["credit"]["journey_id"] == journey["id"]
+        assert history[2]["credit"]["journey_status"] == "active"
+        assert [row["note"] for row in list_activities(other)] == ["private"]
+        assert all(row["id"] != older["activity"]["id"] for row in list_activities(other))
+        for call in (
+            lambda: get_activity(other, newer["activity"]["id"]),
+            lambda: preview_activity_update(other, newer["activity"]["id"], {"note": "no"}),
+            lambda: update_activity(other, newer["activity"]["id"], {"note": "no"}),
+            lambda: delete_activity(other, newer["activity"]["id"]),
+        ):
+            with pytest.raises(ActivityError) as caught:
+                call()
+            assert caught.value.code == "forbidden"
+            assert caught.value.status == 403
+        assert get_activity(owner, newer["activity"]["id"])["note"] == "newer"
+        assert same_day["activity"]["id"] in {row["id"] for row in history}
+        other_preview = preview_activity(other, _fields(elevation="10"))
+        assert other_preview["journey"] is None
+        assert other_preview["saved_without_credit"] is True
+
+
+def test_a_deleting_account_cannot_write_activities(app):
+    with app.app_context():
+        user_id = _user("Deleting Logger")
+        route_id = _route(
+            "life-deleting",
+            {"elevation": _feet("1000")},
+            [("summit", 0, {"elevation": _feet("1000")})],
+        )
+        journey = start_journey(user_id, route_id)
+        saved = create_activity(user_id, _fields(elevation="100"))
+        get_db().execute(
+            "UPDATE users SET deletion_state = 'deleting' WHERE id = ?",
+            (user_id,),
+        )
+        get_db().commit()
+        for call in (
+            lambda: preview_activity(user_id, _fields(elevation="10")),
+            lambda: create_activity(user_id, _fields(elevation="10")),
+            lambda: update_activity(user_id, saved["activity"]["id"], {"note": "no"}),
+            lambda: delete_activity(user_id, saved["activity"]["id"]),
+        ):
+            with pytest.raises(ActivityError) as caught:
+                call()
+            assert caught.value.code == "forbidden"
+            assert caught.value.status == 403
+        assert _count("activities") == 1
+        assert _journey_row(journey["id"])["progress_version"] == 2
+        with pytest.raises(ActivityError) as caught:
+            create_activity(999_999, _fields(elevation="10"))
+        assert caught.value.code == "not_found"
+        assert caught.value.status == 404
+
+
+def test_an_activity_racing_a_switch_credits_the_journey_that_wins(app, monkeypatch):
+    with app.app_context():
+        user_id = _user("Race Switch")
+        original_route = _route(
+            "life-race-switch",
+            {"elevation": _feet("2000")},
+            [("summit", 0, {"elevation": _feet("2000")})],
+        )
+        next_route = _route(
+            "life-race-next",
+            {"elevation": _feet("2000")},
+            [("summit", 0, {"elevation": _feet("2000")})],
+        )
+        original = start_journey(user_id, original_route)
+        switched = _race_activity_against(
+            app,
+            monkeypatch,
+            lambda: switch_journey(user_id, next_route),
+            lambda: create_activity(user_id, _fields(elevation="100")),
+        )
+        assert "error" not in switched
+        assert switched["result"]["journey"]["id"] == switched["other"]["id"]
+        assert _credit_map(switched["result"]) == {"elevation": _feet("100")}
+        assert _totals(original["id"]) == {}
+        assert _journey_row(original["id"])["status"] == "paused"
+        assert _totals(switched["other"]["id"]) == {"elevation": _feet("100")}
+
+
+def test_an_activity_racing_a_restart_credits_the_new_attempt(app, monkeypatch):
+    with app.app_context():
+        user_id = _user("Race Restart")
+        route_id = _route(
+            "life-race-restart",
+            {"elevation": _feet("1000")},
+            [("summit", 0, {"elevation": _feet("1000")})],
+        )
+        original = start_journey(user_id, route_id)
+        raced = _race_activity_against(
+            app,
+            monkeypatch,
+            lambda: restart_journey(user_id, route_id),
+            lambda: create_activity(user_id, _fields(elevation="80")),
+        )
+        assert "error" not in raced
+        new_id = raced["other"]["journey"]["id"]
+        assert raced["result"]["journey"]["id"] == new_id
+        assert new_id != original["id"]
+        assert _credit_map(raced["result"]) == {"elevation": _feet("80")}
+        assert _totals(original["id"]) == {}
+        assert _journey_row(original["id"])["status"] == "abandoned"
+        assert _totals(new_id) == {"elevation": _feet("80")}
+
+
+def _race_activity_against(app, monkeypatch, other_write, activity_write) -> dict:
+    """Let the other write commit before the activity takes its user lock."""
+    main = get_db()
+    reached = threading.Event()
+    allow = threading.Event()
+    original_execute = DB.execute
+    seen = {"paused": False}
+
+    def wrapped(self, sql, params=()):
+        normalized = " ".join(sql.split()).lower()
+        if (
+            not seen["paused"]
+            and self is not main
+            and "for update" in normalized
+            and "from users" in normalized
+        ):
+            seen["paused"] = True
+            reached.set()
+            assert allow.wait(timeout=10)
+        return original_execute(self, sql, params)
+
+    monkeypatch.setattr(DB, "execute", wrapped)
+    holder: dict = {}
+
+    def run() -> None:
+        with app.app_context():
+            try:
+                holder["result"] = activity_write()
+            except Exception as exc:
+                holder["error"] = exc
+            finally:
+                get_db().close()
+
+    thread = threading.Thread(target=run)
+    thread.start()
+    try:
+        assert reached.wait(timeout=10)
+        holder["other"] = other_write()
+    finally:
+        allow.set()
+        thread.join(timeout=20)
+        monkeypatch.undo()
+    assert not thread.is_alive()
+    return holder
 
 
 def _fields(**extra) -> dict:
