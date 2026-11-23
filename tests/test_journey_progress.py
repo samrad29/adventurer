@@ -6,7 +6,7 @@ The database tests commit their own routes and credits, then read them back.
 
 from __future__ import annotations
 
-from decimal import Decimal
+from decimal import Decimal, DecimalException
 
 import pytest
 
@@ -33,17 +33,64 @@ def test_conversion_accepts_the_input_step_and_rejects_finer_values():
     assert parse_measurement("distance", "0") == Decimal("0")
     assert parse_measurement("elevation", "0.00") == Decimal("0")
     assert parse_measurement("distance", Decimal("0.001")) == Decimal("1.609344")
+    assert parse_measurement("elevation", 1) == Decimal("0.304800")
+    assert parse_measurement("elevation", "10.100") == Decimal("3.078480")
+    assert parse_measurement("distance", "+1.250") == Decimal("2011.680000")
+    assert parse_measurement("elevation", Decimal("0")) == Decimal("0")
 
     with pytest.raises(MetricError, match="negative"):
         parse_measurement("elevation", "-0.01")
+    with pytest.raises(MetricError, match="negative"):
+        parse_measurement("distance", "-0")
     with pytest.raises(MetricError, match="0.01 ft"):
         parse_measurement("elevation", "0.001")
     with pytest.raises(MetricError, match="0.001 mi"):
         parse_measurement("distance", "1.0001")
     with pytest.raises(MetricError, match="decimal"):
         parse_measurement("distance", 1.5)
+    with pytest.raises(MetricError, match="decimal"):
+        parse_measurement("elevation", True)
+    with pytest.raises(MetricError, match="decimal"):
+        parse_measurement("elevation", "nan")
+    with pytest.raises(MetricError, match="decimal"):
+        parse_measurement("distance", Decimal("Infinity"))
     with pytest.raises(MetricError, match="does not exist"):
         parse_measurement("steps", "1")
+
+
+def test_commas_are_accepted_only_as_thousands_groups():
+    assert parse_measurement("elevation", "1,000") == Decimal("304.800000")
+    assert parse_measurement("elevation", "1,234.50") == parse_measurement("elevation", "1234.50")
+    assert parse_measurement("distance", "1,000.125") == parse_measurement("distance", "1000.125")
+    assert parse_measurement("elevation", "32,808,398,950.13") == Decimal("9999999999.999624")
+
+    for malformed in ("1,2", "1,,000", "12,34", "1,000,", ",100", "1,000.2,5", "1,00"):
+        with pytest.raises(MetricError, match="groups of three"):
+            parse_measurement("elevation", malformed)
+        with pytest.raises(MetricError, match="groups of three"):
+            parse_measurement("distance", f" {malformed} ")
+
+
+def test_stored_meters_must_fit_numeric_16_6():
+    assert parse_measurement("elevation", "32808398950.13") == Decimal("9999999999.999624")
+    assert parse_measurement("distance", "6,213,711.922") == Decimal("9999999999.399168")
+
+    with pytest.raises(MetricError, match="range"):
+        parse_measurement("elevation", "32808398950.14")
+    with pytest.raises(MetricError, match="range"):
+        parse_measurement("distance", "6213711.923")
+    with pytest.raises(MetricError, match="range"):
+        parse_measurement("elevation", "32,808,398,950.14")
+
+
+def test_decimal_failures_raise_metric_error():
+    for raw in ("1e200", Decimal("1e200"), "1e1000000"):
+        with pytest.raises(MetricError) as caught:
+            parse_measurement("elevation", raw)
+        assert isinstance(caught.value.__cause__, DecimalException)
+    with pytest.raises(MetricError, match="0.01 ft") as caught:
+        parse_measurement("elevation", Decimal("10.101"))
+    assert caught.value.__cause__ is None
 
 
 def test_display_rounding_does_not_finish_a_short_metric_or_uncap_a_long_one():
