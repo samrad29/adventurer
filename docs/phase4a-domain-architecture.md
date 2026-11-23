@@ -201,7 +201,7 @@ Ownership boundaries:
   An organization owns its memberships and its organization expeditions.
   A private expedition is owned by owner_user_id until the owner-release path clears it.
   A journey and an activity are owned by the user.
-  An earned achievement is owned by the user. Section 17. The expedition does not own it, and it does not require a participation row to remain.
+  An earned achievement is owned by the user. Section 17. The expedition does not own it. It does not require a participation row, or the continued existence of the expedition, route, activity, or organization it mentions, to remain.
   A final result row is owned by the expedition. The user may delete their own row through privacy removal or account deletion.
   A bearer token is owned by the user. Logout revokes one token. Revoke-all revokes every token for that user.
 
@@ -403,7 +403,7 @@ If the caller is the owner and no other participation is active, the same transa
   Set the privacy-removal setting.
   Build the close snapshot from eligible departed finishers, excluding the owner.
   Delete the owner's feed rows, result rows, and participation.
-  If no participations and no result rows remain, delete the expedition's invitations and the expedition. The route remains.
+  If no participations and no result rows remain, delete the expedition's invitations and the expedition. The route remains. Earned achievements that named the expedition remain with their holders. Section 17. The expedition reference on those rows may clear. The historical award stays.
   If departed finishers' result rows remain, archive the expedition and set owner_user_id null. The archived-private check allows that. No owner column still names the removed person. Do not insert a privacy-removal row. The archived expedition cannot be rejoined.
 
 For everyone else, one transaction:
@@ -964,11 +964,17 @@ No migration in this revision. The sequence below is the order that avoids a sec
 
 This section is the award contract. It adds no tables, services, endpoints, or issuance. Journey progress, activity credits, expedition standings, and leaderboard rank stay what sections 3, 5, and 16 already define. An achievement is not a second progress total and not a standing. Current journey, activity, and expedition work continues without waiting on this domain.
 
-17.1 Definitions and earned awards
+17.1 Definitions, editions, and earned awards
 
-An achievement definition describes an award a participant can earn. An earned achievement is one issuance of a definition to one user. The two records are different. A later change to the definition leaves awards already issued as they were.
+Three records stay distinct.
 
-An earned achievement records the user, the definition, and the time it was issued. It records the route, expedition, activity, organization, or other context that applies to that issuance. A limited edition also records the sequence number and the edition size. It records the issuance source or the authorized grant. It keeps enough of the awarded name, description, and presentation to render the same award after the definition or the expedition changes.
+  An achievement definition describes the accomplishment and the award.
+  An achievement edition is one release of that definition. It has its own identity, its own edition size when the release is limited, and any availability or eligibility window that applies to that release. An unlimited achievement has no edition.
+  An earned achievement is the durable award issued to one user. It refers to the definition and, when the award came from an edition, to that edition and its sequence number.
+
+A later change to the definition leaves issued editions and earned awards as they were.
+
+An earned achievement records the user, the definition, and the time it was issued. When it came from an edition, it also stores that edition's identity, the sequence number, and the edition size as part of the historical award. It records the route, expedition, activity, organization, or other context that applies, both as a snapshot and as an optional reference. It records the issuance source or the authorized grant. It keeps enough of the awarded name, description, and presentation to render the same award after the definition, the edition, or a source record changes or disappears.
 
 A definition carries:
 
@@ -976,9 +982,9 @@ A definition carries:
   A name and a description.
   A scope, from 17.2.
   Eligibility criteria that a later implementation can evaluate one source at a time. This is not a general-purpose rules engine. The sources are the ones in 17.5. A definition does not embed a programmable rule language. A later source adds its own check.
-  Availability: active, inactive, or retired. Active definitions may be issued. Inactive definitions are withheld. Retired definitions accept no further issuance. All three leave awards already issued in place.
+  Availability: active, inactive, or retired. Active definitions may be issued. Inactive definitions are withheld. Retired definitions accept no further issuance, including no further editions. All three leave awards already issued in place.
   Optional collectible presentation, from 17.3.
-  Optional limited-edition issuance policy, from 17.4. That policy is not a scope.
+  An optional default for future editions, from 17.4. That default is not a scope, and it is not the rules of an edition already issued.
   Creation and modification metadata for the definition itself: who changed it and when. That metadata is not the earned timestamp.
 
 17.2 Scopes
@@ -990,7 +996,7 @@ Scope says what the accomplishment is about. The scopes named here are:
   Expedition. An accomplishment tied to one expedition.
   Community. Participation or contribution tied to one community or organization.
 
-A later scope is another named value on the same model. It is not a second award system. Limited-edition status is not a scope. A limited edition is an issuance policy that may attach to a definition of any scope.
+A later scope is another named value on the same model. It is not a second award system. Limited-edition status is not a scope. An edition, from 17.4, is one issuance cohort, and a definition of any scope may have editions.
 
 17.3 Collectibles
 
@@ -998,16 +1004,21 @@ A collectible is how one achievement is shown or rewarded. One earned record may
 
 Rendering, file storage, and asset management are not part of this revision. Collectible bytes wait with the unresolved organization and expedition image storage in section 15. Phase 4B already defers a general asset library. This section does not create one.
 
-17.4 Limited editions
+17.4 Editions
 
-A definition may carry one optional limited-edition policy. The policy fixes an edition size. Founding Finisher with a size of 25 is the example. Each issued award receives one sequence number from 1 through 25, and a trophy case may show 07 / 25.
+An unlimited achievement has no edition. A limited release is an achievement edition. The limit lives on that edition.
 
-  The edition size stays fixed once issuance of that edition has begun. An ordinary definition edit does not change that size and does not renumber awards already issued.
-  Sequence numbers are unique within that edition.
+The definition may state a default for editions that have not yet been issued, including whether a future release is limited and the size it would start with. Once issuance of an edition has begun, that edition's size, numbering, and window stay fixed. An ordinary edit of the definition changes the default for later editions only.
+
+The same definition can have more than one edition over time. Founding Finisher can have a 2026 edition of 25 and a separate 2027 edition of 50. Each edition has its own identity. Sequence numbers are unique inside that edition, so number 7 in the 2026 edition and number 7 in the 2027 edition are different awards. A trophy case may show 07 / 25 for the first and 07 / 50 for the second. More than one edition is part of the model. This revision does not build an edition-management product around it.
+
+  The edition size stays fixed once issuance of that edition has begun.
+  Sequence numbers are unique within the edition, not merely within the definition.
+  The earned record stores that edition's identity, its sequence number, and its edition size.
   Allocation is concurrency-safe. Two qualifying completions at once receive different numbers, and the edition does not pass its size.
   The number and the earned record commit in one transaction. A failed transaction leaves no earned row without its number and consumes no edition slot.
   A number is taken only when the award is issued. Eligibility does not reserve a number.
-  Issued numbers stay consumed. If a later revocation removes or marks an award, the number is not given to anyone else. A permanent gap is the rule. Revocation, if it is built, is an explicit audited action. It is not a silent delete, and this revision does not build it.
+  Issued numbers stay consumed. Privacy removal of a source record, account deletion, and an explicit audited revocation do not give the number to anyone else. A permanent gap is the rule. Revocation, if it is built, is an explicit audited action. It is not a silent delete, and this revision does not build it.
   A limited edition is not by itself a verified accomplishment. Verification, when a definition needs it, is a separate future policy. This section does not assume one.
 
 There is no inventory, trade, resale, or marketplace.
@@ -1025,8 +1036,8 @@ Five steps stay separate. None of them is inferred from the others, and they do 
 Issuance is durable, idempotent, transactional, and traceable.
 
   The earned row remains after the expedition ends, after the person leaves, after they lose access to that expedition's active experience, after an organization membership changes, and after the expedition is archived. It does not depend on an active participation row.
-  The same user, the same definition, and the same qualifying event produce one award, unless that definition explicitly allows repeats. A repeatable definition says so.
-  The earned row, the historical context it keeps, and any edition number commit together.
+  The same user, the same definition, the same edition when the award belongs to an edition, and the same qualifying event produce one award, unless that definition explicitly allows repeats. A repeatable definition says so. A later edition is a different cohort, so an award from an earlier edition does not fill it.
+  The earned row, the historical context it keeps, and any edition identity, sequence number, and edition size commit together.
   The row records its source: the qualifying event, or an authorized grant.
 
 Issuance sources this domain can accept later are route completion, expedition completion, a global personal milestone, a community award, and an authorized administrative grant. None of those issuers is implemented here.
@@ -1049,9 +1060,11 @@ Current journey progress, a live or final place, and an active participation are
 
 17.8 History
 
-Retiring a definition stops future issuance and leaves earned rows in place.
+Retiring a definition stops future issuance, including future editions, and leaves issued editions and earned rows in place.
 
-An ordinary edit of a definition leaves the name, description, presentation, edition size, and sequence numbers of awards already issued unchanged. The earned row keeps enough of what was awarded to render it after the definition or the expedition changes. The schema phase chooses how that history is stored. This section requires the outcome.
+An ordinary edit of a definition leaves issued editions unchanged, including their size and the sequence numbers already taken from them. The earned row keeps the historical context in 17.1. The schema phase chooses how that history is stored. This section requires the outcome.
+
+An edition's availability or eligibility window can close without retiring the definition. Closing that window stops further issuance from that edition and does not renumber the awards already taken from it.
 
 Administrative correction or revocation, if added later, is its own audited action. It is not an edit of the definition and it is not a silent delete.
 
@@ -1059,11 +1072,13 @@ Administrative correction or revocation, if added later, is its own audited acti
 
 Ordinary leave leaves earned achievements in place. Expedition completion and archival leave them in place. An organization membership change leaves them in place.
 
-Expedition privacy removal remains section 5.9. It still deletes that person's feed rows, result rows, and participation for that expedition. It still leaves activities, journey credits, and journeys in place, and it still leaves every other person's final_rank as it was. It also leaves earned achievements in place. The trophy case is not a way to rebuild the removed board total, feed, or result, and it does not return the person to that expedition's roster or leaderboard. A shareable graphic of an expedition award is not a public stand-in for the deleted result. After the removal, the owner's trophy case may still show the award, using only the expedition or route context section 5.9 still permits. The removal does not restore display_credits_after, retained_read_access, or final_standings_eligible.
+Expedition privacy removal remains section 5.9. It still deletes that person's feed rows, result rows, and participation for that expedition. It still leaves activities, journey credits, and journeys in place, and it still leaves every other person's final_rank as it was. It also leaves earned achievements in place. The owner-release path may delete the private expedition itself. That delete does not remove earned achievements that named it. The trophy case is not a way to rebuild the removed board total, feed, or result, and it does not return the person to that expedition's roster or leaderboard. A shareable graphic of an expedition award is not a public stand-in for the deleted result. After the removal, the owner's trophy case may still show the award from the snapshot on the earned row, using only the context section 5.9 still permits. The removal does not restore display_credits_after, retained_read_access, or final_standings_eligible.
 
-Account deletion remains section 5.10. When earned achievements exist, the deleting batch removes them with the rest of that user's personal records. Sequence numbers already issued stay consumed. Other people's awards, journeys, and result rows stay. Routes, expeditions, and organizations stay.
+An earned achievement does not depend on the continued existence of the expedition, route, activity, organization, or other contextual record it mentions. Those mentions are optional historical references. They are not ownership, and deleting the source does not cascade to the earned row. The reference may become null. The snapshot on the earned row still renders the award. Ownership stays with the user.
 
-A later request to erase one earned record is its own audited delete. It does not recycle the sequence number. Leaving an expedition does not perform that delete.
+Account deletion remains section 5.10. When earned achievements exist, the deleting batch removes them with the rest of that user's personal records. That deletion, and an explicit audited deletion of one earned record, are the exceptions that remove the award itself. Sequence numbers already issued stay consumed either way. Other people's awards, journeys, and result rows stay. Routes, expeditions, and organizations stay.
+
+A later request to erase one earned record is its own audited delete. It does not recycle the sequence number. Leaving an expedition, or deleting a source record, does not perform that delete.
 
 17.10 Boundaries
 
@@ -1085,6 +1100,6 @@ This sequence does not reorder or block the journey, activity, and expedition wo
   2. Database schema and a transactional issuance foundation. Definitions are not seeded in that step unless a later product decision names them.
   3. A basic personal trophy case.
   4. Route-specific collectible presentation and shareable achievement cards.
-  5. Limited-edition numbering, then physical reward claim and fulfillment.
+  5. Limited-edition numbering, including more than one edition of the same achievement, then physical reward claim and fulfillment. The numbering step does not require an edition-management product.
 
 No migration, service, API, or interface is part of the current change.
