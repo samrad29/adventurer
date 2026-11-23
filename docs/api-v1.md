@@ -1,6 +1,6 @@
 # API v1
 
-The mobile client calls these routes. The server-rendered HTML pages have been removed. Domain rules live in `adventurer/journeys.py`, `adventurer/activities.py`, and `adventurer/expeditions.py`. Handlers in `adventurer/api.py` only authenticate, validate the JSON body, and return what those services already decided.
+The mobile client calls these routes. The server-rendered HTML pages have been removed. Domain rules live in `docs/architecture.md` and in `adventurer/journeys.py`, `adventurer/activities.py`, and `adventurer/expeditions.py`. Home presentation lives in `docs/dynamic-home.md`. Handlers in `adventurer/api.py` only authenticate, validate the JSON body, and return what those services already decided. Endpoints and fields marked proposed are not implemented.
 
 ## Authentication
 
@@ -161,7 +161,7 @@ Another person's activity or journey returns 403 `forbidden`, which is the servi
 
 ## Home
 
-`GET /api/v1/home` is aggregation only. It does not resume, restart, accept an invitation, or complete a due expedition. Phase 4A says lazy completion runs before a home read. This API does not do that, because a home GET is not allowed to change domain state. Due organization expeditions still complete on the next join or expedition read.
+`GET /api/v1/home` is aggregation only. It does not resume, restart, accept an invitation, or complete a due expedition. `docs/architecture.md` says lazy completion runs before a home read. This API does not do that, because a home GET is not allowed to change domain state. Due organization expeditions still complete on the next join or expedition read. The implemented home payload does not include journal bodies, discoveries, or arrival acknowledgments.
 
 `journey` is the active journey, or null. A paused, completed, or abandoned attempt is never placed there. `focus` is `{journey_id, status: "active"}` when a journey is active, the full presentation of one finished attempt when nothing is active or paused, and null when the state is `ready` or `resume`. `state` is `ready`, `active`, `resume`, `completed`, or `abandoned`.
 
@@ -379,10 +379,107 @@ A final leaderboard returns the snapshotted amounts and `final_rank`. It does no
 
 An activity may send `elevation_ft`, `distance_mi`, or both. Omit a metric that was not measured. Do not send zero to mean "unknown." Zero is a measured zero and does not by itself earn credit. A negative is rejected. An update may change either metric or both. Omitted progress fields stay as they are. The preview lists, for each required metric, the current total, the remaining amount, the proposed credit, and the resulting total. The token covers that whole result. A distance-only body is valid. An elevation-only body is valid.
 
+## Proposed narrative contract
+
+Not implemented. These shapes are specified so a later change can add them without inventing a second progress model. Existing routes keep their current responses until that change. `docs/architecture.md` section 18 is the domain rule. `docs/dynamic-home.md` remains the scene rule. Amounts stay out of these payloads. Story text does not award credit.
+
+A checkpoint is unlocked only when the caller's own journey totals meet every one of its thresholds. Unreached arrivals, journal bodies, and discoveries are not returned. Another person's journey is 403 `forbidden`. An unreached checkpoint, a draft or retired story, and an unknown slug are 404 `not_found` with the same message. Anonymous callers can see published chapter structure on the route. They cannot see arrival text, journal text, or discoveries.
+
+`GET /api/v1/routes` and `GET /api/v1/routes/<slug>` gain a `chapters` array on the published route. Each item is `slug`, `title`, `position`, and `checkpoints` as slugs in checkpoint position order. No `arrival_body`, `journal_body`, or discovery list. The existing `requirements` and `checkpoints` arrays stay.
+
+`GET /api/v1/journeys/<id>/journal` is the Field Journal timeline for a journey the caller owns. It works for an active, paused, completed, or abandoned attempt. It lists only reached checkpoints that have a published story, in position order. It includes the short arrival and whether a journal entry and discoveries exist. It does not include `journal_body` or discovery bodies.
+
+```json
+{
+  "journey_id": 10,
+  "status": "active",
+  "chapters": [
+    {
+      "slug": "approach",
+      "title": "The approach",
+      "position": 0,
+      "entries": [
+        {
+          "checkpoint_slug": "gate",
+          "checkpoint_name": "Gate",
+          "position": 1,
+          "arrival_title": "The gate",
+          "arrival_body": "A short reveal.",
+          "has_journal": true,
+          "discovery_count": 2,
+          "acknowledged": false
+        }
+      ]
+    }
+  ]
+}
+```
+
+`GET /api/v1/journeys/<id>/journal/<checkpoint_slug>` returns the unlocked story. `journal` is null when the checkpoint has no journal pair. `discoveries` are published rows in position order. `media` lists published journal and discovery images only. The checkpoint scene image is not repeated here. Home already selected it. `alt_text` is always present on a media row. Attribution fields are null when the credit is missing.
+
+```json
+{
+  "journey_id": 10,
+  "checkpoint_slug": "gate",
+  "chapter_slug": "approach",
+  "arrival_title": "The gate",
+  "arrival_body": "A short reveal.",
+  "journal": {"title": "Below the ridge", "body": "The longer entry."},
+  "discoveries": [
+    {
+      "slug": "stone",
+      "kind": "historical",
+      "title": "The old gate",
+      "body": "A longer note.",
+      "position": 0,
+      "media": []
+    }
+  ],
+  "media": [
+    {
+      "role": "journal",
+      "path": "/static/photos/gate-journal.jpg",
+      "alt_text": "The gate from the path",
+      "author": null,
+      "license": null,
+      "license_url": null,
+      "source_url": null,
+      "position": 0
+    }
+  ],
+  "acknowledged": false
+}
+```
+
+`POST /api/v1/journeys/<id>/journal/<checkpoint_slug>/acknowledgment` records that this attempt has seen the arrival. Cookie callers send the CSRF token. The body is empty. The response is the existing `acknowledged_at` when the row is already there. A second call does not change `progress_version`, metrics, or the expedition feed. A checkpoint this journey has not reached is 404 and writes nothing.
+
+```json
+{"journey_id": 10, "checkpoint_slug": "gate", "acknowledged_at": "2026-06-01T15:04:00+00:00"}
+```
+
+`POST /api/v1/activities` and `PATCH /api/v1/activities/<id>` add `arrivals` for checkpoints that write newly unlocked on the caller's active journey. One activity that crosses two checkpoints returns both, in position order. The objects are the short reveal only. `journal_body` and discoveries are not included. The client loads those from the journal detail route. An ordinary edit that unlocks nothing, and every delete, returns `"arrivals": []`. This list does not create `expedition_updates`. The feed rule in `docs/architecture.md` section 16.4 stays as it is.
+
+```json
+{
+  "activity": {"id": 40},
+  "arrivals": [
+    {
+      "checkpoint_slug": "gate",
+      "chapter_slug": "approach",
+      "arrival_title": "The gate",
+      "arrival_body": "A short reveal.",
+      "acknowledged": false
+    }
+  ]
+}
+```
+
+`GET /api/v1/home` may later add `pending_arrivals` on the active journey: `checkpoint_slug`, `chapter_slug`, and `arrival_title` for reached checkpoints that this attempt has not acknowledged. It does not add `arrival_body`, `journal_body`, discoveries, or extra images. Paused and finished journeys do not put those titles on the home scene. That field is not in the implemented home response.
+
 ## What the Expo client needs first
 
 1. Call register or login and store the bearer token. Do not send it as a query parameter or a cookie.
 2. Send `Authorization: Bearer` on later requests. Native clients do not need CSRF. A browser client that uses the cookie must send `X-CSRF-Token`.
 3. Treat 409 `restart_required` and `confirmation_required` as instructions to show a confirmation step, then call restart or resubmit with the new token. Do not retry a stale summit token.
 4. Use `GET /api/v1/home` for the first screen. The implemented payload reports elevation in feet. The target payload in the metric section reports one object per required metric, in feet or miles, and does not add those objects together. Activity elevation is feet. The target distance field is miles.
-5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API. Achievement and trophy-case routes are not in this contract. The domain is Phase 4A section 17.
+5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API. Achievement and trophy-case routes are not in this contract. The domain is `docs/architecture.md` section 17. Narrative routes in the next section are not in the implemented client.

@@ -9,7 +9,7 @@ This revision was applied only to the isolated database `adventurer_migration_te
 It keeps the existing Everest expedition row, including its id and slug `everest`.
 
 1. Create `routes` and `route_checkpoints`.
-2. Insert the published Everest route from the expedition's target elevation, with region `Khumbu, Nepal` and the summary from `adventurer/challenges.py`.
+2. Insert the published Everest route from the expedition's target elevation, with region `Khumbu, Nepal` and the summary from `adventurer/challenges.py`. That file is still the implemented narrative. The proposed chapters and stories are `docs/architecture.md` section 18.
 3. Copy all 16 checkpoints onto that route, preserving slug, name, position, and elevation.
 4. Point the existing expedition at the route. Its name becomes `Global Everest Challenge`, visibility `public`, status `active`, and owner `NULL`.
 5. Drop `expeditions.target_elevation_m` and `expedition_checkpoints`.

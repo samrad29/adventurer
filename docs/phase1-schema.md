@@ -4,7 +4,7 @@ The executable DDL is `migrations/sql/0002_phase1_schema.sql`. Everest is seeded
 
 The Flask application reads and writes these tables. It does not run schema DDL on startup. Alembic remains responsible for schema changes, including on the isolated test database. The hosted project is not a migration target.
 
-Migration `0009_multi_metric_progress` replaces the elevation-only progress columns described below. Route targets live in `route_requirements`, checkpoint thresholds live in `checkpoint_requirements`, and journey credit is an assignment plus one row per metric. The sections under this note remain the historical description of `0002` through `0008`. The progress contract is `docs/phase4a-domain-architecture.md`, section 16.
+Migration `0009_multi_metric_progress` replaces the elevation-only progress columns described below. Route targets live in `route_requirements`, checkpoint thresholds live in `checkpoint_requirements`, and journey credit is an assignment plus one row per metric. The sections under this note remain the historical description of `0002` through `0008`. The progress contract is `docs/architecture.md`, section 16.
 
 ## Refinements
 
@@ -219,7 +219,7 @@ Account creation inserts `users` and `user_profiles`. It does not join an expedi
 
 A manual log inserts an `activities` row (`manual`, `unspecified`, `not_required`), one `activity_credits` row for the full elevation, and the opening verification event. That event is required by the existing deferred constraint, which rejects an activity whose status has no matching event at commit. Elevation and distance are converted with `Decimal` at 0.3048 meters per international foot. Removing a journal entry deletes that expedition's credit and leaves the activity row in place.
 
-Progress and the casual leaderboard sum `activity_credits.credited_elevation_m` for the participation. Checkpoint target, elevations, order, slugs, and names come from the route behind the expedition. See `docs/phase3-schema.md`. Narrative text stays in `adventurer/challenges.py`.
+Progress and the casual leaderboard sum `activity_credits.credited_elevation_m` for the participation. Checkpoint target, elevations, order, slugs, and names come from the route behind the expedition. See `docs/phase3-schema.md`. Narrative text stays in `adventurer/challenges.py`. The proposed replacement is `docs/architecture.md` section 18 and is not implemented.
 
 ## Deferred
 
@@ -231,4 +231,4 @@ Progress and the casual leaderboard sum `activity_credits.credited_elevation_m` 
 
 ## What this revision does not do
 
-Season participation, season credits, provider imports, and evidence tables are not implemented. Story text stays in `adventurer/challenges.py`.
+Season participation, season credits, provider imports, and evidence tables are not implemented. Story text stays in `adventurer/challenges.py` until `docs/architecture.md` section 18 is implemented.

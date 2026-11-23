@@ -1,10 +1,12 @@
 The Adventurer — final domain architecture
 
-This replaces the earlier Phase 4A draft. There is no live expedition or journey data to preserve, so this version has no historical backfill, no reconciliation report, no dual-read period, and no legacy snapshot.
+This file is the canonical domain architecture. It replaces the earlier Phase 4A draft. There is no live expedition or journey data to preserve, so this version has no historical backfill, no reconciliation report, no dual-read period, and no legacy snapshot.
 
 Section 16 revises progress. A route requires one or more metrics, and a journey completes only when every required metric has reached its own target. That section supersedes every elevation-only progress, checkpoint, confirmation, feed, and leaderboard rule in this document. It does not change ownership, lock order, one-activity-one-journey, restart, leave flags, privacy removal, or authentication.
 
 Section 17 adds achievements, collectibles, and a personal trophy case. It does not change journeys, activity credits, expedition participation, leaderboards, the privacy-removal deletes in section 5.9, lock order, or authentication.
+
+Section 18 adds the curated narrative experience. It is proposed and not implemented. The home presentation rules stay in docs/dynamic-home.md, and the HTTP contract stays in docs/api-v1.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
 
 
 1. Executive summary
@@ -801,7 +803,9 @@ Concurrency
 
 No screens are part of this plan. The home payload is shaped for the Field Journal direction.
 
-The active journey is the focus: route name, curated route image, current checkpoint, one indicator per required metric, and a continue action. It is not a combined fitness score. Paused journeys and expeditions are present and secondary. Invitations are present so the next action can offer them. Activity history remains a dated personal list through the existing activity endpoints, which is enough for field notes. The API does not accept user photos, motivational copy, or a social feed.
+The active journey is the focus: route name, curated route image, current checkpoint, one indicator per required metric, and a continue action. It is not a combined fitness score. Paused journeys and expeditions are present and secondary. Invitations are present so the next action can offer them. Activity history remains a dated personal list through the existing activity endpoints. Those rows are the person's own log. The API does not accept user photos, motivational copy, or a social feed.
+
+Curated chapters, arrivals, journal entries, and discoveries are section 18. They are shared route content, not activity rows, and they are not implemented. Home still does not carry their bodies. docs/dynamic-home.md governs the scene.
 
 Organization profiles supply the branded place a Community tab can open: name, colors, welcome, and that organization's expeditions. Roster and party details stay on the expedition endpoints, for participants and managers only.
 
@@ -910,7 +914,7 @@ Restart inserts a journey with no credit rows. Prior credits stay on the prior a
 
 A checkpoint is reached when the capped personal totals meet every one of its thresholds. The comparison is storage meters. The highest reached checkpoint is the reached checkpoint with the greatest position. The next checkpoint is the unmet checkpoint with the least position. Restart starts the new attempt with none reached. A closed expedition snapshot keeps the checkpoint name it wrote at close.
 
-Missing photography does not change totals, unlocks, or authorization. Scene selection uses the highest reached checkpoint, then the nearest lower position that has a file, then the route hero, then no image. It never uses an unmet checkpoint's file. Phase 4B states the fallback in full. The old rule that elevation wins over position is withdrawn, because a journey no longer has one elevation total that can order the stops.
+Missing photography does not change totals, unlocks, or authorization. Scene selection uses the highest reached checkpoint, then the nearest lower position that has a file, then the route hero, then no image. It never uses an unmet checkpoint's file. docs/dynamic-home.md states the fallback in full. The old rule that elevation wins over position is withdrawn, because a journey no longer has one elevation total that can order the stops.
 
 16.4 Expeditions
 
@@ -1002,7 +1006,7 @@ A later scope is another named value on the same model. It is not a second award
 
 A collectible is how one achievement is shown or rewarded. One earned record may have a digital badge or medal in the trophy case, a shareable graphic, and an associated physical collectible. Those are presentations of one accomplishment. Issuance does not create a separate earned row for each format.
 
-Rendering, file storage, and asset management are not part of this revision. Collectible bytes wait with the unresolved organization and expedition image storage in section 15. Phase 4B already defers a general asset library. This section does not create one.
+Rendering, file storage, and asset management are not part of this revision. Collectible bytes wait with the unresolved organization and expedition image storage in section 15. docs/dynamic-home.md already defers a general asset library. This section does not create one. Route photography references proposed in section 18 are editorial route content, not collectible files.
 
 17.4 Editions
 
@@ -1089,7 +1093,7 @@ A later request to erase one earned record is its own audited delete. It does no
   Retained read access stays the leave flag. The trophy case is the earned rows.
   Issuance leaves journey progress, activity credits, expedition standings, and leaderboard rank unchanged.
   A global or community award does not require an expedition.
-  A field-journal entry stays an activity. An achievement is not a journal row.
+  A personal activity stays an activity. An achievement is not an activity row. The curated Field Journal in section 18 is route prose, not an activity and not an award.
   competition_seasons, official rankings, and automated milestone announcements stay deferred in section 13.
 
 17.11 Implementation sequence
@@ -1103,3 +1107,226 @@ This sequence does not reorder or block the journey, activity, and expedition wo
   5. Limited-edition numbering, including more than one edition of the same achievement, then physical reward claim and fulfillment. The numbering step does not require an edition-management product.
 
 No migration, service, API, or interface is part of the current change.
+
+
+18. Narrative experience
+
+This section is the curated storytelling contract. It proposes migration 0010_narrative_content and the API fields in docs/api-v1.md. Neither is implemented. Journey progress, activity credits, expedition standings, scene fallback, and the privacy-removal deletes in section 5.9 stay what sections 3, 5, 16, and docs/dynamic-home.md already define. Narrative content cannot award credits, complete a journey, change a participation, or write a leaderboard.
+
+The implemented prose is still adventurer/challenges.py. The implemented photographs are still adventurer/static/photos and adventurer/photo_credits.json. Section 18 is the replacement to build later, not a second live source.
+
+The story is linear. Chapters follow checkpoint position. Reaching a checkpoint reveals that checkpoint's arrival and opens its journal entry and discoveries. Nothing later on the route is shown early, and nothing branches on a choice. There is no AI-generated personal story and no general-purpose CMS. Platform curation writes the rows. Users do not.
+
+The same published rows are the story for every personal journey and for every global, private, and organization expedition on that route. An expedition does not own a copy.
+
+18.1 Six records
+
+  A route chapter is an ordered act. It groups existing checkpoints. It does not have its own progress threshold.
+  A checkpoint arrival is the short reveal shown when that checkpoint becomes reached.
+  A Field Journal entry is the optional longer story for a reached checkpoint. It lives on the same checkpoint story row as the arrival. It is not an activity.
+  A discovery is optional deeper content at a reached checkpoint: cultural, historical, geographic, culinary, or photographic. Discoveries do not gate later checkpoints.
+  Curated media is a photograph reference and its license, attribution, and alt text. The bytes are not in PostgreSQL.
+  A reveal acknowledgment is presentation state for one journey attempt. It records that this attempt has already been shown that checkpoint's arrival. It is not progress.
+
+Unlocked, displayed, and acknowledged are different.
+
+  Unlocked means the journey's capped personal totals meet every threshold of that checkpoint. Section 16.3 is the only authority. The narrative tables do not store a reached flag.
+  Displayed means a response included the text or image. Home may name an unacknowledged arrival. It does not include a journal body or a discovery body. The journal endpoints return those bodies only when the checkpoint is unlocked and the row is published.
+  Acknowledged means a journey_story_views row exists for that attempt and checkpoint. Acknowledgment does not change totals, progress_version, checkpoint reach, or expedition feed.
+
+18.2 Proposed tables
+
+All of these tables are in schema adventurer. Status on editorial rows is draft, published, or retired. Draft and retired rows are not returned by the API. Users never insert, update, or delete editorial rows. The application role remains the writer, as in section 6. A later curation path is limited to platform administrators. Row level security is not the boundary.
+
+route_chapters
+  id bigint generated by default as identity primary key
+  route_id bigint not null
+  slug text not null
+  title text not null
+  summary text null
+  position integer not null
+  status text not null default 'draft'
+  created_at timestamptz not null default now()
+  updated_at timestamptz not null default now()
+  Unique (id, route_id), so a checkpoint can reference the pair
+  Unique (route_id, slug)
+  Unique (route_id, position)
+  Foreign key route_id to routes (id) on delete cascade
+  Check position >= 0
+  Check status in ('draft', 'published', 'retired')
+  Check char_length(btrim(title)) > 0
+  Check summary is null or char_length(btrim(summary)) > 0
+
+route_checkpoints gains one nullable column, chapter_id bigint. This column is editorial. The position immutability trigger and the requirement immutability trigger do not include it. Changing a chapter assignment does not change a threshold.
+
+  Foreign key (chapter_id, route_id) to route_chapters (id, route_id) on delete set null
+  A checkpoint belongs to at most one chapter because the column holds one id.
+  A chapter and its checkpoints share a route because the foreign key includes route_id.
+  Checkpoints in one chapter occupy a contiguous span of position. A later chapter's checkpoints all have a greater position than an earlier chapter's checkpoints. A constraint trigger checks that shape. It does not change route_progress_shape. SET CONSTRAINTS ALL IMMEDIATE stays forbidden. The new trigger is named and set immediate on its own when a curation transaction needs it.
+
+A route may have zero chapters. A checkpoint may have a null chapter_id. Progress and the scene do not wait for a chapter. A published route is not required to narrate every checkpoint.
+
+checkpoint_stories
+  id bigint generated by default as identity primary key
+  checkpoint_id bigint not null
+  route_id bigint not null
+  arrival_title text not null
+  arrival_body text not null
+  journal_title text null
+  journal_body text null
+  status text not null default 'draft'
+  created_at timestamptz not null default now()
+  updated_at timestamptz not null default now()
+  Unique (checkpoint_id), so a checkpoint has one story
+  Unique (id, checkpoint_id)
+  Foreign key (checkpoint_id, route_id) to route_checkpoints (id, route_id) on delete cascade
+  Check status in ('draft', 'published', 'retired')
+  Check char_length(btrim(arrival_title)) > 0
+  Check char_length(btrim(arrival_body)) > 0
+  Check journal_title is null or char_length(btrim(journal_title)) > 0
+  Check journal_body is null or char_length(btrim(journal_body)) > 0
+  Check ((journal_title IS NULL) = (journal_body IS NULL))
+  Published arrival text is the short reveal. The journal pair is the optional deeper entry. There is no second story row and no user-authored body.
+
+story_discoveries
+  id bigint generated by default as identity primary key
+  checkpoint_id bigint not null
+  route_id bigint not null
+  slug text not null
+  kind text not null
+  title text not null
+  body text not null
+  position integer not null
+  status text not null default 'draft'
+  created_at timestamptz not null default now()
+  updated_at timestamptz not null default now()
+  Unique (id, checkpoint_id)
+  Unique (checkpoint_id, slug)
+  Unique (checkpoint_id, position)
+  Foreign key (checkpoint_id, route_id) to route_checkpoints (id, route_id) on delete cascade
+  Check position >= 0
+  Check kind in ('cultural', 'historical', 'geographic', 'culinary', 'photographic')
+  Check status in ('draft', 'published', 'retired')
+  Check char_length(btrim(title)) > 0
+  Check char_length(btrim(body)) > 0
+  Order is position within the checkpoint. Kind is a label, not a branch. A culinary row is the structured place for what challenges.py calls a recipe. The body is prose. This table does not add an ingredients schema. A later edition can add columns if a recipe layout needs them. It does not add them now.
+
+route_media
+  id bigint generated by default as identity primary key
+  route_id bigint not null
+  checkpoint_id bigint null
+  discovery_id bigint null
+  role text not null
+  asset_path text not null
+  alt_text text not null
+  author text null
+  license text null
+  license_url text null
+  source_url text null
+  position integer not null default 0
+  status text not null default 'draft'
+  created_at timestamptz not null default now()
+  updated_at timestamptz not null default now()
+  Foreign key route_id to routes (id) on delete cascade
+  Foreign key (checkpoint_id, route_id) to route_checkpoints (id, route_id) on delete cascade
+  Foreign key (discovery_id, checkpoint_id) to story_discoveries (id, checkpoint_id) on delete cascade
+  Check position >= 0
+  Check status in ('draft', 'published', 'retired')
+  Check role in ('route_hero', 'checkpoint_scene', 'journal', 'discovery')
+  Check char_length(btrim(asset_path)) > 0
+  Check char_length(btrim(alt_text)) > 0
+  Check license_url is null or char_length(btrim(license_url)) > 0
+  Check source_url is null or char_length(btrim(source_url)) > 0
+  Check (role <> 'route_hero' OR (checkpoint_id IS NULL AND discovery_id IS NULL))
+  Check (role <> 'checkpoint_scene' OR (checkpoint_id IS NOT NULL AND discovery_id IS NULL))
+  Check (role <> 'journal' OR (checkpoint_id IS NOT NULL AND discovery_id IS NULL))
+  Check (role <> 'discovery' OR (checkpoint_id IS NOT NULL AND discovery_id IS NOT NULL))
+  Partial unique index on (route_id) WHERE role = 'route_hero' AND status = 'published'
+  Partial unique index on (checkpoint_id) WHERE role = 'checkpoint_scene' AND status = 'published'
+  Index (route_id, role, position)
+  Index (checkpoint_id, role, position)
+  Index (discovery_id, position)
+
+asset_path is a reference, such as /static/photos/lukla.jpg. The table does not store bytes, width, or a binary thumbnail. Extra journal and discovery images use position. They are not the home scene. The home scene remains the one published checkpoint_scene, or the route_hero, under the fallback in docs/dynamic-home.md.
+
+journey_story_views
+  id bigint generated by default as identity primary key
+  journey_id bigint not null
+  user_id bigint not null
+  route_id bigint not null
+  checkpoint_id bigint not null
+  acknowledged_at timestamptz not null default now()
+  Unique (journey_id, checkpoint_id)
+  Foreign key (journey_id, user_id, route_id) to route_journeys (id, user_id, route_id) on delete cascade
+  Foreign key (checkpoint_id, route_id) to route_checkpoints (id, route_id) on delete cascade
+  Index (user_id, journey_id)
+  The row has no metric amount, no progress_version, and no expedition id.
+
+Deleting a route cascades its chapters, and cascades its checkpoints, which cascade stories, discoveries, media, and views. Deleting a chapter sets checkpoint.chapter_id null and does not delete checkpoints. Deleting a journey deletes its views and does not delete stories. Account deletion already deletes the user's journeys, so the views go with them. Privacy removal does not delete journeys, activities, or credits, and it does not delete views. Expedition close, leave, and restart do not delete views on the attempt they leave behind.
+
+18.3 Unlock and reveal
+
+Reach is the capped personal totals compared with checkpoint_requirements, in storage meters. A checkpoint with several thresholds unlocks only when every threshold is met. Display rounding does not unlock it. display_credits_after does not apply. Restart begins an attempt with none reached.
+
+One activity can cross several checkpoints. The create response lists every checkpoint that write newly satisfied, in position order. An update that increases credit and newly satisfies one or more checkpoints lists those checkpoints the same way. That list is for the client. It does not add expedition_updates. Section 16.4 still appends checkpoint_reached only on create, and a completing edit still appends summit_reached and no checkpoint rows. A delete lists nothing. The following journal read shows whatever the totals still reach.
+
+Acknowledgment is one insert for the caller's journey and one checkpoint. The service locks the user, then that journey, in the order section 5 already uses for a journey write. It does not lock expeditions, participations, activities, or journey_metric_totals. It reads the existing progress totals. If the checkpoint is not reached, or the story is not published, the insert is rejected and no view row is written. A second acknowledgment of the same pair returns the existing acknowledged_at and writes nothing. The insert does not change route_journeys.
+
+Previously unlocked journal content stays readable after the journey is completed, because the completed totals stay. It also stays readable while the journey is paused or abandoned. New activities still do not credit a paused or abandoned journey, so they do not unlock further checkpoints on it. An edit that would complete a paused or abandoned journey is still 409 resume_required and still writes nothing. An edit or delete that lowers a paused or abandoned journey's totals below a threshold locks that checkpoint again, which is the existing credit rule. The view row is kept. While the checkpoint is locked, journal endpoints omit it. If the same attempt reaches it again, the content returns and the arrival is already acknowledged, so the client does not present the automatic reveal a second time.
+
+Restart creates a new journey. Views belong to the old journey id. The new attempt has no views, so its arrivals can be shown again. The abandoned attempt keeps its views and its credits. Its journal remains readable on that journey id.
+
+Home, for the active journey only, may list unacknowledged reached checkpoints as identifiers and arrival titles. It does not include journal_body, discovery bodies, or extra journal images. A paused or abandoned journey's unacknowledged arrivals are not placed on the home scene. They are available from that journey's journal endpoint. docs/dynamic-home.md remains the scene contract. Narrative reads do not choose the photograph.
+
+18.4 Media
+
+The immersive scene never uses an unreached checkpoint's file. That rule is docs/dynamic-home.md. Section 18 does not add a second selector.
+
+Roles:
+
+  route_hero. One published row per route. The approach picture, before the first checkpoint. Everest's hero remains a broader Everest and Khumbu photograph, not Lukla or another checkpoint.
+  checkpoint_scene. One published row per checkpoint. This is the file the scene selector may use once that checkpoint is reached. Fallback to a lower reached checkpoint, then the hero, then null, is unchanged.
+  journal. Additional images for a reached checkpoint's journal entry. Ordered by position. Absent from home.
+  discovery. Images for one photographic or other discovery. Ordered by position. Absent from home and absent until that checkpoint is reached.
+
+A missing or unpublished asset is omitted. The selector does not borrow a later checkpoint, and it does not invent a path. A published row whose file is absent is treated as missing. Alt text is required on every row. Author, license, license_url, and source_url are the attribution photo_credits.json already stores. A row may omit attribution. The client still shows alt text.
+
+Until 0010 is applied and a later cutover reads route_media, adventurer/scene.py continues to resolve adventurer/static/photos and adventurer/photo_credits.json. This design does not move, download, or replace those files. asset_path can name those static paths. A later move to object storage or a CDN replaces the path and the file host. It does not put bytes in PostgreSQL and it does not change unlock rules. Organization logo bytes remain the separate open question in section 15.
+
+18.5 Authorization
+
+Anonymous route catalog may list published chapter slug, title, position, and the checkpoint slugs in each chapter. It does not include arrival text, journal text, discoveries, or journal and discovery images. Checkpoint names and thresholds stay public, as they are today.
+
+Authenticated journal and story reads require the caller to own the journey. Another person's journey is 403 forbidden. An unreached checkpoint, a draft or retired story, and an unknown slug are 404 not_found, with the same not-found message, so a locked body is not confirmed. Discoveries and extra images use that same gate. Acknowledgment uses it too.
+
+Expedition membership does not grant a story the personal journey has not reached. A board that shows another person ahead does not reveal that person's unreached text, and it does not reveal text for a checkpoint the caller has not reached on their own journey.
+
+18.6 What stays outside
+
+  No branching, no per-user story text, and no generated prose.
+  The per-account trail name drawn in challenges.py is not a table in 0010. The shared checkpoint name is the name. Retiring that draw is a product decision. It is not part of this schema.
+  No user photographs, comments, or social posts. Section 13 stays deferred.
+  Achievements stay section 17. Reading a story does not issue an award.
+  Forecasts stay section 16.6. A story does not move the pace dot.
+  challenges.py remains the running text until a reviewed migration and an explicit content cutover replace it.
+
+18.7 Implementation sequence
+
+This sequence does not start until this section is reviewed. It does not modify migrations 0001 through 0009.
+
+  1. Apply 0010_narrative_content on the isolated test database only.
+  2. Read services and PostgreSQL tests for reach, hidden unreached bodies, acknowledgment idempotence, restart, and an edit that relocks a checkpoint.
+  3. Seed published rows for Everest and one distance-only route from the existing prose and photo files. Do not treat Everest as the only shape.
+  4. Add the proposed API fields. Home still omits journal bodies.
+  5. Point scene selection at published route_hero and checkpoint_scene rows, keeping the current fallback and the current files until each asset_path resolves.
+
+18.8 Open decisions
+
+These are not settled by the rest of this document.
+
+  1. The per-account trail name in challenges.py. Section 18.6 leaves it out of 0010. Retiring the draw, or keeping it as a label beside the shared checkpoint name, needs a product decision.
+  2. A retired story or media row is hidden from every caller, including an attempt that already acknowledged it. The alternative is to keep serving it to attempts that have a view row. Hiding it is what lets a license problem pull an asset.
+  3. Route photography bytes stay in adventurer/static/photos until a later move to object storage or a CDN. The column is only a path. Organization logo storage remains section 15 and is a separate choice.
+  4. Published chapter titles and their checkpoint slugs are public on the route catalog. Bodies are not. If a title would spoil a later place, the catalog rule needs to change before implementation.
+  5. A view row survives an edit or delete that drops the checkpoint below its thresholds. The content is hidden until the same attempt reaches it again, and the automatic reveal does not play twice. Deleting the view on relock would show the reveal again.
+  6. Discovery bodies are prose. A recipe does not get an ingredients table in 0010. Add columns later if the layout needs them.

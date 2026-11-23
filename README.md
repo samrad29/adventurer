@@ -52,7 +52,7 @@ The app tests use the isolated Postgres database on `127.0.0.1:54329` (`adventur
 
 ## Routes and expeditions
 
-A route is the curated adventure. An expedition is one group on that route. Route metadata and checkpoints live in the database. The long checkpoint writing stays in `adventurer/challenges.py`, keyed by route slug. See `docs/phase3-schema.md`.
+A route is the curated adventure. An expedition is one group on that route. Route metadata and checkpoints live in the database. The long checkpoint writing stays in `adventurer/challenges.py`, keyed by route slug, until the narrative model in `docs/architecture.md` is implemented. See `docs/phase3-schema.md` for the historical route migration and `docs/architecture.md` for the domain contract.
 
 The Global Everest Challenge is still `/everest`. Account creation does not join it. The `/join` page does, unless the person is signing up from a private invitation. Users can start private expeditions on a published route, invite by username or a 30-day share link, and keep one activity library. A credit always counts the full elevation of an outing toward one expedition.
 
@@ -62,7 +62,7 @@ Checkpoint narrative in `adventurer/challenges.py` still uses the same unlock ki
 - `tidbit` — a historical or cultural note
 - `recipe` — `makes`, `ingredients`, `steps`, and an optional `aside`
 
-A `story` kind can be added the same way when you want one. The last stop's elevation has to match `summit_ft`.
+A `story` kind can be added the same way when you want one. The last stop's elevation has to match `summit_ft`. The proposed chapters, arrivals, and discoveries that replace these kinds are `docs/architecture.md` section 18. They are not implemented.
 
 ## JSON, for a later frontend
 
