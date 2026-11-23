@@ -100,6 +100,10 @@ DROP TRIGGER IF EXISTS expedition_result_entries_open_metrics
     ON adventurer.expedition_result_entries;
 DROP TRIGGER IF EXISTS expedition_updates_open_metrics
     ON adventurer.expedition_updates;
+DROP TRIGGER IF EXISTS expedition_result_entries_stamp_xid
+    ON adventurer.expedition_result_entries;
+DROP TRIGGER IF EXISTS expedition_updates_stamp_xid
+    ON adventurer.expedition_updates;
 DROP TRIGGER IF EXISTS activities_protect_completed_journey ON adventurer.activities;
 DROP TRIGGER IF EXISTS expedition_result_metrics_immutable
     ON adventurer.expedition_result_metrics;
@@ -116,6 +120,7 @@ DROP FUNCTION IF EXISTS adventurer.apply_credit_delta(bigint, bigint, text, nume
 DROP FUNCTION IF EXISTS adventurer.credit_key_before(bigint, text, bigint, text);
 DROP FUNCTION IF EXISTS adventurer.note_open_snapshot();
 DROP FUNCTION IF EXISTS adventurer.snapshot_metrics_are_open(text, bigint);
+DROP FUNCTION IF EXISTS adventurer.stamp_snapshot_transaction();
 DROP FUNCTION IF EXISTS adventurer.protect_result_metrics();
 DROP FUNCTION IF EXISTS adventurer.protect_update_metrics();
 
@@ -293,12 +298,14 @@ EXECUTE FUNCTION adventurer.protect_completed_journey_activity();
 ALTER TABLE adventurer.expedition_result_entries
     DROP CONSTRAINT expedition_result_entries_final_rank_chk,
     DROP COLUMN final_rank,
+    DROP COLUMN IF EXISTS creating_xid,
     ADD COLUMN total_m numeric(12, 5) NOT NULL,
     ADD COLUMN rank integer NOT NULL,
     ADD CONSTRAINT expedition_result_entries_total_chk CHECK (total_m >= 0),
     ADD CONSTRAINT expedition_result_entries_rank_chk CHECK (rank >= 1);
 
 ALTER TABLE adventurer.expedition_updates
+    DROP COLUMN IF EXISTS creating_xid,
     ADD COLUMN elevation_m numeric(12, 5) NOT NULL,
     ADD CONSTRAINT expedition_updates_elevation_chk CHECK (elevation_m >= 0);
 

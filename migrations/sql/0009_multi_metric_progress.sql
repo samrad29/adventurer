@@ -305,6 +305,7 @@ ALTER TABLE adventurer.expedition_result_entries
     DROP COLUMN total_m,
     DROP COLUMN rank,
     ADD COLUMN final_rank integer,
+    ADD COLUMN creating_xid xid8 NOT NULL,
     ADD CONSTRAINT expedition_result_entries_final_rank_chk
         CHECK (final_rank IS NULL OR final_rank >= 1);
 
@@ -324,7 +325,8 @@ CREATE TABLE adventurer.expedition_result_metrics (
 
 ALTER TABLE adventurer.expedition_updates
     DROP CONSTRAINT expedition_updates_elevation_chk,
-    DROP COLUMN elevation_m;
+    DROP COLUMN elevation_m,
+    ADD COLUMN creating_xid xid8 NOT NULL;
 
 CREATE TABLE adventurer.expedition_update_metrics (
     update_id bigint NOT NULL,
@@ -550,11 +552,15 @@ EXECUTE FUNCTION adventurer.protect_journey_credits();
 --   for one journey. An edit that changes two journeys locks both journey
 --   rows before it recalculates either total. That journey lock is what lets
 --   the service credit the remainder instead of failing.
---   Do not lock journey_metric_totals directly. This trigger takes an
---   advisory lock per journey (namespace 8142) and then locks that journey's
---   total row. Callers that already hold the journey row lock do not
---   deadlock, because every credit write takes the advisory lock only after
---   the journey row.
+--   Do not lock journey_metric_totals directly. This trigger takes
+--   pg_advisory_xact_lock(journey_id): one single-bigint advisory key equal
+--   to the journey id. That map is one-to-one across the whole bigint range,
+--   so two journeys never share a lock and the id is never narrowed to int4.
+--   The single-bigint advisory space is reserved for these credit locks.
+--   Other advisory locks in this database use the two-integer form.
+--   Callers that already hold the journey row lock do not deadlock, because
+--   every credit write takes the advisory lock only after the journey row.
+--   A credit that changes journey locks the lower journey id first.
 --
 -- The advisory lock plus the total row also covers a direct insert that
 -- skipped the journey lock. The second writer waits, then applies its delta
@@ -601,9 +607,10 @@ BEGIN
         RAISE EXCEPTION USING MESSAGE = 'credit metric is not required by the route';
     END IF;
 
-    -- One lock per journey, taken before either metric total. A second metric
-    -- on the same journey reenters it. Moves lock the lower journey id first.
-    PERFORM pg_advisory_xact_lock(8142, subject_journey_id::integer);
+    -- One lock per journey, taken before either metric total. The key is the
+    -- journey id itself, not a 32-bit piece of it. A second metric on the
+    -- same journey reenters it. Moves lock the lower journey id first.
+    PERFORM pg_advisory_xact_lock(subject_journey_id);
 
     IF delta < 0 THEN
         -- UPDATE waits on the total row and reapplies the delta to the
@@ -796,59 +803,34 @@ BEFORE UPDATE OF elevation_gain_m, distance_m OR DELETE ON adventurer.activities
 FOR EACH ROW
 EXECUTE FUNCTION adventurer.protect_completed_journey_activity();
 
--- The parent insert records its id for this transaction only. Metric rows
--- inserted before commit can see it. Commit and rollback both clear it, so
--- a later transaction cannot append, and an ordinary request cannot leave
--- the marker set. The marker is not a privilege: privacy removal and
--- account deletion do not use it.
+-- creating_xid is the top-level transaction id from pg_current_xact_id()
+-- (xid8, PostgreSQL 13 and newer, including Supabase). It is not the row
+-- xmin: a parent inserted inside a savepoint keeps a subtransaction xmin
+-- after RELEASE, while pg_current_xact_id() stays the top-level id for the
+-- whole transaction. The stamp trigger overwrites any supplied value.
+-- Commit starts a new id, so a later transaction cannot append. Privacy
+-- removal and account deletion do not read this column.
 
-CREATE FUNCTION adventurer.note_open_snapshot()
+CREATE FUNCTION adventurer.stamp_snapshot_transaction()
 RETURNS trigger
 LANGUAGE plpgsql
 SET search_path = adventurer, pg_temp
 AS $fn$
-DECLARE
-    setting_name text := TG_ARGV[0];
-    current_value text;
 BEGIN
-    current_value := current_setting(setting_name, true);
-    IF current_value IS NULL OR current_value = '' THEN
-        current_value := ',';
-    END IF;
-    IF position(',' || NEW.id::text || ',' IN current_value) = 0 THEN
-        current_value := current_value || NEW.id::text || ',';
-    END IF;
-    PERFORM set_config(setting_name, current_value, true);
-    RETURN NULL;
+    NEW.creating_xid := pg_current_xact_id();
+    RETURN NEW;
 END;
 $fn$;
 
-CREATE TRIGGER expedition_result_entries_open_metrics
-AFTER INSERT ON adventurer.expedition_result_entries
+CREATE TRIGGER expedition_result_entries_stamp_xid
+BEFORE INSERT ON adventurer.expedition_result_entries
 FOR EACH ROW
-EXECUTE FUNCTION adventurer.note_open_snapshot('adventurer.open_result_entries');
+EXECUTE FUNCTION adventurer.stamp_snapshot_transaction();
 
-CREATE TRIGGER expedition_updates_open_metrics
-AFTER INSERT ON adventurer.expedition_updates
+CREATE TRIGGER expedition_updates_stamp_xid
+BEFORE INSERT ON adventurer.expedition_updates
 FOR EACH ROW
-EXECUTE FUNCTION adventurer.note_open_snapshot('adventurer.open_expedition_updates');
-
-CREATE FUNCTION adventurer.snapshot_metrics_are_open(
-    setting_name text,
-    subject_id bigint
-)
-RETURNS boolean
-LANGUAGE plpgsql
-SET search_path = adventurer, pg_temp
-AS $fn$
-DECLARE
-    current_value text;
-BEGIN
-    current_value := current_setting(setting_name, true);
-    RETURN current_value IS NOT NULL
-        AND position(',' || subject_id::text || ',' IN current_value) > 0;
-END;
-$fn$;
+EXECUTE FUNCTION adventurer.stamp_snapshot_transaction();
 
 CREATE FUNCTION adventurer.protect_result_metrics()
 RETURNS trigger
@@ -857,11 +839,14 @@ SET search_path = adventurer, pg_temp
 AS $fn$
 DECLARE
     subject_user_id bigint;
+    parent_xid xid8;
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        IF NOT snapshot_metrics_are_open(
-            'adventurer.open_result_entries', NEW.result_entry_id
-        ) THEN
+        SELECT entry.creating_xid INTO parent_xid
+        FROM expedition_result_entries AS entry
+        WHERE entry.id = NEW.result_entry_id;
+
+        IF parent_xid IS DISTINCT FROM pg_current_xact_id() THEN
             RAISE EXCEPTION USING MESSAGE =
                 'a result snapshot cannot gain metric rows after it is created';
         END IF;
@@ -896,11 +881,14 @@ SET search_path = adventurer, pg_temp
 AS $fn$
 DECLARE
     subject_user_id bigint;
+    parent_xid xid8;
 BEGIN
     IF TG_OP = 'INSERT' THEN
-        IF NOT snapshot_metrics_are_open(
-            'adventurer.open_expedition_updates', NEW.update_id
-        ) THEN
+        SELECT feed.creating_xid INTO parent_xid
+        FROM expedition_updates AS feed
+        WHERE feed.id = NEW.update_id;
+
+        IF parent_xid IS DISTINCT FROM pg_current_xact_id() THEN
             RAISE EXCEPTION USING MESSAGE =
                 'an expedition update cannot gain metric rows after it is created';
         END IF;
@@ -1146,6 +1134,8 @@ BEGIN
         REVOKE ALL ON TABLE adventurer.journey_metric_totals FROM anon;
         REVOKE ALL ON TABLE adventurer.expedition_result_metrics FROM anon;
         REVOKE ALL ON TABLE adventurer.expedition_update_metrics FROM anon;
+        REVOKE ALL (creating_xid) ON TABLE adventurer.expedition_result_entries FROM anon;
+        REVOKE ALL (creating_xid) ON TABLE adventurer.expedition_updates FROM anon;
         REVOKE ALL ON SEQUENCE adventurer.activity_journey_assignments_id_seq FROM anon;
         REVOKE ALL ON SEQUENCE adventurer.journey_credits_id_seq FROM anon;
     END IF;
@@ -1158,8 +1148,13 @@ BEGIN
         REVOKE ALL ON TABLE adventurer.journey_metric_totals FROM authenticated;
         REVOKE ALL ON TABLE adventurer.expedition_result_metrics FROM authenticated;
         REVOKE ALL ON TABLE adventurer.expedition_update_metrics FROM authenticated;
+        REVOKE ALL (creating_xid) ON TABLE adventurer.expedition_result_entries FROM authenticated;
+        REVOKE ALL (creating_xid) ON TABLE adventurer.expedition_updates FROM authenticated;
         REVOKE ALL ON SEQUENCE adventurer.activity_journey_assignments_id_seq FROM authenticated;
         REVOKE ALL ON SEQUENCE adventurer.journey_credits_id_seq FROM authenticated;
     END IF;
 END
 $lock$;
+
+REVOKE ALL (creating_xid) ON TABLE adventurer.expedition_result_entries FROM PUBLIC;
+REVOKE ALL (creating_xid) ON TABLE adventurer.expedition_updates FROM PUBLIC;

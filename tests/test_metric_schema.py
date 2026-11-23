@@ -1543,34 +1543,76 @@ def test_snapshot_metrics_close_after_the_creating_transaction_commits():
             """,
             (update_id,),
         )
-        conn.execute("SAVEPOINT rolled_back_update")
-        extra_update_id = conn.execute(
+        assert conn.execute(
+            """
+            SELECT creating_xid = pg_current_xact_id() AS same
+            FROM adventurer.expedition_result_entries
+            WHERE id = %s
+            """,
+            (entry_id,),
+        ).fetchone()["same"] is True
+        conn.execute("SAVEPOINT released_update")
+        released_update_id = conn.execute(
             """
             INSERT INTO adventurer.expedition_updates (
-                expedition_id, user_id, participation_id, kind, checkpoint_name
+                expedition_id, user_id, participation_id, kind,
+                checkpoint_name, creating_xid
             )
-            VALUES (%s, %s, %s, 'activity_logged', NULL)
+            VALUES (%s, %s, %s, 'activity_logged', NULL, '0'::xid8)
             RETURNING id
             """,
             (expedition_id, user_id, participation_id),
         ).fetchone()["id"]
-        open_updates = conn.execute(
-            "SELECT current_setting('adventurer.open_expedition_updates', true) AS value"
-        ).fetchone()["value"]
-        assert f",{extra_update_id}," in open_updates
+        conn.execute("RELEASE SAVEPOINT released_update")
+        assert conn.execute(
+            """
+            SELECT creating_xid = pg_current_xact_id() AS same
+            FROM adventurer.expedition_updates
+            WHERE id = %s
+            """,
+            (released_update_id,),
+        ).fetchone()["same"] is True
+        conn.execute(
+            """
+            INSERT INTO adventurer.expedition_update_metrics (
+                update_id, metric_code, credited_amount
+            )
+            VALUES (%s, 'distance', 2)
+            """,
+            (released_update_id,),
+        )
+        conn.execute("SAVEPOINT rolled_back_update")
+        conn.execute(
+            """
+            INSERT INTO adventurer.expedition_updates (
+                expedition_id, user_id, participation_id, kind, checkpoint_name
+            )
+            VALUES (%s, %s, %s, 'checkpoint_reached', 'Camp')
+            """,
+            (expedition_id, user_id, participation_id),
+        )
         conn.execute("ROLLBACK TO SAVEPOINT rolled_back_update")
-        open_updates = conn.execute(
-            "SELECT current_setting('adventurer.open_expedition_updates', true) AS value"
-        ).fetchone()["value"] or ""
-        assert f",{extra_update_id}," not in open_updates
-        assert f",{update_id}," in open_updates
         conn.commit()
     try:
         with _connect() as conn:
-            marker = conn.execute(
-                "SELECT current_setting('adventurer.open_result_entries', true) AS value"
-            ).fetchone()["value"]
-            assert marker in (None, "")
+            conn.execute(
+                "SELECT set_config('adventurer.open_result_entries', %s, true)",
+                (f",{entry_id},",),
+            )
+            conn.execute(
+                "SELECT set_config('adventurer.open_expedition_updates', %s, true)",
+                (f",{update_id},{released_update_id},",),
+            )
+            _expect_error(
+                conn,
+                """
+                UPDATE adventurer.expedition_result_entries
+                SET creating_xid = pg_current_xact_id()
+                WHERE id = %s
+                """,
+                (entry_id,),
+                "immutable",
+            )
             _expect_error(
                 conn,
                 """
@@ -1686,6 +1728,236 @@ def test_snapshot_metrics_close_after_the_creating_transaction_commits():
             conn.execute(
                 "DELETE FROM adventurer.expeditions WHERE id = %s",
                 (expedition_id,),
+            )
+            conn.execute("DELETE FROM adventurer.routes WHERE id = %s", (route_id,))
+            conn.execute("DELETE FROM adventurer.users WHERE id = %s", (user_id,))
+            conn.commit()
+
+
+def _advisory_halves(journey_id: int) -> tuple[int, int]:
+    return (journey_id >> 32) & 0xFFFFFFFF, journey_id & 0xFFFFFFFF
+
+
+def test_advisory_lock_uses_the_full_bigint_journey_id():
+    _upgrade()
+    low_id = 2147483648
+    aliased_id = low_id + 2**32
+    min_id = -9223372036854775808
+    max_id = 9223372036854775807
+    with _connect() as conn:
+        sequence = conn.execute(
+            """
+            SELECT last_value, is_called
+            FROM adventurer.route_journeys_id_seq
+            """
+        ).fetchone()
+        route_id = _draft(conn, "lock-range")
+        _require(conn, route_id, "elevation", "100")
+        checkpoint_id = _checkpoint(conn, route_id, "summit", 0)
+        _threshold(conn, checkpoint_id, route_id, "elevation", "100")
+        _publish(conn, route_id)
+        user_id = _user(conn, "lock-range-user")
+        journeys = (
+            (min_id, 1),
+            (low_id, 2),
+            (aliased_id, 3),
+            (max_id, 4),
+        )
+        for journey_id, attempt in journeys:
+            conn.execute(
+                """
+                INSERT INTO adventurer.route_journeys (
+                    id, user_id, route_id, status, attempt_number, is_current
+                )
+                VALUES (%s, %s, %s, 'abandoned', %s, false)
+                """,
+                (journey_id, user_id, route_id, attempt),
+            )
+        activities = {
+            journey_id: _activity(conn, user_id, "10", None)
+            for journey_id, _attempt in journeys
+        }
+        assignments = {
+            journey_id: _assign(conn, activity_id, journey_id, user_id, route_id)
+            for journey_id, activity_id in activities.items()
+        }
+        for journey_id in (min_id, max_id):
+            _credit(
+                conn, assignments[journey_id], journey_id, route_id, "elevation", "10"
+            )
+        conn.commit()
+    insert = """
+        INSERT INTO adventurer.journey_credits (
+            assignment_id, journey_id, route_id, metric_code, credited_amount
+        )
+        VALUES (%s, %s, %s, 'elevation', 10)
+    """
+    release = threading.Event()
+    holding = threading.Event()
+    holder_state: dict = {}
+
+    def hold() -> None:
+        connection = _connect()
+        try:
+            holder_state["pid"] = connection.execute(
+                "SELECT pg_backend_pid() AS pid"
+            ).fetchone()["pid"]
+            connection.execute(insert, (assignments[low_id], low_id, route_id))
+            holding.set()
+            if not release.wait(timeout=8):
+                raise AssertionError("the held credit lock was not released")
+            connection.commit()
+            holder_state["result"] = "committed"
+        except Exception as exc:
+            connection.rollback()
+            holder_state["result"] = str(exc)
+        finally:
+            connection.close()
+
+    thread = threading.Thread(target=hold)
+    try:
+        thread.start()
+        assert holding.wait(timeout=8)
+        with _connect() as monitor:
+            monitor.autocommit = True
+            locks = monitor.execute(
+                """
+                SELECT classid::bigint AS high_bits,
+                       objid::bigint AS low_bits,
+                       objsubid
+                FROM pg_locks
+                WHERE locktype = 'advisory'
+                  AND pid = %s
+                  AND granted
+                  AND objsubid = 1
+                """,
+                (holder_state["pid"],),
+            ).fetchall()
+        high_bits, low_bits = _advisory_halves(low_id)
+        assert any(
+            row["high_bits"] == high_bits and row["low_bits"] == low_bits
+            for row in locks
+        )
+        with _connect() as other:
+            other.execute("SET statement_timeout = '3s'")
+            other.execute(insert, (assignments[aliased_id], aliased_id, route_id))
+            other.commit()
+    finally:
+        release.set()
+        thread.join(timeout=8)
+        with _connect() as conn:
+            conn.execute("SELECT set_config('adventurer.account_deletion', 'on', true)")
+            conn.execute(
+                """
+                UPDATE adventurer.users
+                SET deletion_state = 'deleting'
+                WHERE id = %s
+                """,
+                (user_id,),
+            )
+            conn.execute(
+                "DELETE FROM adventurer.journey_credits WHERE route_id = %s",
+                (route_id,),
+            )
+            conn.execute(
+                "DELETE FROM adventurer.route_journeys WHERE user_id = %s",
+                (user_id,),
+            )
+            conn.execute("DELETE FROM adventurer.routes WHERE id = %s", (route_id,))
+            conn.execute("DELETE FROM adventurer.users WHERE id = %s", (user_id,))
+            conn.execute(
+                "SELECT setval('adventurer.route_journeys_id_seq', %s, %s)",
+                (sequence["last_value"], sequence["is_called"]),
+            )
+            conn.commit()
+    assert holder_state["result"] == "committed"
+
+
+def test_credit_moves_between_journeys_lock_lower_id_first():
+    _upgrade()
+    with _connect() as conn:
+        route_id = _draft(conn, "lock-move")
+        _require(conn, route_id, "elevation", "100")
+        checkpoint_id = _checkpoint(conn, route_id, "summit", 0)
+        _threshold(conn, checkpoint_id, route_id, "elevation", "100")
+        _publish(conn, route_id)
+        user_id = _user(conn, "lock-move-user")
+        low_journey = _journey(conn, user_id, route_id)
+        high_journey = conn.execute(
+            """
+            INSERT INTO adventurer.route_journeys (
+                user_id, route_id, status, attempt_number, is_current
+            )
+            VALUES (%s, %s, 'abandoned', 2, false)
+            RETURNING id
+            """,
+            (user_id, route_id),
+        ).fetchone()["id"]
+        assert low_journey < high_journey
+        low_source = _assign(
+            conn, _activity(conn, user_id, "50", None), low_journey, user_id, route_id
+        )
+        low_destination = _assign(
+            conn, _activity(conn, user_id, "50", None), low_journey, user_id, route_id
+        )
+        high_source = _assign(
+            conn, _activity(conn, user_id, "50", None), high_journey, user_id, route_id
+        )
+        high_destination = _assign(
+            conn, _activity(conn, user_id, "50", None), high_journey, user_id, route_id
+        )
+        low_credit = _credit(
+            conn, low_source, low_journey, route_id, "elevation", "30"
+        )
+        high_credit = _credit(
+            conn, high_source, high_journey, route_id, "elevation", "50"
+        )
+        conn.commit()
+    move = """
+        UPDATE adventurer.journey_credits
+        SET assignment_id = %s, journey_id = %s
+        WHERE id = %s
+    """
+    try:
+        moved = _overlap_writes(
+            [
+                (move, (high_destination, high_journey, low_credit)),
+                (move, (low_destination, low_journey, high_credit)),
+            ]
+        )
+        assert sorted(moved) == ["committed", "committed"]
+        with _connect() as conn:
+            totals = {
+                row["journey_id"]: row["credited_total"]
+                for row in conn.execute(
+                    """
+                    SELECT journey_id, credited_total
+                    FROM adventurer.journey_metric_totals
+                    WHERE journey_id IN (%s, %s)
+                    """,
+                    (low_journey, high_journey),
+                ).fetchall()
+            }
+            assert totals[low_journey] == Decimal("50")
+            assert totals[high_journey] == Decimal("30")
+    finally:
+        with _connect() as conn:
+            conn.execute("SELECT set_config('adventurer.account_deletion', 'on', true)")
+            conn.execute(
+                """
+                UPDATE adventurer.users
+                SET deletion_state = 'deleting'
+                WHERE id = %s
+                """,
+                (user_id,),
+            )
+            conn.execute(
+                "DELETE FROM adventurer.journey_credits WHERE route_id = %s",
+                (route_id,),
+            )
+            conn.execute(
+                "DELETE FROM adventurer.route_journeys WHERE user_id = %s",
+                (user_id,),
             )
             conn.execute("DELETE FROM adventurer.routes WHERE id = %s", (route_id,))
             conn.execute("DELETE FROM adventurer.users WHERE id = %s", (user_id,))
