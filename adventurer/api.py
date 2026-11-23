@@ -685,14 +685,17 @@ def _optional_aware(body: dict, key: str) -> datetime | None:
 
 
 def _activity_fields(body: dict, *, creating: bool = True) -> dict:
-    fields = {
+    """Measured fields, minus the confirmation token.
+
+    A create or an update may send elevation, distance, or both. The activity
+    service decides which omissions are measurements and which stay unchanged.
+    """
+    del creating
+    return {
         key: value
         for key, value in body.items()
         if key != "confirmation_token"
     }
-    if creating and "elevation_ft" not in fields:
-        raise ApiError("invalid", "Add elevation.")
-    return fields
 
 
 def _with_metrics(journeys: list[dict]) -> list[dict]:

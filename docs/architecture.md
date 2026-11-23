@@ -6,7 +6,7 @@ Section 16 revises progress. A route requires one or more metrics, and a journey
 
 Section 17 adds achievements, collectibles, and a personal trophy case. It does not change journeys, activity credits, expedition participation, leaderboards, the privacy-removal deletes in section 5.9, lock order, or authentication.
 
-Section 18 adds the curated narrative experience. Migration 0010 and the chapter, journal, and acknowledgment API are implemented. Activity arrival lists, home pending arrivals, content seeding, and scene selection from route_media are not. The home presentation rules stay in docs/dynamic-home.md, and the HTTP contract stays in docs/api-v1.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
+Section 18 adds the curated narrative experience. Migration 0010, the chapter and journal API, activity arrival lists, and home pending arrivals are implemented. Content seeding and scene selection from route_media are not. The home presentation rules stay in docs/dynamic-home.md, and the HTTP contract stays in docs/api-v1.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
 
 
 1. Executive summary
@@ -805,7 +805,7 @@ No screens are part of this plan. The home payload is shaped for the Field Journ
 
 The active journey is the focus: route name, curated route image, current checkpoint, one indicator per required metric, and a continue action. It is not a combined fitness score. Paused journeys and expeditions are present and secondary. Invitations are present so the next action can offer them. Activity history remains a dated personal list through the existing activity endpoints. Those rows are the person's own log. The API does not accept user photos, motivational copy, or a social feed.
 
-Curated chapters, arrivals, journal entries, and discoveries are section 18. They are shared route content, not activity rows. The journal API is implemented. Home still does not carry their bodies. docs/dynamic-home.md governs the scene.
+Curated chapters, arrivals, journal entries, and discoveries are section 18. They are shared route content, not activity rows. The journal API, activity arrival lists, and home pending-arrival titles are implemented. Home still does not carry journal bodies, discovery bodies, or arrival bodies. docs/dynamic-home.md governs the scene.
 
 Organization profiles supply the branded place a Community tab can open: name, colors, welcome, and that organization's expeditions. Roster and party details stay on the expedition endpoints, for participants and managers only.
 
@@ -1111,7 +1111,7 @@ No migration, service, API, or interface is part of the current change.
 
 18. Narrative experience
 
-This section is the curated storytelling contract. Migration 0010_narrative_content is applied. Published chapters, the field journal, and arrival acknowledgments are implemented. Activity arrival lists, home pending arrivals, content seeding, and scene selection from route_media are not. Journey progress, activity credits, expedition standings, scene fallback, and the privacy-removal deletes in section 5.9 stay what sections 3, 5, 16, and docs/dynamic-home.md already define. Narrative content cannot award credits, complete a journey, change a participation, or write a leaderboard.
+This section is the curated storytelling contract. Migration 0010_narrative_content is applied. Published chapters, the field journal, arrival acknowledgments, activity arrival lists, and home pending arrivals are implemented. Content seeding and scene selection from route_media are not. Journey progress, activity credits, expedition standings, scene fallback, and the privacy-removal deletes in section 5.9 stay what sections 3, 5, 16, and docs/dynamic-home.md already define. Narrative content cannot award credits, complete a journey, change a participation, or write a leaderboard.
 
 The implemented prose is still adventurer/challenges.py. The implemented photographs are still adventurer/static/photos and adventurer/photo_credits.json. Section 18 is the replacement to build later, not a second live source.
 
@@ -1378,7 +1378,7 @@ Expedition membership does not grant a story the personal journey has not reache
 
 18.7 Implementation sequence
 
-Steps 1 and 2 are done. The chapter list and the journal routes from step 4 are done. Home still omits journal bodies. Steps 3 and 5 are not done, and activity arrival lists are not part of the implemented journal API. This sequence does not modify migrations 0001 through 0010.
+Steps 1, 2, and 4 are done. Home lists pending arrival titles on the active journey and still omits journal bodies, discovery bodies, and arrival bodies. Steps 3 and 5 are not done. This sequence does not modify migrations 0001 through 0010.
 
   1. Apply 0010_narrative_content on the isolated test database only.
   2. Read services and PostgreSQL tests for reach, hidden unreached bodies, acknowledgment idempotence, restart, and an edit that relocks a checkpoint.

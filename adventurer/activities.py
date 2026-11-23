@@ -23,6 +23,7 @@ from flask import current_app
 from .db import get_db
 from .journey_progress import CheckpointMark, assess_checkpoints, read_journey_progress
 from .metrics import FOOT_IN_METERS, MILE_IN_METERS, STORAGE_QUANTUM, MetricError, parse_measurement
+from .narrative import arrival_reveals
 
 MANUAL_EVENT_REASON = "Manual entry. Manual entries are not independently verified."
 TOKEN_TTL_SECONDS = 600
@@ -126,10 +127,11 @@ def create_activity(
             if confirmation_token:
                 raise _confirmation(_empty_preview(measurements))
             activity_id = _insert_activity(database, user_id, changes)
-            return _saved(database, activity_id, None), True
+            return _with_arrivals(_saved(database, activity_id, None), []), True
         proposal = _proposal(journey, measurements, previous={})
         _require_confirmation(confirmation_token, user_id, journey, proposal)
         activity_id = _insert_activity(database, user_id, changes)
+        reached = []
         if proposal["credits"]:
             _insert_assignment_credits(database, activity_id, user_id, journey, proposal["credits"])
             _touch_journey(
@@ -138,8 +140,15 @@ def create_activity(
                 credit_changed=True,
                 complete=proposal["will_complete"],
             )
-            _write_create_feed(database, user_id, activity_id, journey, proposal)
-        return _saved(database, activity_id, journey["id"] if proposal["credits"] else None), True
+            reached = _newly_reached(
+                database,
+                journey["route_id"],
+                _bases(journey, {}),
+                proposal["resulting"],
+            )
+            _write_create_feed(database, user_id, activity_id, journey, proposal, reached)
+        saved = _saved(database, activity_id, journey["id"] if proposal["credits"] else None)
+        return _with_arrivals(saved, arrival_reveals(database, journey["id"], reached)), True
 
     return _commit(write)
 
@@ -207,6 +216,7 @@ def update_activity(
             raise _confirmation(_preview_edit(database, user_id, loaded, changes))
         _apply_changes(database, activity_id, loaded, changes)
         journey_id = loaded["journey_id"]
+        arrivals = []
         if proposal is not None:
             _increase_credits(database, activity_id, user_id, credit_journey, loaded, proposal["credits"])
             if not proposal["credits"] and loaded["assignment_id"] is not None:
@@ -220,6 +230,13 @@ def update_activity(
                     credit_changed=True,
                     complete=proposal["will_complete"],
                 )
+                reached = _newly_reached(
+                    database,
+                    credit_journey["route_id"],
+                    _bases(credit_journey, {}),
+                    proposal["resulting"],
+                )
+                arrivals = arrival_reveals(database, credit_journey["id"], reached)
             if proposal["will_complete"]:
                 _write_summit_feed(
                     database,
@@ -228,7 +245,7 @@ def update_activity(
                     credit_journey,
                     proposal["resulting"],
                 )
-        return _saved(database, activity_id, journey_id), True
+        return _with_arrivals(_saved(database, activity_id, journey_id), arrivals), True
 
     return _commit(write)
 
@@ -272,7 +289,7 @@ def delete_activity(user_id: int, activity_id: int) -> dict:
             )
         database.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
         summary = None if journey is None else _saved_journey(database, journey["id"])
-        return {"activity_id": activity_id, "journey": summary}, True
+        return {"activity_id": activity_id, "journey": summary, "arrivals": []}, True
 
     return _commit(write)
 
@@ -1059,13 +1076,23 @@ def _touch_journey(database, journey_id: int, *, credit_changed: bool, complete:
         )
 
 
-def _write_create_feed(database, user_id: int, activity_id: int, journey: dict, proposal: dict) -> None:
+def _with_arrivals(saved: dict, arrivals: list[dict]) -> dict:
+    saved["arrivals"] = arrivals
+    return saved
+
+
+def _write_create_feed(
+    database,
+    user_id: int,
+    activity_id: int,
+    journey: dict,
+    proposal: dict,
+    reached: list[CheckpointMark],
+) -> None:
     participations = journey.get("participations") or []
     if not participations or not proposal["credits"]:
         return
-    before = _bases(journey, {})
     after = proposal["resulting"]
-    reached = _newly_reached(database, journey["route_id"], before, after)
     for participation in participations:
         _feed_row(
             database,
@@ -1164,6 +1191,13 @@ def _bases(journey: dict, previous: dict[str, Decimal]) -> dict[str, Decimal]:
 
 
 def _newly_reached(database, route_id: int, before: dict[str, Decimal], after: dict[str, Decimal]) -> list[CheckpointMark]:
+    """Checkpoints the locked totals missed and this proposal reaches.
+
+    ``before`` is the snapshot taken under the journey lock, before this
+    mutation writes credits. On an edit that snapshot already includes the
+    activity's current credit, so a checkpoint it had already opened is not
+    attributed to the edit.
+    """
     marks = _checkpoint_marks(database, route_id)
     previous = {mark.id for mark in assess_checkpoints(marks, before) if mark.reached}
     return [

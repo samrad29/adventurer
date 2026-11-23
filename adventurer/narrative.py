@@ -7,6 +7,9 @@ no locks. An acknowledgment locks the acting user, then that journey.
 A journal read is one repeatable-read, read-only transaction, so progress,
 stories, and acknowledgments come from the same snapshot. That setting ends
 with the transaction. Later work on the connection stays read committed.
+
+Arrival lists for an activity write, and pending titles for home, are selects
+on the caller's transaction. They do not acknowledge a story or take a lock.
 """
 
 from __future__ import annotations
@@ -30,6 +33,86 @@ class NarrativeError(Exception):
         super().__init__(message)
         self.code = code
         self.status = status
+
+
+def arrival_reveals(database, journey_id: int, checkpoints) -> list[dict]:
+    """Short published reveals for checkpoints this write newly reached.
+
+    ``checkpoints`` stays in route position order. A checkpoint with no
+    published story is left out. The acknowledgment flag is the row that
+    already exists. This does not insert one.
+    """
+    return _arrival_rows(database, journey_id, [mark.id for mark in checkpoints], pending=False)
+
+
+def pending_arrivals(database, journey_id: int, checkpoints) -> list[dict]:
+    """Unacknowledged published titles among checkpoints already reached.
+
+    Position order. Titles only. This does not write.
+    """
+    reached = [mark.id for mark in checkpoints if mark.reached]
+    return _arrival_rows(database, journey_id, reached, pending=True)
+
+
+def _arrival_rows(database, journey_id: int, checkpoint_ids: list[int], *, pending: bool) -> list[dict]:
+    if not checkpoint_ids:
+        return []
+    stories = database.execute(
+        """
+        SELECT story.checkpoint_id, story.arrival_title, story.arrival_body,
+               checkpoint.slug AS checkpoint_slug,
+               chapter.slug AS chapter_slug
+        FROM checkpoint_stories AS story
+        JOIN route_checkpoints AS checkpoint
+          ON checkpoint.id = story.checkpoint_id
+         AND checkpoint.route_id = story.route_id
+        LEFT JOIN route_chapters AS chapter
+          ON chapter.id = checkpoint.chapter_id
+         AND chapter.status = 'published'
+        WHERE story.checkpoint_id = ANY(?)
+          AND story.status = 'published'
+        """,
+        (checkpoint_ids,),
+    ).fetchall()
+    by_id = {row["checkpoint_id"]: row for row in stories}
+    seen = {
+        row["checkpoint_id"]
+        for row in database.execute(
+            """
+            SELECT checkpoint_id
+            FROM journey_story_views
+            WHERE journey_id = ? AND checkpoint_id = ANY(?)
+            """,
+            (journey_id, checkpoint_ids),
+        ).fetchall()
+    }
+    rows = []
+    for checkpoint_id in checkpoint_ids:
+        story = by_id.get(checkpoint_id)
+        if story is None:
+            continue
+        acknowledged = checkpoint_id in seen
+        if pending:
+            if acknowledged:
+                continue
+            rows.append(
+                {
+                    "checkpoint_slug": story["checkpoint_slug"],
+                    "chapter_slug": story["chapter_slug"],
+                    "arrival_title": story["arrival_title"],
+                }
+            )
+            continue
+        rows.append(
+            {
+                "checkpoint_slug": story["checkpoint_slug"],
+                "chapter_slug": story["chapter_slug"],
+                "arrival_title": story["arrival_title"],
+                "arrival_body": story["arrival_body"],
+                "acknowledged": acknowledged,
+            }
+        )
+    return rows
 
 
 def chapters_for_routes(database, route_ids: list[int]) -> dict[int, list[dict]]:

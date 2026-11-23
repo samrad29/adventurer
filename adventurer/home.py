@@ -17,6 +17,7 @@ from .expeditions import board_metrics, list_received_invitations
 from .journey_progress import CheckpointMark, read_journey_progress
 from .journeys import JourneyError, list_journeys
 from .metrics import MetricProgress, assess_metric
+from .narrative import pending_arrivals
 from .scene import select_scene
 from .services import get_adventurer
 
@@ -173,6 +174,10 @@ def _presentation(database, journey: dict, *, focus: bool = False) -> dict:
             _photos_root(),
         ),
     }
+    if not focus and journey["status"] == "active":
+        body["pending_arrivals"] = pending_arrivals(
+            database, progress.journey_id, progress.checkpoints
+        )
     if focus:
         body["journey_id"] = journey["id"]
     else:

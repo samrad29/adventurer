@@ -161,7 +161,7 @@ Another person's activity or journey returns 403 `forbidden`, which is the servi
 
 ## Home
 
-`GET /api/v1/home` is aggregation only. It does not resume, restart, accept an invitation, or complete a due expedition. `docs/architecture.md` says lazy completion runs before a home read. This API does not do that, because a home GET is not allowed to change domain state. Due organization expeditions still complete on the next join or expedition read. The implemented home payload does not include journal bodies, discoveries, or arrival acknowledgments.
+`GET /api/v1/home` is aggregation only. It does not resume, restart, accept an invitation, or complete a due expedition. `docs/architecture.md` says lazy completion runs before a home read. This API does not do that, because a home GET is not allowed to change domain state. Due organization expeditions still complete on the next join or expedition read. The implemented home payload does not include journal bodies, discovery bodies, or arrival bodies. The active journey includes `pending_arrivals` for reached stories this attempt has not acknowledged.
 
 `journey` is the active journey, or null. A paused, completed, or abandoned attempt is never placed there. `focus` is `{journey_id, status: "active"}` when a journey is active, the full presentation of one finished attempt when nothing is active or paused, and null when the state is `ready` or `resume`. `state` is `ready`, `active`, `resume`, `completed`, or `abandoned`.
 
@@ -174,7 +174,7 @@ The home scene uses every required metric and the checkpoint thresholds, then th
   "you": {"id": 1, "name": "Sam"},
   "state": "active",
   "next_actions": [{"type": "continue_journey", "journey_id": 10, "route_slug": "everest"}],
-  "journey": {"id": 10, "status": "active", "scene": {"role": "route_hero", "checkpoint_slug": null}},
+  "journey": {"id": 10, "status": "active", "pending_arrivals": [], "scene": {"role": "route_hero", "checkpoint_slug": null}},
   "focus": {"journey_id": 10, "status": "active"},
   "paused_journeys": [],
   "expeditions": [],
@@ -184,7 +184,7 @@ The home scene uses every required metric and the checkpoint thresholds, then th
 
 ## Target metric contract
 
-Home, route catalog, and journey reads use the metric objects below. Activity writes still require `elevation_ft` at the HTTP boundary. A distance-only activity body is not accepted yet. Authentication, CSRF, status codes, and error bodies do not change. Do not send `total_ft`, `remaining_ft`, `percent`, or `summit_ft`. Those fields are not returned.
+Home, route catalog, and journey reads use the metric objects below. Activity writes accept `elevation_ft`, `distance_mi`, or both. An omitted measurement is not stored as zero. Authentication, CSRF, status codes, and error bodies do not change. Do not send `total_ft`, `remaining_ft`, `percent`, or `summit_ft`. Those fields are not returned.
 
 The target shape gives every required metric the same object. Amounts are decimal strings in the display unit named by `unit`. `ft` is the international foot. `mi` is the statute mile. Storage and confirmation stay in meters. There is no route-level percent. A metric the route does not require is omitted.
 
@@ -381,7 +381,7 @@ An activity may send `elevation_ft`, `distance_mi`, or both. Omit a metric that 
 
 ## Narrative contract
 
-Published chapters, the field journal, and arrival acknowledgments are implemented. Activity `arrivals` and home `pending_arrivals` below are still proposed. `docs/architecture.md` section 18 is the domain rule. `docs/dynamic-home.md` remains the scene rule. Amounts stay out of these payloads. Story text does not award credit.
+Published chapters, the field journal, arrival acknowledgments, activity `arrivals`, and home `pending_arrivals` are implemented. Content seeding and scene selection from `route_media` are not. `docs/architecture.md` section 18 is the domain rule. `docs/dynamic-home.md` remains the scene rule. Amounts stay out of these payloads. Story text does not award credit.
 
 A checkpoint is unlocked only when the caller's own journey totals meet every one of its thresholds. That rule is the same for an elevation-only route, a distance-only route, and a combined route. Unreached arrivals, journal bodies, and discoveries are not returned. Another person's journey is 403 `forbidden`. An unreached checkpoint, a draft or retired story, and an unknown slug are 404 `not_found` with the same message. Anonymous callers can see published chapter structure on the route. They cannot see arrival text, journal text, or discoveries.
 
@@ -460,11 +460,12 @@ A reached checkpoint with a published story and no published chapter stays in th
 {"journey_id": 10, "checkpoint_slug": "gate", "acknowledged_at": "2026-06-01T15:04:00+00:00"}
 ```
 
-Not implemented. `POST /api/v1/activities` and `PATCH /api/v1/activities/<id>` add `arrivals` for checkpoints that write newly unlocked. A create uses the active journey. An update uses the journey that activity already credits, which may be paused or abandoned when the edit does not complete it. One activity that crosses two checkpoints returns both, in position order, for whichever metrics that route requires. The objects are the short reveal only. `journal_body` and discoveries are not included. The client loads those from the journal detail route. An edit that unlocks nothing, a 409 `resume_required` rejection, and every delete return `"arrivals": []` and write no acknowledgment. This list does not create `expedition_updates`. The feed rule in `docs/architecture.md` section 16.4 stays as it is.
+`POST /api/v1/activities` and `PATCH /api/v1/activities/<id>` add `arrivals` for checkpoints that this write newly unlocked. A create uses the active journey. An update uses the journey that activity already credits. That journey may be paused or abandoned when the edit does not complete it. The write that completes an active journey includes the final arrival, and `journey.status` in that response is completed. One activity that crosses two checkpoints returns both, in position order, for whichever metrics that route requires. The objects are the short reveal only. `journal_body` and discoveries are not included. The client loads those from the journal detail route. `journey.id` in the same response is the attempt. When the activity credits nothing, `journey` is null and `arrivals` is empty. No second journey identifier is added. An edit that unlocks nothing returns `"arrivals": []`. A 409 `resume_required` or `confirmation_required` rejection writes nothing and returns no arrival list. Preview does not return arrivals. `DELETE /api/v1/activities/<id>` keeps its `activity_id` and journey summary and returns `"arrivals": []`. None of these writes an acknowledgment. This list does not create `expedition_updates`. The feed rule in `docs/architecture.md` section 16.4 stays as it is.
 
 ```json
 {
   "activity": {"id": 40},
+  "journey": {"id": 10, "status": "active"},
   "arrivals": [
     {
       "checkpoint_slug": "gate",
@@ -477,7 +478,7 @@ Not implemented. `POST /api/v1/activities` and `PATCH /api/v1/activities/<id>` a
 }
 ```
 
-`GET /api/v1/home` may later add `pending_arrivals` on the active journey: `checkpoint_slug`, `chapter_slug`, and `arrival_title` for reached checkpoints that this attempt has not acknowledged. It does not add `arrival_body`, `journal_body`, discoveries, or extra images, and it does not change scene selection. Paused and finished journeys do not put those titles on the home scene. That field is not in the implemented home response. The implemented scene may still carry a null credit when `photo_credits.json` has no entry. A later scene row read from `route_media` is a published row, so its credit already meets section 18.4.
+`GET /api/v1/home` adds `pending_arrivals` on the active journey: `checkpoint_slug`, `chapter_slug`, and `arrival_title` for reached checkpoints that this attempt has not acknowledged. It does not add `arrival_body`, `journal_body`, discoveries, or extra images, and it does not change scene selection. Paused, abandoned, and completed attempts do not put those titles on the home scene. Their journals stay on the journey routes. The implemented scene may still carry a null credit when `photo_credits.json` has no entry. A later scene row read from `route_media` is not selected yet. A published row from that table would already meet section 18.4.
 
 ## What the Expo client needs first
 
@@ -485,4 +486,4 @@ Not implemented. `POST /api/v1/activities` and `PATCH /api/v1/activities/<id>` a
 2. Send `Authorization: Bearer` on later requests. Native clients do not need CSRF. A browser client that uses the cookie must send `X-CSRF-Token`.
 3. Treat 409 `restart_required` and `confirmation_required` as instructions to show a confirmation step, then call restart or resubmit with the new token. Do not retry a stale summit token.
 4. Use `GET /api/v1/home` for the first screen. The implemented payload reports elevation in feet. The target payload in the metric section reports one object per required metric, in feet or miles, and does not add those objects together. Activity elevation is feet. The target distance field is miles.
-5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API. Achievement and trophy-case routes are not in this contract. The domain is `docs/architecture.md` section 17. Chapter, journal, and acknowledgment routes below are implemented. Activity arrivals and home pending arrivals are not.
+5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API. Achievement and trophy-case routes are not in this contract. The domain is `docs/architecture.md` section 17. Chapter, journal, acknowledgment, activity arrival, and home pending-arrival routes are implemented. Content seeding and scene selection from `route_media` are not.
