@@ -1,15 +1,13 @@
-"""Personal activities and the one journey credit each activity may earn.
+"""Personal activities and the journey credits they may earn.
 
-An activity stores the full elevation the person recorded. A journey credit
-is the part of that elevation that advances exactly one route journey. This
-module does not serve HTTP, choose photos, or manage expedition membership.
+An activity stores the elevation and distance that were recorded. A journey
+credit is the part of one required metric that still fits that route. One
+activity has at most one assignment. Elevation and distance are credited
+separately, and neither one finishes the journey while the other is short.
 
-The future HTTP layer should call ``preview_activity`` before creating an
-activity and ``preview_activity_update`` before changing an existing one.
-When either preview says the active journey would be completed, pass that
-preview's confirmation token back into the matching save. The save locks
-the current rows and checks the token against the credit it just calculated.
-It does not trust the numbers from the preview.
+Preview reads are not writes. A save that would finish every required metric
+recalculates the credits under the journey lock and checks a signed token
+against that result. The token is not a source of amounts.
 """
 
 from __future__ import annotations
@@ -18,21 +16,18 @@ import hashlib
 import hmac
 import time
 from datetime import date, datetime
-from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import Decimal
 
 from flask import current_app
 
 from .db import get_db
-from .measures import (
-    ELEVATION_QUANTUM,
-    feet_to_meters,
-    kilometers_to_meters,
-)
+from .journey_progress import CheckpointMark, assess_checkpoints, read_journey_progress
+from .metrics import FOOT_IN_METERS, MILE_IN_METERS, STORAGE_QUANTUM, MetricError, parse_measurement
 
 MANUAL_EVENT_REASON = "Manual entry. Manual entries are not independently verified."
 TOKEN_TTL_SECONDS = 600
-MAX_ELEVATION_FT = Decimal("10000")
-MAX_DISTANCE_KM = Decimal("120")
+MAX_ELEVATION_M = Decimal("10000") * FOOT_IN_METERS
+MAX_DISTANCE_M = Decimal("75") * MILE_IN_METERS
 MAX_NOTE = 280
 ACTIVITY_TYPES = frozenset(
     {"run", "hike", "walk", "stair_climb", "other", "unspecified"}
@@ -40,7 +35,7 @@ ACTIVITY_TYPES = frozenset(
 _FIELDS = frozenset(
     {
         "elevation_ft",
-        "distance_km",
+        "distance_mi",
         "happened_on",
         "note",
         "activity_type",
@@ -52,7 +47,9 @@ _FIELDS = frozenset(
 _COMPLETED_JOURNEY = (
     "credits on a completed journey cannot be changed",
     "an activity credited to a completed journey cannot be deleted",
+    "an assignment on a completed journey cannot be changed",
     "elevation credited to a completed journey cannot change",
+    "distance credited to a completed journey cannot change",
 )
 
 
@@ -86,24 +83,25 @@ def translate_database_error(exc: BaseException) -> ActivityError | None:
             status=409,
         )
     if sqlstate == "P0001" and (
-        "credited elevation cannot exceed the activity elevation" in message
-        or "activity elevation cannot fall below the credited amount" in message
+        "credited amount cannot exceed the activity measurement" in message
+        or "cannot fall below the credited amount" in message
+        or "credit exceeds the route target" in message
     ):
         return ActivityError(
             "invalid",
-            "The credited elevation is not valid for this activity.",
+            "The credited amount is not valid for this activity.",
             status=400,
         )
     return None
 
 
 def preview_activity(user_id: int, fields: dict) -> dict:
-    """Read-only preview of a new activity and its potential journey credit."""
+    """Read-only preview of a new activity and the credits it would add."""
     changes = _changes(fields, creating=True)
     database = get_db()
     try:
         _require_user(database, user_id, lock=False)
-        return _preview_new(database, user_id, changes["elevation_m"])
+        return _preview_new(database, user_id, changes)
     except ActivityError:
         database.rollback()
         raise
@@ -117,62 +115,41 @@ def create_activity(
     *,
     confirmation_token: str | None = None,
 ) -> dict:
-    """Store one manual activity and, when a journey is active, its credit."""
+    """Store one activity and, when the active journey can take it, its credits."""
     changes = _changes(fields, creating=True)
 
     def write(database):
         _require_user(database, user_id, lock=True)
-        active = _lock_active_journey(database, user_id)
-        if active is None:
+        journey = _lock_active_journey(database, user_id)
+        measurements = _measurements_from_changes(changes)
+        if journey is None:
             if confirmation_token:
-                raise _confirmation(_empty_preview(changes["elevation_m"]))
+                raise _confirmation(_empty_preview(measurements))
             activity_id = _insert_activity(database, user_id, changes)
-            return _saved(database, activity_id, None, None), True
-
-        proposal = _proposal(
-            active,
-            changes["elevation_m"],
-            previous_credit=Decimal("0.00000"),
-        )
-        if proposal["will_complete"] and not _token_matches(
-            confirmation_token,
-            user_id,
-            active["id"],
-            active["progress_version"],
-            proposal["credited_m"],
-        ):
-            raise _confirmation(_preview_from_proposal(active, proposal))
+            return _saved(database, activity_id, None), True
+        proposal = _proposal(journey, measurements, previous={})
+        _require_confirmation(confirmation_token, user_id, journey, proposal)
         activity_id = _insert_activity(database, user_id, changes)
-        credited = None
-        if proposal["credited_m"] > 0:
-            _insert_credit(
-                database,
-                activity_id,
-                active["id"],
-                user_id,
-                proposal["credited_m"],
-            )
+        if proposal["credits"]:
+            _insert_assignment_credits(database, activity_id, user_id, journey, proposal["credits"])
             _touch_journey(
                 database,
-                active["id"],
+                journey["id"],
                 credit_changed=True,
                 complete=proposal["will_complete"],
             )
-            _write_feed(database, user_id, activity_id, active, proposal)
-            credited = proposal["credited_m"]
-        return _saved(database, activity_id, credited, active["id"]), True
+            _write_create_feed(database, user_id, activity_id, journey, proposal)
+        return _saved(database, activity_id, journey["id"] if proposal["credits"] else None), True
 
     return _commit(write)
 
 
 def preview_activity_update(user_id: int, activity_id: int, fields: dict) -> dict:
-    """Read-only preview of an edit, including a replacement journey credit.
+    """Read-only preview of an edit, including replacement credits.
 
-    Call this before ``update_activity`` when the edit may finish the active
-    journey. The returned token is bound to that journey's current progress
-    version and to the replacement credit, not to the activity's full elevation.
-    A paused or abandoned journey that would reach its target sets
-    ``resume_required`` and does not issue a token.
+    A paused or abandoned journey that would reach every target sets
+    ``resume_required`` and does not issue a token. The token is bound to
+    the replacement credits, not to the activity's full measurements.
     """
     _require_id(activity_id, "activity")
     changes = _changes(fields, creating=False)
@@ -180,7 +157,7 @@ def preview_activity_update(user_id: int, activity_id: int, fields: dict) -> dic
     try:
         _require_user(database, user_id, lock=False)
         loaded = _load_owned(database, user_id, activity_id)
-        return _preview_edit(database, loaded, changes)
+        return _preview_edit(database, user_id, loaded, changes)
     except ActivityError:
         database.rollback()
         raise
@@ -195,99 +172,92 @@ def update_activity(
     *,
     confirmation_token: str | None = None,
 ) -> dict:
-    """Change the caller's activity. Elevation edits recalculate one credit."""
+    """Change the caller's activity and recalculate each metric credit."""
     _require_id(activity_id, "activity")
     changes = _changes(fields, creating=False)
 
     def write(database):
         _require_user(database, user_id, lock=True)
-        loaded = _lock_owned(
-            database,
-            user_id,
-            activity_id,
-            lock_feed="elevation_m" in changes,
-        )
-        credit = loaded["credit"]
-        journey = loaded["journey"]
-        elevation_changed = (
-            "elevation_m" in changes
-            and changes["elevation_m"] != loaded["elevation_m"]
-        )
+        loaded, journey = _lock_for_update(database, user_id, activity_id, changes)
+        measurements = _merged_measurements(loaded, changes)
+        credit_journey = journey if _credits_can_change(loaded, journey, changes) else None
         proposal = None
-        if elevation_changed and credit is not None:
-            if journey["status"] == "completed":
-                raise ActivityError(
-                    "invalid_state",
-                    "Elevation on a completed journey cannot change.",
-                    status=409,
-                )
-            proposal = _proposal(
-                journey,
-                changes["elevation_m"],
-                previous_credit=credit["credited_elevation_m"],
-            )
-            if proposal["resume_required"]:
-                raise ActivityError(
-                    "resume_required",
-                    "Resume this journey before it can be completed.",
-                    status=409,
-                    journey_id=journey["id"],
-                    journey_status=journey["status"],
-                )
-            if proposal["will_complete"] and not _token_matches(
-                confirmation_token,
-                user_id,
-                journey["id"],
-                journey["progress_version"],
-                proposal["credited_m"],
-            ):
-                raise _confirmation(_preview_from_proposal(journey, proposal))
-        _apply_metadata(database, activity_id, loaded, changes)
-        if elevation_changed:
-            _apply_elevation(database, activity_id, credit, changes["elevation_m"], proposal)
-            if proposal is not None and (
-                proposal["credit_changed"] or proposal["will_complete"]
-            ):
+        if credit_journey is not None:
+            if credit_journey["status"] == "completed":
+                _reject_completed_progress_edit(loaded, changes)
+            else:
+                proposal = _proposal(credit_journey, measurements, previous=loaded["credits"])
+                if proposal["resume_required"]:
+                    raise ActivityError(
+                        "resume_required",
+                        "Resume this journey before it can be completed.",
+                        status=409,
+                        journey_id=credit_journey["id"],
+                        journey_status=credit_journey["status"],
+                    )
+                _require_confirmation(confirmation_token, user_id, credit_journey, proposal)
+                _reduce_credits(database, loaded, proposal["credits"])
+        elif confirmation_token:
+            raise _confirmation(_preview_edit(database, user_id, loaded, changes))
+        _apply_changes(database, activity_id, loaded, changes)
+        journey_id = loaded["journey_id"]
+        if proposal is not None:
+            _increase_credits(database, activity_id, user_id, credit_journey, loaded, proposal["credits"])
+            if not proposal["credits"] and loaded["assignment_id"] is not None:
+                _delete_assignment(database, loaded["assignment_id"])
+            if proposal["credits"] or proposal["credit_changed"] or proposal["will_complete"]:
+                journey_id = credit_journey["id"]
+            if proposal["credit_changed"] or proposal["will_complete"]:
                 _touch_journey(
                     database,
-                    journey["id"],
-                    credit_changed=proposal["credit_changed"],
+                    credit_journey["id"],
+                    credit_changed=True,
                     complete=proposal["will_complete"],
                 )
-            if proposal is not None and proposal["will_complete"]:
-                _write_summit_updates(
+            if proposal["will_complete"]:
+                _write_summit_feed(
                     database,
                     user_id,
                     activity_id,
-                    journey,
-                    proposal["resulting_total_m"],
+                    credit_journey,
+                    proposal["resulting"],
                 )
-        credited, journey_id = _credit_link(database, activity_id)
-        return _saved(database, activity_id, credited, journey_id), True
+        return _saved(database, activity_id, journey_id), True
 
     return _commit(write)
 
 
 def delete_activity(user_id: int, activity_id: int) -> dict:
-    """Delete the caller's activity and its journey credit when that is allowed."""
+    """Delete the caller's activity and every credit on its assignment."""
     _require_id(activity_id, "activity")
 
     def write(database):
         _require_user(database, user_id, lock=True)
-        loaded = _lock_owned(database, user_id, activity_id)
-        credit = loaded["credit"]
-        journey = loaded["journey"]
-        if credit is not None and journey["status"] == "completed":
+        owner = _owner_row(database, user_id, activity_id)
+        if owner is None:
+            raise ActivityError("not_found", "That activity does not exist.", status=404)
+        hint = _assignment_journey_id(database, activity_id)
+        journey = None
+        if hint is not None:
+            journey = _lock_credit_journey(database, user_id, hint)
+        database.execute(
+            "SELECT id FROM activities WHERE id = ? FOR UPDATE",
+            (activity_id,),
+        )
+        loaded = _load_owned(database, user_id, activity_id)
+        if loaded["journey_id"] != hint:
+            raise ActivityError(
+                "conflict",
+                "The activity changed during this update. Try again.",
+                status=409,
+            )
+        if loaded["credits"] and journey is not None and journey["status"] == "completed":
             raise ActivityError(
                 "invalid_state",
                 "An activity credited to a completed journey cannot be deleted.",
                 status=409,
             )
-        if credit is not None:
-            database.execute(
-                "DELETE FROM journey_credits WHERE id = ? AND activity_id = ?",
-                (credit["id"], activity_id),
-            )
+        if loaded["credits"] and journey is not None:
             _touch_journey(
                 database,
                 journey["id"],
@@ -295,35 +265,39 @@ def delete_activity(user_id: int, activity_id: int) -> dict:
                 complete=False,
             )
         database.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
-        summary = None if journey is None else _journey_summary(database, journey["id"])
+        summary = None if journey is None else _saved_journey(database, journey["id"])
         return {"activity_id": activity_id, "journey": summary}, True
 
     return _commit(write)
 
 
 def list_activities(user_id: int) -> list[dict]:
-    """The caller's own activities, newest first, with any journey credit beside them."""
+    """The caller's activities, newest first, with any metric credits beside them."""
     database = get_db()
     try:
         _require_user(database, user_id, lock=False)
         rows = database.execute(
             f"""
             SELECT {_ACTIVITY_COLUMNS},
-                   credit.credited_elevation_m,
-                   credit.journey_id,
+                   assignment.journey_id,
                    journey.status AS journey_status,
                    journey.route_id AS credit_route_id,
-                   route.slug AS route_slug
+                   route.slug AS route_slug,
+                   credit.metric_code,
+                   credit.credited_amount
             FROM activities AS activity
-            LEFT JOIN journey_credits AS credit ON credit.activity_id = activity.id
-            LEFT JOIN route_journeys AS journey ON journey.id = credit.journey_id
+            LEFT JOIN activity_journey_assignments AS assignment
+                ON assignment.activity_id = activity.id
+            LEFT JOIN journey_credits AS credit
+                ON credit.assignment_id = assignment.id
+            LEFT JOIN route_journeys AS journey ON journey.id = assignment.journey_id
             LEFT JOIN routes AS route ON route.id = journey.route_id
             WHERE activity.user_id = ?
-            ORDER BY activity.activity_date DESC, activity.id DESC
+            ORDER BY activity.activity_date DESC, activity.id DESC, credit.metric_code
             """,
             (user_id,),
         ).fetchall()
-        return [_history_row(row) for row in rows]
+        return _group_history(rows)
     except ActivityError:
         database.rollback()
         raise
@@ -332,21 +306,21 @@ def list_activities(user_id: int) -> list[dict]:
 
 
 def get_activity(user_id: int, activity_id: int) -> dict:
-    """One of the caller's activities, including a journey credit when one exists."""
+    """One of the caller's activities, including metric credits when they exist."""
     _require_id(activity_id, "activity")
     database = get_db()
     try:
         _require_user(database, user_id, lock=False)
-        row = _history_query(database, activity_id)
-        if row is None:
+        rows = _history_rows(database, activity_id)
+        if not rows:
             raise ActivityError("not_found", "That activity does not exist.", status=404)
-        if row["user_id"] != user_id:
+        if rows[0]["user_id"] != user_id:
             raise ActivityError(
                 "forbidden",
                 "You cannot open another person's activity.",
                 status=403,
             )
-        return _history_row(row)
+        return _group_history(rows)[0]
     except ActivityError:
         database.rollback()
         raise
@@ -389,6 +363,20 @@ def _confirmation(preview: dict) -> ActivityError:
     )
 
 
+def _require_confirmation(token, user_id: int, journey: dict, proposal: dict) -> None:
+    if token is None and not proposal["will_complete"]:
+        return
+    if proposal["will_complete"] and _token_matches(
+        token,
+        user_id,
+        journey["id"],
+        journey["progress_version"],
+        proposal["credits"],
+    ):
+        return
+    raise _confirmation(_preview_from_proposal(journey, proposal))
+
+
 def _require_user(database, user_id: int, *, lock: bool) -> None:
     if not isinstance(user_id, int) or isinstance(user_id, bool) or user_id <= 0:
         raise ActivityError("not_found", "That account does not exist.", status=404)
@@ -413,14 +401,10 @@ def _require_id(value: int, label: str) -> None:
 
 
 def _lock_active_journey(database, user_id: int) -> dict | None:
-    """Lock the caller's active journey after the expeditions that can hear about it.
-
-    The user row is already locked. Expeditions come next, then the journey,
-    then the participations that still point at it.
-    """
+    """Lock the caller's active journey after the expeditions that can hear about it."""
     found = database.execute(
         """
-        SELECT id, route_id
+        SELECT id
         FROM route_journeys
         WHERE user_id = ? AND status = 'active'
         """,
@@ -428,7 +412,37 @@ def _lock_active_journey(database, user_id: int) -> dict | None:
     ).fetchone()
     if found is None:
         return None
-    expedition_ids = _lock_expeditions(database, user_id, found["id"], found["route_id"])
+    journey = _lock_credit_journey(database, user_id, found["id"])
+    if journey["status"] != "active" or journey["user_id"] != user_id:
+        raise ActivityError(
+            "conflict",
+            "The journey changed during this update. Try again.",
+            status=409,
+        )
+    return journey
+
+
+def _lock_credit_journey(database, user_id: int, journey_id: int) -> dict:
+    """Lock expeditions, then this journey, then its active participations.
+
+    The caller already holds the user row. Metric totals are read after the
+    journey lock and before any credit write.
+    """
+    found = database.execute(
+        """
+        SELECT id, user_id, route_id
+        FROM route_journeys
+        WHERE id = ?
+        """,
+        (journey_id,),
+    ).fetchone()
+    if found is None or found["user_id"] != user_id:
+        raise ActivityError(
+            "conflict",
+            "The activity changed during this update. Try again.",
+            status=409,
+        )
+    _lock_expeditions(database, user_id, found["id"], found["route_id"])
     locked = database.execute(
         """
         SELECT id, user_id, route_id, status, progress_version
@@ -436,24 +450,22 @@ def _lock_active_journey(database, user_id: int) -> dict | None:
         WHERE id = ?
         FOR UPDATE
         """,
-        (found["id"],),
+        (journey_id,),
     ).fetchone()
-    if locked is None or locked["status"] != "active" or locked["user_id"] != user_id:
+    if locked is None or locked["user_id"] != user_id:
         raise ActivityError(
             "conflict",
             "The journey changed during this update. Try again.",
             status=409,
         )
-    participations = _lock_participations(
-        database, user_id, locked["id"], expedition_ids
-    )
-    described = _describe_journey(database, locked)
-    described["participations"] = participations
-    return described
+    participations = _lock_participations(database, user_id, locked["id"], locked["route_id"])
+    state = _journey_state(database, locked)
+    state["participations"] = participations
+    return state
 
 
-def _lock_expeditions(database, user_id: int, journey_id: int, route_id: int) -> list[int]:
-    rows = database.execute(
+def _lock_expeditions(database, user_id: int, journey_id: int, route_id: int) -> None:
+    database.execute(
         """
         SELECT expedition.id
         FROM expeditions AS expedition
@@ -471,60 +483,67 @@ def _lock_expeditions(database, user_id: int, journey_id: int, route_id: int) ->
         FOR UPDATE
         """,
         (route_id, user_id, journey_id),
-    ).fetchall()
-    return [row["id"] for row in rows]
+    )
 
 
-def _lock_participations(
-    database, user_id: int, journey_id: int, expedition_ids: list[int]
-) -> list[dict]:
-    if not expedition_ids:
-        return []
-    placeholders = ", ".join("?" for _ in expedition_ids)
+def _lock_participations(database, user_id: int, journey_id: int, route_id: int) -> list[dict]:
     database.execute(
-        f"""
+        """
         SELECT participation.id
         FROM expedition_participations AS participation
+        JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
         WHERE participation.user_id = ?
           AND participation.journey_id = ?
           AND participation.status = 'active'
-          AND participation.expedition_id IN ({placeholders})
+          AND expedition.status = 'active'
+          AND expedition.route_id = ?
         ORDER BY participation.id
-        FOR UPDATE
+        FOR UPDATE OF participation
         """,
-        (user_id, journey_id, *expedition_ids),
+        (user_id, journey_id, route_id),
     )
     rows = database.execute(
-        f"""
+        """
         SELECT participation.id, participation.expedition_id
         FROM expedition_participations AS participation
         JOIN expeditions AS expedition ON expedition.id = participation.expedition_id
         WHERE participation.user_id = ?
           AND participation.journey_id = ?
           AND participation.status = 'active'
-          AND participation.expedition_id IN ({placeholders})
           AND expedition.status = 'active'
-          AND expedition.route_id = (
-              SELECT route_id FROM route_journeys WHERE id = ?
-          )
+          AND expedition.route_id = ?
         ORDER BY participation.id
         """,
-        (user_id, journey_id, *expedition_ids, journey_id),
+        (user_id, journey_id, route_id),
     ).fetchall()
     return [dict(row) for row in rows]
 
 
-def _describe_journey(database, locked: dict) -> dict:
+def _journey_state(database, locked: dict) -> dict:
     route = database.execute(
-        """
-        SELECT slug, target_elevation_m
-        FROM routes
-        WHERE id = ?
-        """,
+        "SELECT slug FROM routes WHERE id = ?",
         (locked["route_id"],),
     ).fetchone()
-    total = _journey_total(database, locked["id"])
-    target = _meters(route["target_elevation_m"])
+    requirements = database.execute(
+        """
+        SELECT metric_code, target_amount
+        FROM route_requirements
+        WHERE route_id = ?
+        ORDER BY metric_code
+        """,
+        (locked["route_id"],),
+    ).fetchall()
+    totals = {
+        row["metric_code"]: row["credited_total"]
+        for row in database.execute(
+            """
+            SELECT metric_code, credited_total
+            FROM journey_metric_totals
+            WHERE journey_id = ?
+            """,
+            (locked["id"],),
+        ).fetchall()
+    }
     return {
         "id": locked["id"],
         "user_id": locked["user_id"],
@@ -532,88 +551,67 @@ def _describe_journey(database, locked: dict) -> dict:
         "route_slug": route["slug"],
         "status": locked["status"],
         "progress_version": locked["progress_version"],
-        "target_m": target,
-        "total_m": total,
-        "remaining_m": _remaining(target, total),
+        "requirements": [dict(row) for row in requirements],
+        "totals": totals,
+        "participations": [],
     }
 
 
-def _lock_owned(database, user_id: int, activity_id: int, *, lock_feed: bool = False) -> dict:
-    """Lock the user, then its journey, then the activity. Re-read after the locks.
-
-    The caller has already locked the user. A non-locking read discovers the
-    journey so the activity row is not locked before that journey. An elevation
-    edit also locks the expeditions and participations that could receive a
-    summit update, and it locks those before the journey.
-    """
-    owner = database.execute(
-        "SELECT id, user_id FROM activities WHERE id = ?",
-        (activity_id,),
-    ).fetchone()
-    if owner is None:
+def _lock_for_update(database, user_id: int, activity_id: int, changes: dict) -> tuple[dict, dict | None]:
+    """Lock the assigned or active journey before the activity row."""
+    if _owner_row(database, user_id, activity_id) is None:
         raise ActivityError("not_found", "That activity does not exist.", status=404)
-    if owner["user_id"] != user_id:
-        raise ActivityError(
-            "forbidden",
-            "You cannot change another person's activity.",
-            status=403,
-        )
-    hinted = _credit_journey_id(database, activity_id)
-    participations: list[dict] = []
-    if hinted is not None and lock_feed:
-        route = database.execute(
-            "SELECT route_id FROM route_journeys WHERE id = ?",
-            (hinted,),
-        ).fetchone()
-        if route is None:
-            raise ActivityError(
-                "conflict",
-                "The activity changed during this update. Try again.",
-                status=409,
-            )
-        expedition_ids = _lock_expeditions(database, user_id, hinted, route["route_id"])
-        database.execute(
-            """
-            SELECT id
-            FROM route_journeys
-            WHERE id = ?
-            FOR UPDATE
-            """,
-            (hinted,),
-        )
-        participations = _lock_participations(database, user_id, hinted, expedition_ids)
-    elif hinted is not None:
-        database.execute(
-            """
-            SELECT id
-            FROM route_journeys
-            WHERE id = ?
-            FOR UPDATE
-            """,
-            (hinted,),
-        )
+    hint = _assignment_journey_id(database, activity_id)
+    journey = None
+    if hint is not None:
+        journey = _lock_credit_journey(database, user_id, hint)
+    elif "elevation_m" in changes or "distance_m" in changes:
+        journey = _lock_active_journey(database, user_id)
     database.execute(
         "SELECT id FROM activities WHERE id = ? FOR UPDATE",
         (activity_id,),
     )
     loaded = _load_owned(database, user_id, activity_id)
-    journey_id = None if loaded["journey"] is None else loaded["journey"]["id"]
-    if journey_id != hinted:
+    if loaded["journey_id"] != hint:
         raise ActivityError(
             "conflict",
             "The activity changed during this update. Try again.",
             status=409,
         )
-    if loaded["journey"] is not None:
-        loaded["journey"]["participations"] = participations
-    return loaded
+    if journey is not None and loaded["journey_id"] == journey["id"]:
+        journey["participations"] = journey.get("participations") or []
+    return loaded, journey
 
 
-def _credit_journey_id(database, activity_id: int) -> int | None:
+def _credits_can_change(loaded: dict, journey: dict | None, changes: dict) -> bool:
+    if journey is None:
+        return False
+    if loaded["journey_id"] is not None:
+        return loaded["journey_id"] == journey["id"]
+    return "elevation_m" in changes or "distance_m" in changes
+
+
+def _owner_row(database, user_id: int, activity_id: int):
+    row = database.execute(
+        "SELECT id, user_id FROM activities WHERE id = ?",
+        (activity_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    if row["user_id"] != user_id:
+        raise ActivityError(
+            "forbidden",
+            "You cannot change another person's activity.",
+            status=403,
+        )
+    return row
+
+
+def _assignment_journey_id(database, activity_id: int) -> int | None:
     row = database.execute(
         """
         SELECT journey_id
-        FROM journey_credits
+        FROM activity_journey_assignments
         WHERE activity_id = ?
         """,
         (activity_id,),
@@ -640,47 +638,42 @@ def _load_owned(database, user_id: int, activity_id: int) -> dict:
             "You cannot change another person's activity.",
             status=403,
         )
-    credit_row = database.execute(
+    assignment = database.execute(
         """
-        SELECT id, credited_elevation_m, journey_id, user_id
-        FROM journey_credits
+        SELECT id, journey_id
+        FROM activity_journey_assignments
         WHERE activity_id = ?
         """,
         (activity_id,),
     ).fetchone()
-    journey = None
-    credit = None
-    if credit_row is not None:
-        if credit_row["user_id"] != user_id:
-            raise ActivityError(
-                "forbidden",
-                "You cannot change another person's activity.",
-                status=403,
-            )
-        locked = database.execute(
+    credits: dict[str, Decimal] = {}
+    journey_id = None
+    assignment_id = None
+    if assignment is not None:
+        assignment_id = assignment["id"]
+        journey_id = assignment["journey_id"]
+        for credit in database.execute(
             """
-            SELECT id, user_id, route_id, status, progress_version
-            FROM route_journeys
-            WHERE id = ?
+            SELECT metric_code, credited_amount
+            FROM journey_credits
+            WHERE assignment_id = ?
+            ORDER BY metric_code
             """,
-            (credit_row["journey_id"],),
-        ).fetchone()
-        journey = _describe_journey(database, locked)
-        credit = {
-            "id": credit_row["id"],
-            "credited_elevation_m": _meters(credit_row["credited_elevation_m"]),
-            "journey_id": credit_row["journey_id"],
-        }
+            (assignment_id,),
+        ).fetchall():
+            credits[credit["metric_code"]] = credit["credited_amount"]
     return {
-        "elevation_m": _meters(row["elevation_gain_m"]),
+        "elevation_m": row["elevation_gain_m"],
+        "distance_m": row["distance_m"],
         "started_at": row["started_at"],
         "ended_at": row["ended_at"],
-        "credit": credit,
-        "journey": journey,
+        "assignment_id": assignment_id,
+        "journey_id": journey_id,
+        "credits": credits,
     }
 
 
-def _preview_new(database, user_id: int, elevation_m: Decimal) -> dict:
+def _preview_new(database, user_id: int, changes: dict) -> dict:
     found = database.execute(
         """
         SELECT id, user_id, route_id, status, progress_version
@@ -689,79 +682,121 @@ def _preview_new(database, user_id: int, elevation_m: Decimal) -> dict:
         """,
         (user_id,),
     ).fetchone()
+    measurements = _measurements_from_changes(changes)
     if found is None:
-        return _empty_preview(elevation_m)
-    journey = _describe_journey(database, found)
-    proposal = _proposal(journey, elevation_m, previous_credit=Decimal("0.00000"))
-    return _preview_from_proposal(journey, proposal)
+        return _empty_preview(measurements)
+    journey = _journey_state(database, found)
+    return _preview_from_proposal(journey, _proposal(journey, measurements, previous={}))
 
 
-def _preview_edit(database, loaded: dict, changes: dict) -> dict:
-    elevation = changes.get("elevation_m", loaded["elevation_m"])
-    credit = loaded["credit"]
-    journey = loaded["journey"]
-    if credit is None or journey is None or "elevation_m" not in changes:
-        preview = _empty_preview(elevation)
-        preview["activity_elevation_m"] = elevation
-        if credit is not None and journey is not None:
-            preview = _preview_from_proposal(
-                journey,
-                _proposal(
-                    journey,
-                    loaded["elevation_m"],
-                    previous_credit=credit["credited_elevation_m"],
-                ),
-            )
-            preview["will_complete"] = False
-            preview["resume_required"] = False
-            preview["confirmation_token"] = None
-            preview["confirmation_expires_at"] = None
-        return preview
-    if elevation == loaded["elevation_m"]:
-        proposal = _proposal(
-            journey,
-            elevation,
-            previous_credit=credit["credited_elevation_m"],
-        )
+def _preview_edit(database, user_id: int, loaded: dict, changes: dict) -> dict:
+    measurements = _merged_measurements(loaded, changes)
+    journey = _preview_journey(database, user_id, loaded, changes)
+    if journey is None:
+        return _empty_preview(measurements)
+    if journey["status"] == "completed":
+        _reject_completed_progress_edit(loaded, changes)
+        proposal = _proposal(journey, measurements, previous=loaded["credits"])
         proposal["will_complete"] = False
         proposal["resume_required"] = False
         return _preview_from_proposal(journey, proposal)
-    if journey["status"] == "completed":
-        raise ActivityError(
-            "invalid_state",
-            "Elevation on a completed journey cannot change.",
-            status=409,
-        )
-    proposal = _proposal(
+    if loaded["journey_id"] is None and "elevation_m" not in changes and "distance_m" not in changes:
+        return _empty_preview(measurements)
+    return _preview_from_proposal(
         journey,
-        elevation,
-        previous_credit=credit["credited_elevation_m"],
+        _proposal(journey, measurements, previous=loaded["credits"] if loaded["journey_id"] else {}),
     )
-    return _preview_from_proposal(journey, proposal)
 
 
-def _proposal(journey: dict, elevation_m: Decimal, *, previous_credit: Decimal) -> dict:
-    """Credit math for one journey, excluding this activity's current credit."""
-    base = journey["total_m"] - _meters(previous_credit)
-    if base < 0:
-        base = Decimal("0.00000")
-    capacity = _remaining(journey["target_m"], base)
-    credited = elevation_m if elevation_m < capacity else capacity
-    credited = _meters(credited)
-    if credited < 0:
-        credited = Decimal("0.00000")
-    resulting = _meters(base + credited)
-    hits_target = credited > 0 and resulting >= journey["target_m"]
+def _preview_journey(database, user_id: int, loaded: dict, changes: dict) -> dict | None:
+    journey_id = loaded["journey_id"]
+    if journey_id is None and ("elevation_m" in changes or "distance_m" in changes):
+        found = database.execute(
+            """
+            SELECT id
+            FROM route_journeys
+            WHERE user_id = ? AND status = 'active'
+            """,
+            (user_id,),
+        ).fetchone()
+        if found is None:
+            return None
+        journey_id = found["id"]
+    if journey_id is None:
+        return None
+    locked = database.execute(
+        """
+        SELECT id, user_id, route_id, status, progress_version
+        FROM route_journeys
+        WHERE id = ?
+        """,
+        (journey_id,),
+    ).fetchone()
+    return _journey_state(database, locked)
+
+
+def _proposal(journey: dict, measurements: dict[str, Decimal | None], *, previous: dict[str, Decimal]) -> dict:
+    """Credit each required metric from the totals read under the journey lock."""
+    metrics = []
+    credits: dict[str, Decimal] = {}
+    resulting: dict[str, Decimal] = {}
+    before_met = []
+    after_met = []
+    for requirement in journey["requirements"]:
+        code = requirement["metric_code"]
+        target = requirement["target_amount"]
+        stored = journey["totals"].get(code, Decimal("0"))
+        prior = previous.get(code, Decimal("0"))
+        base = stored - prior
+        if base < 0:
+            base = Decimal("0")
+        measurement = measurements.get(code)
+        credit = _portion(measurement, target, base)
+        after = base + credit
+        if after > target:
+            after = target
+        if credit > 0:
+            credits[code] = credit
+        resulting[code] = after
+        before_met.append(base >= target)
+        after_met.append(after >= target)
+        metrics.append(
+            {
+                "metric": code,
+                "current_m": stored,
+                "target_m": target,
+                "remaining_m": target - base if target > base else Decimal("0"),
+                "measurement_m": measurement,
+                "credit_m": credit,
+                "resulting_m": after,
+                "complete": after >= target,
+            }
+        )
+    required = bool(journey["requirements"])
+    finished_before = required and all(before_met)
+    finished_after = required and all(after_met)
     status = journey["status"]
+    previous_positive = {code: amount for code, amount in previous.items() if amount > 0}
     return {
-        "previous_credited_m": _meters(previous_credit),
-        "credited_m": credited,
-        "resulting_total_m": resulting,
-        "activity_elevation_m": elevation_m,
-        "will_complete": status == "active" and hits_target,
-        "resume_required": status in ("paused", "abandoned") and hits_target,
-        "credit_changed": credited != _meters(previous_credit),
+        "metrics": metrics,
+        "credits": credits,
+        "resulting": resulting,
+        "measurements": measurements,
+        "will_complete": status == "active" and finished_after and not finished_before,
+        "resume_required": status in ("paused", "abandoned") and finished_after and not finished_before,
+        "credit_changed": credits != previous_positive,
     }
+
+
+def _portion(measurement: Decimal | None, target: Decimal, base: Decimal) -> Decimal:
+    if measurement is None or measurement <= 0:
+        return Decimal("0")
+    remaining = target - base
+    if remaining <= 0:
+        return Decimal("0")
+    if measurement < remaining:
+        return measurement
+    return remaining
 
 
 def _preview_from_proposal(journey: dict, proposal: dict) -> dict:
@@ -773,33 +808,30 @@ def _preview_from_proposal(journey: dict, proposal: dict) -> dict:
             journey["user_id"],
             journey["id"],
             journey["progress_version"],
-            proposal["credited_m"],
+            proposal["credits"],
             expires,
         )
-    credited = proposal["credited_m"]
+    measurements = proposal["measurements"]
     return {
         "journey": _journey_public(journey),
-        "activity_elevation_m": proposal["activity_elevation_m"],
-        "previous_credited_elevation_m": proposal["previous_credited_m"],
-        "credited_elevation_m": credited,
-        "resulting_total_m": proposal["resulting_total_m"],
+        "elevation_m": measurements.get("elevation"),
+        "distance_m": measurements.get("distance"),
+        "metrics": proposal["metrics"],
         "will_complete": proposal["will_complete"],
-        "credits_journey": credited > 0,
-        "saved_without_credit": credited <= 0,
+        "credits_journey": bool(proposal["credits"]),
+        "saved_without_credit": not proposal["credits"],
         "resume_required": proposal["resume_required"],
         "confirmation_token": token,
         "confirmation_expires_at": expires,
     }
 
 
-def _empty_preview(elevation_m: Decimal) -> dict:
-    zero = Decimal("0.00000")
+def _empty_preview(measurements: dict[str, Decimal | None]) -> dict:
     return {
         "journey": None,
-        "activity_elevation_m": elevation_m,
-        "previous_credited_elevation_m": zero,
-        "credited_elevation_m": zero,
-        "resulting_total_m": None,
+        "elevation_m": measurements.get("elevation"),
+        "distance_m": measurements.get("distance"),
+        "metrics": [],
         "will_complete": False,
         "credits_journey": False,
         "saved_without_credit": True,
@@ -810,16 +842,41 @@ def _empty_preview(elevation_m: Decimal) -> dict:
 
 
 def _journey_public(journey: dict) -> dict:
+    metrics = []
+    for requirement in journey["requirements"]:
+        code = requirement["metric_code"]
+        target = requirement["target_amount"]
+        credited = journey["totals"].get(code, Decimal("0"))
+        if credited > target:
+            credited = target
+        metrics.append(
+            {
+                "metric": code,
+                "target_m": target,
+                "credited_m": credited,
+                "complete": credited >= target,
+            }
+        )
     return {
         "id": journey["id"],
         "status": journey["status"],
         "progress_version": journey["progress_version"],
         "route_id": journey["route_id"],
         "route_slug": journey["route_slug"],
-        "total_m": journey["total_m"],
-        "remaining_m": journey["remaining_m"],
-        "target_m": journey["target_m"],
+        "metrics": metrics,
     }
+
+
+def _reject_completed_progress_edit(loaded: dict, changes: dict) -> None:
+    for metric, key in (("elevation", "elevation_m"), ("distance", "distance_m")):
+        if key not in changes or metric not in loaded["credits"]:
+            continue
+        if changes[key] != loaded[key]:
+            raise ActivityError(
+                "invalid_state",
+                "Progress on a completed journey cannot change.",
+                status=409,
+            )
 
 
 def _insert_activity(database, user_id: int, changes: dict) -> int:
@@ -850,7 +907,7 @@ def _insert_activity(database, user_id: int, changes: dict) -> int:
             changes.get("ended_at"),
             changes.get("duration_s"),
             changes.get("distance_m"),
-            changes["elevation_m"],
+            changes.get("elevation_m"),
             changes.get("note", ""),
         ),
     ).fetchone()
@@ -866,35 +923,112 @@ def _insert_activity(database, user_id: int, changes: dict) -> int:
     return row["id"]
 
 
-def _insert_credit(database, activity_id: int, journey_id: int, user_id: int, credited: Decimal) -> None:
+def _insert_assignment_credits(database, activity_id: int, user_id: int, journey: dict, credits: dict[str, Decimal]) -> None:
+    assignment_id = _insert_assignment(database, activity_id, user_id, journey)
+    for code in sorted(credits):
+        _insert_credit(database, assignment_id, journey, code, credits[code])
+
+
+def _insert_assignment(database, activity_id: int, user_id: int, journey: dict) -> int:
+    row = database.execute(
+        """
+        INSERT INTO activity_journey_assignments (
+            activity_id, journey_id, user_id, route_id
+        )
+        VALUES (?, ?, ?, ?)
+        RETURNING id
+        """,
+        (activity_id, journey["id"], user_id, journey["route_id"]),
+    ).fetchone()
+    return row["id"]
+
+
+def _insert_credit(database, assignment_id: int, journey: dict, metric: str, amount: Decimal) -> None:
     database.execute(
         """
         INSERT INTO journey_credits (
-            activity_id, journey_id, user_id, credited_elevation_m
+            assignment_id, journey_id, route_id, metric_code, credited_amount
         )
-        VALUES (?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?)
         """,
-        (activity_id, journey_id, user_id, credited),
+        (assignment_id, journey["id"], journey["route_id"], metric, amount),
+    )
+
+
+def _reduce_credits(database, loaded: dict, new_credits: dict[str, Decimal]) -> None:
+    if loaded["assignment_id"] is None:
+        return
+    for code in sorted(loaded["credits"]):
+        updated = new_credits.get(code, Decimal("0"))
+        current = loaded["credits"][code]
+        if updated >= current:
+            continue
+        if updated <= 0:
+            database.execute(
+                """
+                DELETE FROM journey_credits
+                WHERE assignment_id = ? AND metric_code = ?
+                """,
+                (loaded["assignment_id"], code),
+            )
+        else:
+            database.execute(
+                """
+                UPDATE journey_credits
+                SET credited_amount = ?
+                WHERE assignment_id = ? AND metric_code = ?
+                """,
+                (updated, loaded["assignment_id"], code),
+            )
+
+
+def _increase_credits(
+    database,
+    activity_id: int,
+    user_id: int,
+    journey: dict,
+    loaded: dict,
+    new_credits: dict[str, Decimal],
+) -> None:
+    if not new_credits:
+        return
+    assignment_id = loaded["assignment_id"]
+    if assignment_id is None:
+        assignment_id = _insert_assignment(database, activity_id, user_id, journey)
+        loaded["assignment_id"] = assignment_id
+    for code in sorted(new_credits):
+        current = loaded["credits"].get(code, Decimal("0"))
+        updated = new_credits[code]
+        if updated <= current:
+            continue
+        if current <= 0:
+            _insert_credit(database, assignment_id, journey, code, updated)
+        else:
+            database.execute(
+                """
+                UPDATE journey_credits
+                SET credited_amount = ?
+                WHERE assignment_id = ? AND metric_code = ?
+                """,
+                (updated, assignment_id, code),
+            )
+
+
+def _delete_assignment(database, assignment_id: int) -> None:
+    database.execute(
+        "DELETE FROM activity_journey_assignments WHERE id = ?",
+        (assignment_id,),
     )
 
 
 def _touch_journey(database, journey_id: int, *, credit_changed: bool, complete: bool) -> None:
-    if complete and credit_changed:
+    if complete:
         cursor = database.execute(
             """
             UPDATE route_journeys
             SET progress_version = progress_version + 1,
                 status = 'completed',
                 completed_at = now()
-            WHERE id = ? AND status = 'active'
-            """,
-            (journey_id,),
-        )
-    elif complete:
-        cursor = database.execute(
-            """
-            UPDATE route_journeys
-            SET status = 'completed', completed_at = now()
             WHERE id = ? AND status = 'active'
             """,
             (journey_id,),
@@ -918,24 +1052,13 @@ def _touch_journey(database, journey_id: int, *, credit_changed: bool, complete:
         )
 
 
-def _write_feed(database, user_id: int, activity_id: int, journey: dict, proposal: dict) -> None:
-    """Activity, checkpoint, and summit rows for participations still on this journey."""
+def _write_create_feed(database, user_id: int, activity_id: int, journey: dict, proposal: dict) -> None:
     participations = journey.get("participations") or []
-    if not participations or proposal["credited_m"] <= 0:
+    if not participations or not proposal["credits"]:
         return
-    previous = journey["total_m"]
-    resulting = proposal["resulting_total_m"]
-    checkpoints = database.execute(
-        """
-        SELECT name, elevation_m
-        FROM route_checkpoints
-        WHERE route_id = ?
-          AND elevation_m > ?
-          AND elevation_m <= ?
-        ORDER BY elevation_m, position
-        """,
-        (journey["route_id"], previous, resulting),
-    ).fetchall()
+    before = _bases(journey, {})
+    after = proposal["resulting"]
+    reached = _newly_reached(database, journey["route_id"], before, after)
     for participation in participations:
         _feed_row(
             database,
@@ -944,17 +1067,17 @@ def _write_feed(database, user_id: int, activity_id: int, journey: dict, proposa
             "activity_logged",
             activity_id,
             None,
-            proposal["credited_m"],
+            proposal["credits"],
         )
-        for checkpoint in checkpoints:
+        for checkpoint in reached:
             _feed_row(
                 database,
                 participation,
                 user_id,
                 "checkpoint_reached",
                 activity_id,
-                checkpoint["name"],
-                resulting,
+                checkpoint.name,
+                _positive_amounts(after),
             )
         if proposal["will_complete"]:
             _feed_row(
@@ -964,21 +1087,12 @@ def _write_feed(database, user_id: int, activity_id: int, journey: dict, proposa
                 "summit_reached",
                 activity_id,
                 None,
-                resulting,
+                _positive_amounts(after),
             )
 
 
-def _write_summit_updates(
-    database,
-    user_id: int,
-    activity_id: int,
-    journey: dict,
-    resulting_total_m: Decimal,
-) -> None:
-    """Summit rows for an elevation edit that completes the active journey.
-
-    Edits do not log the activity again and do not announce checkpoints.
-    """
+def _write_summit_feed(database, user_id: int, activity_id: int, journey: dict, resulting: dict[str, Decimal]) -> None:
+    """An edit that finishes the journey records the summit and nothing else."""
     for participation in journey.get("participations") or []:
         _feed_row(
             database,
@@ -987,7 +1101,7 @@ def _write_summit_updates(
             "summit_reached",
             activity_id,
             None,
-            resulting_total_m,
+            _positive_amounts(resulting),
         )
 
 
@@ -998,15 +1112,19 @@ def _feed_row(
     kind: str,
     activity_id: int,
     checkpoint_name: str | None,
-    elevation_m: Decimal,
+    amounts: dict[str, Decimal],
 ) -> None:
-    database.execute(
+    positive = _positive_amounts(amounts)
+    if not positive:
+        return
+    row = database.execute(
         """
         INSERT INTO expedition_updates (
             expedition_id, user_id, participation_id, kind,
-            activity_id, checkpoint_name, elevation_m
+            activity_id, checkpoint_name
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?)
+        RETURNING id
         """,
         (
             participation["expedition_id"],
@@ -1015,12 +1133,78 @@ def _feed_row(
             kind,
             activity_id,
             checkpoint_name,
-            elevation_m,
         ),
+    ).fetchone()
+    for code in sorted(positive):
+        database.execute(
+            """
+            INSERT INTO expedition_update_metrics (
+                update_id, metric_code, credited_amount
+            )
+            VALUES (?, ?, ?)
+            """,
+            (row["id"], code, positive[code]),
+        )
+
+
+def _bases(journey: dict, previous: dict[str, Decimal]) -> dict[str, Decimal]:
+    bases = {}
+    for requirement in journey["requirements"]:
+        code = requirement["metric_code"]
+        base = journey["totals"].get(code, Decimal("0")) - previous.get(code, Decimal("0"))
+        bases[code] = base if base > 0 else Decimal("0")
+    return bases
+
+
+def _newly_reached(database, route_id: int, before: dict[str, Decimal], after: dict[str, Decimal]) -> list[CheckpointMark]:
+    marks = _checkpoint_marks(database, route_id)
+    previous = {mark.id for mark in assess_checkpoints(marks, before) if mark.reached}
+    return [
+        mark
+        for mark in assess_checkpoints(marks, after)
+        if mark.reached and mark.id not in previous
+    ]
+
+
+def _checkpoint_marks(database, route_id: int) -> tuple[CheckpointMark, ...]:
+    rows = database.execute(
+        """
+        SELECT id, slug, name, position
+        FROM route_checkpoints
+        WHERE route_id = ?
+        ORDER BY position, id
+        """,
+        (route_id,),
+    ).fetchall()
+    thresholds: dict[int, list[tuple[str, Decimal]]] = {row["id"]: [] for row in rows}
+    for row in database.execute(
+        """
+        SELECT checkpoint_id, metric_code, threshold_amount
+        FROM checkpoint_requirements
+        WHERE route_id = ?
+        ORDER BY checkpoint_id, metric_code
+        """,
+        (route_id,),
+    ).fetchall():
+        thresholds[row["checkpoint_id"]].append((row["metric_code"], row["threshold_amount"]))
+    return tuple(
+        CheckpointMark(
+            id=row["id"],
+            slug=row["slug"],
+            name=row["name"],
+            position=row["position"],
+            reached=False,
+            thresholds=tuple(thresholds[row["id"]]),
+        )
+        for row in rows
     )
 
 
-def _apply_metadata(database, activity_id: int, loaded: dict, changes: dict) -> None:
+def _positive_amounts(amounts: dict[str, Decimal]) -> dict[str, Decimal]:
+    return {code: amount for code, amount in amounts.items() if amount > 0}
+
+
+def _apply_changes(database, activity_id: int, loaded: dict, changes: dict) -> None:
     started = loaded["started_at"]
     ended = loaded["ended_at"]
     if "started_at" in changes:
@@ -1036,6 +1220,7 @@ def _apply_metadata(database, activity_id: int, loaded: dict, changes: dict) -> 
         ("happened_on", "activity_date"),
         ("note", "note"),
         ("distance_m", "distance_m"),
+        ("elevation_m", "elevation_gain_m"),
         ("duration_s", "duration_s"),
         ("started_at", "started_at"),
         ("ended_at", "ended_at"),
@@ -1053,91 +1238,41 @@ def _apply_metadata(database, activity_id: int, loaded: dict, changes: dict) -> 
     )
 
 
-def _apply_elevation(database, activity_id: int, credit: dict | None, new_elevation: Decimal, proposal: dict | None) -> None:
-    if credit is None or proposal is None:
-        database.execute(
-            "UPDATE activities SET elevation_gain_m = ? WHERE id = ?",
-            (new_elevation, activity_id),
-        )
-        return
-    new_credit = proposal["credited_m"]
-    old_credit = credit["credited_elevation_m"]
-    if new_credit <= 0:
-        database.execute(
-            "DELETE FROM journey_credits WHERE id = ? AND activity_id = ?",
-            (credit["id"], activity_id),
-        )
-        database.execute(
-            "UPDATE activities SET elevation_gain_m = ? WHERE id = ?",
-            (new_elevation, activity_id),
-        )
-        return
-    if new_credit < old_credit:
-        database.execute(
-            """
-            UPDATE journey_credits
-            SET credited_elevation_m = ?
-            WHERE id = ? AND activity_id = ?
-            """,
-            (new_credit, credit["id"], activity_id),
-        )
-        database.execute(
-            "UPDATE activities SET elevation_gain_m = ? WHERE id = ?",
-            (new_elevation, activity_id),
-        )
-        return
-    database.execute(
-        "UPDATE activities SET elevation_gain_m = ? WHERE id = ?",
-        (new_elevation, activity_id),
-    )
-    if new_credit > old_credit:
-        database.execute(
-            """
-            UPDATE journey_credits
-            SET credited_elevation_m = ?
-            WHERE id = ? AND activity_id = ?
-            """,
-            (new_credit, credit["id"], activity_id),
-        )
+def _saved(database, activity_id: int, journey_id: int | None) -> dict:
+    rows = _history_rows(database, activity_id)
+    activity = _group_history(rows)[0]
+    credits = [] if activity["credit"] is None else activity["credit"]["metrics"]
+    journey = None if journey_id is None else _saved_journey(database, journey_id)
+    return {"activity": activity, "credits": credits, "journey": journey}
 
 
-def _saved(database, activity_id: int, credited: Decimal | None, journey_id: int | None) -> dict:
-    row = database.execute(
-        f"SELECT {_ACTIVITY_COLUMNS} FROM activities AS activity WHERE activity.id = ?",
-        (activity_id,),
-    ).fetchone()
-    journey = None if journey_id is None else _journey_summary(database, journey_id)
+def _saved_journey(database, journey_id: int) -> dict:
+    progress = read_journey_progress(database, journey_id)
+    slug = database.execute(
+        "SELECT slug FROM routes WHERE id = ?",
+        (progress.route_id,),
+    ).fetchone()["slug"]
+    final = progress.final_checkpoint_reached
     return {
-        "activity": _activity_dict(row),
-        "credited_elevation_m": None if credited is None else _meters(credited),
-        "journey": journey,
+        "id": progress.journey_id,
+        "status": progress.status,
+        "progress_version": progress.progress_version,
+        "route_id": progress.route_id,
+        "route_slug": slug,
+        "requirements_met": progress.requirements_met,
+        "final_checkpoint_reached": final,
+        "highest_checkpoint": None if progress.highest_checkpoint is None else progress.highest_checkpoint.slug,
+        "metrics": [
+            {
+                "metric": metric.code,
+                "target_m": metric.target_m,
+                "credited_m": metric.credited_m,
+                "remaining_m": metric.remaining_m,
+                "complete": metric.complete,
+            }
+            for metric in progress.metrics
+        ],
     }
-
-
-def _journey_summary(database, journey_id: int) -> dict:
-    row = database.execute(
-        """
-        SELECT id, user_id, route_id, status, progress_version
-        FROM route_journeys
-        WHERE id = ?
-        """,
-        (journey_id,),
-    ).fetchone()
-    return _journey_public(_describe_journey(database, row))
-
-
-def _credit_link(database, activity_id: int) -> tuple[Decimal | None, int | None]:
-    row = database.execute(
-        """
-        SELECT credited_elevation_m, journey_id
-        FROM journey_credits
-        WHERE activity_id = ?
-        """,
-        (activity_id,),
-    ).fetchone()
-    if row is None:
-        return None, None
-    return _meters(row["credited_elevation_m"]), row["journey_id"]
 
 
 _ACTIVITY_COLUMNS = """
@@ -1148,43 +1283,58 @@ _ACTIVITY_COLUMNS = """
 """
 
 
-def _history_query(database, activity_id: int):
+def _history_rows(database, activity_id: int) -> list[dict]:
     return database.execute(
         f"""
         SELECT {_ACTIVITY_COLUMNS},
-               credit.credited_elevation_m,
-               credit.journey_id,
+               assignment.journey_id,
                journey.status AS journey_status,
                journey.route_id AS credit_route_id,
-               route.slug AS route_slug
+               route.slug AS route_slug,
+               credit.metric_code,
+               credit.credited_amount
         FROM activities AS activity
-        LEFT JOIN journey_credits AS credit ON credit.activity_id = activity.id
-        LEFT JOIN route_journeys AS journey ON journey.id = credit.journey_id
+        LEFT JOIN activity_journey_assignments AS assignment
+            ON assignment.activity_id = activity.id
+        LEFT JOIN journey_credits AS credit
+            ON credit.assignment_id = assignment.id
+        LEFT JOIN route_journeys AS journey ON journey.id = assignment.journey_id
         LEFT JOIN routes AS route ON route.id = journey.route_id
         WHERE activity.id = ?
+        ORDER BY credit.metric_code
         """,
         (activity_id,),
-    ).fetchone()
+    ).fetchall()
 
 
-def _history_row(row: dict) -> dict:
-    record = _activity_dict(row)
-    if row["journey_id"] is None:
-        record["credit"] = None
-    else:
-        record["credit"] = {
-            "credited_elevation_m": _meters(row["credited_elevation_m"]),
-            "journey_id": row["journey_id"],
-            "journey_status": row["journey_status"],
-            "route_id": row["credit_route_id"],
-            "route_slug": row["route_slug"],
-        }
-    return record
+def _group_history(rows: list[dict]) -> list[dict]:
+    grouped: list[dict] = []
+    index: dict[int, dict] = {}
+    for row in rows:
+        item = index.get(row["id"])
+        if item is None:
+            item = _activity_dict(row)
+            item["credit"] = None
+            index[row["id"]] = item
+            grouped.append(item)
+        if row["metric_code"] is None:
+            continue
+        if item["credit"] is None:
+            item["credit"] = {
+                "journey_id": row["journey_id"],
+                "journey_status": row["journey_status"],
+                "route_id": row["credit_route_id"],
+                "route_slug": row["route_slug"],
+                "metrics": [],
+            }
+        item["credit"]["metrics"].append(
+            {"metric": row["metric_code"], "credited_m": row["credited_amount"]}
+        )
+    return grouped
 
 
 def _activity_dict(row: dict) -> dict:
-    distance = row["distance_m"]
-    return {
+    record = {
         "id": row["id"],
         "user_id": row["user_id"],
         "activity_type": row["activity_type"],
@@ -1192,13 +1342,28 @@ def _activity_dict(row: dict) -> dict:
         "started_at": row["started_at"],
         "ended_at": row["ended_at"],
         "duration_s": row["duration_s"],
-        "distance_m": None if distance is None else _distance(distance),
-        "elevation_gain_m": _meters(row["elevation_gain_m"]),
+        "distance_m": row["distance_m"],
+        "elevation_gain_m": row["elevation_gain_m"],
         "note": row["note"],
         "source": row["source"],
         "verification_status": row["verification_status"],
         "created_at": row["created_at"],
         "updated_at": row["updated_at"],
+    }
+    return record
+
+
+def _measurements_from_changes(changes: dict) -> dict[str, Decimal | None]:
+    return {
+        "elevation": changes.get("elevation_m"),
+        "distance": changes.get("distance_m"),
+    }
+
+
+def _merged_measurements(loaded: dict, changes: dict) -> dict[str, Decimal | None]:
+    return {
+        "elevation": changes["elevation_m"] if "elevation_m" in changes else loaded["elevation_m"],
+        "distance": changes["distance_m"] if "distance_m" in changes else loaded["distance_m"],
     }
 
 
@@ -1208,15 +1373,15 @@ def _changes(fields: dict, *, creating: bool) -> dict:
     unknown = set(fields) - _FIELDS
     if unknown:
         raise ActivityError("invalid", "That activity field is not supported.", status=400)
-    if creating and "elevation_ft" not in fields:
-        raise ActivityError("invalid", "Add elevation.", status=400)
+    if creating and "elevation_ft" not in fields and "distance_mi" not in fields:
+        raise ActivityError("invalid", "Add elevation or distance.", status=400)
     if not creating and not fields:
         raise ActivityError("invalid", "Choose something to change.", status=400)
     changes: dict = {}
     if "elevation_ft" in fields:
-        changes["elevation_m"] = _elevation(fields["elevation_ft"])
-    if "distance_km" in fields:
-        changes["distance_m"] = _distance_input(fields["distance_km"])
+        changes["elevation_m"] = _measurement("elevation", fields["elevation_ft"])
+    if "distance_mi" in fields:
+        changes["distance_m"] = _measurement("distance", fields["distance_mi"])
     if "happened_on" in fields:
         changes["happened_on"] = _date(fields["happened_on"])
     elif creating:
@@ -1240,68 +1405,22 @@ def _changes(fields: dict, *, creating: bool) -> dict:
     return changes
 
 
-def _elevation(value) -> Decimal:
-    feet = _decimal(value, "Elevation")
-    if feet <= 0:
-        raise ActivityError("invalid", "Elevation has to be more than zero.", status=400)
-    if feet > MAX_ELEVATION_FT:
-        raise ActivityError(
-            "invalid",
-            "Log one outing at a time, up to 10,000 ft. Split a bigger day.",
-            status=400,
-        )
-    meters = feet_to_meters(feet)
-    if meters <= 0:
-        raise ActivityError("invalid", "Elevation has to be more than zero.", status=400)
-    return meters
-
-
-def _distance_input(value) -> Decimal | None:
-    if value is None or (isinstance(value, str) and not value.strip()):
+def _measurement(metric: str, value) -> Decimal | None:
+    try:
+        meters = parse_measurement(metric, value)
+    except MetricError as exc:
+        raise ActivityError("invalid", str(exc), status=400) from exc
+    if meters is None:
         return None
-    kilometers = _decimal(value, "Distance")
-    if kilometers <= 0:
+    limit = MAX_ELEVATION_M if metric == "elevation" else MAX_DISTANCE_M
+    label = "10,000 ft" if metric == "elevation" else "75 mi"
+    if meters > limit:
         raise ActivityError(
             "invalid",
-            "Distance has to be more than zero, or leave it blank.",
-            status=400,
-        )
-    if kilometers > MAX_DISTANCE_KM:
-        raise ActivityError(
-            "invalid",
-            "Distance looks too long for one outing (max 120 km).",
-            status=400,
-        )
-    meters = kilometers_to_meters(kilometers)
-    if meters <= 0:
-        raise ActivityError(
-            "invalid",
-            "Distance has to be more than zero, or leave it blank.",
+            f"Log one outing at a time, up to {label}.",
             status=400,
         )
     return meters
-
-
-def _decimal(value, label: str) -> Decimal:
-    if isinstance(value, bool) or isinstance(value, float):
-        raise ActivityError("invalid", f"{label} should be a number.", status=400)
-    if isinstance(value, Decimal):
-        number = value
-    elif isinstance(value, int):
-        number = Decimal(value)
-    elif isinstance(value, str):
-        text = value.strip().replace(",", "")
-        if not text:
-            raise ActivityError("invalid", f"Add {label.lower()}.", status=400)
-        try:
-            number = Decimal(text)
-        except InvalidOperation as exc:
-            raise ActivityError("invalid", f"{label} should be a number.", status=400) from exc
-    else:
-        raise ActivityError("invalid", f"{label} should be a number.", status=400)
-    if not number.is_finite():
-        raise ActivityError("invalid", f"{label} should be a number.", status=400)
-    return number
 
 
 def _date(value) -> date:
@@ -1398,70 +1517,54 @@ def _check_times(started, ended) -> None:
         raise ActivityError("invalid", "The end time cannot be before the start.", status=400)
 
 
-def _journey_total(database, journey_id: int) -> Decimal:
-    row = database.execute(
-        """
-        SELECT COALESCE(SUM(credited_elevation_m), 0) AS total_m
-        FROM journey_credits
-        WHERE journey_id = ?
-        """,
-        (journey_id,),
-    ).fetchone()
-    return _meters(row["total_m"])
-
-
-def _remaining(target: Decimal, total: Decimal) -> Decimal:
-    remaining = _meters(target - total)
-    if remaining < 0:
-        return Decimal("0.00000")
-    return remaining
-
-
-def _meters(value) -> Decimal:
-    return Decimal(value).quantize(ELEVATION_QUANTUM, rounding=ROUND_HALF_UP)
-
-
-def _distance(value) -> Decimal:
-    return Decimal(value).quantize(Decimal("0.001"), rounding=ROUND_HALF_UP)
-
-
 def _now() -> int:
     return int(time.time())
 
 
-def _canonical_meters(value) -> str:
-    return format(_meters(value), "f")
+def _canonical_meters(value: Decimal) -> str:
+    return format(Decimal(value).quantize(STORAGE_QUANTUM), "f")
+
+
+def _canonical_credits(credits: dict[str, Decimal]) -> str:
+    return ",".join(
+        f"{code}={_canonical_meters(credits[code])}"
+        for code in sorted(credits)
+        if credits[code] > 0
+    )
 
 
 def _issue_confirmation_token(
     user_id: int,
     journey_id: int,
     progress_version: int,
-    credited_elevation_m,
+    credits: dict[str, Decimal],
     exp_unix: int,
 ) -> str:
     payload = (
-        f"v1|{user_id}|{journey_id}|{progress_version}|"
-        f"{_canonical_meters(credited_elevation_m)}|{exp_unix}"
+        f"v2|{user_id}|{journey_id}|{progress_version}|"
+        f"{_canonical_credits(credits)}|{exp_unix}"
     )
     signature = hmac.new(_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}|{signature}"
 
 
-def _token_matches(token, user_id: int, journey_id: int, progress_version: int, credited) -> bool:
+def _token_matches(
+    token,
+    user_id: int,
+    journey_id: int,
+    progress_version: int,
+    credits: dict[str, Decimal],
+) -> bool:
     if not isinstance(token, str):
         return False
     payload, separator, signature = token.rpartition("|")
     if not separator or payload.count("|") != 5:
         return False
-    parts = payload.split("|")
-    if len(parts) != 6:
-        return False
     expected = hmac.new(_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     if len(signature) != len(expected) or not hmac.compare_digest(expected, signature):
         return False
-    version, token_user, token_journey, token_progress, token_credit, token_exp = parts
-    if version != "v1":
+    version, token_user, token_journey, token_progress, token_credit, token_exp = payload.split("|")
+    if version != "v2":
         return False
     if token_exp.startswith("-") or not token_exp.isdigit():
         return False
@@ -1471,7 +1574,7 @@ def _token_matches(token, user_id: int, journey_id: int, progress_version: int, 
         return False
     if token_progress != str(progress_version):
         return False
-    return token_credit == _canonical_meters(credited)
+    return token_credit == _canonical_credits(credits)
 
 
 def _secret() -> bytes:

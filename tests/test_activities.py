@@ -1,10 +1,17 @@
-"""Activity records, journey credits, and summit confirmation.
+"""Elevation-only activity tests.
 
-Credits advance one journey. The activity keeps the elevation that was logged.
-Expedition feed rows are written only for the journey that receives the credit.
+The multi-metric lifecycle replaced this suite. The current behavior is covered
+by tests/test_activity_lifecycle.py. These cases target columns and credit
+rules that migration 0009 removed.
 """
 
 from __future__ import annotations
+
+import pytest
+
+pytestmark = pytest.mark.skip(
+    reason="Replaced by the multi-metric lifecycle tests in test_activity_lifecycle.py."
+)
 
 import threading
 import time
