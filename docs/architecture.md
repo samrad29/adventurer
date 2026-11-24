@@ -6,7 +6,7 @@ Section 16 revises progress. A route requires one or more metrics, and a journey
 
 Section 17 adds achievements, collectibles, and a personal trophy case. It does not change journeys, activity credits, expedition participation, leaderboards, the privacy-removal deletes in section 5.9, lock order, or authentication.
 
-Section 18 adds the curated narrative experience. Migration 0010, the chapter and journal API, activity arrival lists, home pending arrivals, and registry-backed scene selection are implemented. The content authoring pipeline is docs/content-authoring.md. Launch routes are not seeded, so a route with no published route_media returns a null scene. The home presentation rules stay in docs/dynamic-home.md, and the HTTP contract stays in docs/api-v1.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
+Section 18 adds the curated narrative experience. Migration 0010, the chapter and journal API, activity arrival lists, home pending arrivals, and registry-backed scene selection are implemented. The content authoring pipeline is docs/content-authoring.md. Launch routes are not seeded, so a route with no published route_media returns a null scene. The home presentation rules stay in docs/dynamic-home.md, the HTTP contract stays in docs/api-v1.md, and the asset lifecycle stays in docs/media-infrastructure.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
 
 Section 19 adds organization and expedition branding. The columns it uses already exist. Resolution, color validation, and branding edits are implemented. Asset upload and mobile rendering are not. It does not change journeys, activity credits, expedition standings, snapshots, lock order, privacy removal, membership, or authentication.
 
@@ -1008,7 +1008,7 @@ A later scope is another named value on the same model. It is not a second award
 
 A collectible is how one achievement is shown or rewarded. One earned record may have a digital badge or medal in the trophy case, a shareable graphic, and an associated physical collectible. Those are presentations of one accomplishment. Issuance does not create a separate earned row for each format.
 
-Rendering, file storage, and asset management are not part of this revision. Collectible bytes wait with the unresolved organization and expedition image storage in section 15. docs/dynamic-home.md already defers a general asset library. This section does not create one. Route photography references proposed in section 18 are editorial route content, not collectible files.
+Rendering, file storage, and asset management are not part of this revision. Collectible bytes have no storage model here. Organization and expedition image storage is section 19. `docs/media-infrastructure.md` keeps collectible files in a separate future category and does not add a table for them. This section does not create an asset library. Route photography is editorial route content in section 18, not a collectible file.
 
 17.4 Editions
 

@@ -9,7 +9,7 @@ The home payload is a presentation of one journey's position on a shared route. 
 
 GET /api/v1/home is the endpoint. docs/architecture.md already named it. A /me/home path would be a second name for the same authenticated read. The handler composes journey, route, expedition, and invitation reads. It does not own lifecycle rules, and activity saving does not select an image.
 
-Home adds no scene table and no second progress column. docs/architecture.md section 16 replaces the elevation line with route and checkpoint requirements. This document only reads them. The home scene reads published route_media rows. The files stay under photos/. adventurer/photo_credits.json is archival editorial attribution and is not a runtime lookup. Organization and expedition branding columns already exist and stay on those owners. They decorate an expedition card. They do not replace the route scene.
+Home adds no scene table and no second progress column. docs/architecture.md section 16 replaces the elevation line with route and checkpoint requirements. This document only reads them. The home scene reads published route_media rows. The files stay under photos/. adventurer/photo_credits.json is archival editorial attribution and is not a runtime lookup. Organization and expedition branding columns already exist and stay on those owners. They decorate an expedition card. They do not replace the route scene. Storage, optimization, and delivery of the photograph files are docs/media-infrastructure.md.
 
 
 2. Domain ownership and responsibilities

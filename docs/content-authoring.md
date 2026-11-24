@@ -4,7 +4,7 @@ GitHub is the editorial source of truth. PostgreSQL is the runtime copy the jour
 
 The importer writes curated rows only. It does not change route metric requirements, checkpoint thresholds, checkpoint positions, journey progress, activity credits, expedition standings, or arrival acknowledgments.
 
-This is not a CMS and not a branching narrative. A route is one linear sequence of checkpoints. A package fills in the story for checkpoints that already exist.
+This is not a CMS and not a branching narrative. A route is one linear sequence of checkpoints. A package fills in the story for checkpoints that already exist. Asset lifecycle, optimization, and delivery are `docs/media-infrastructure.md`.
 
 `content/routes/sample-ridge/` is a fictional example. It is not a launch route, it is not imported at startup, and its photograph metadata does not describe the real file it points at. That path exists only so the validator can see a file inside `adventurer/static/photos/`.
 
