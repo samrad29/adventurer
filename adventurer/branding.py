@@ -44,8 +44,9 @@ def normalize_welcome(value: object) -> str | None:
 def normalize_colors(value: object) -> dict | None:
     """None clears the object. A dict stores only valid primary and accent tokens.
 
-    A missing token is omitted. The stored object replaces the previous one.
-    It is not merged with the row already in the database.
+    A missing token and a null token are both omitted. The stored object
+    replaces the previous one. It is not merged with the row already in the
+    database.
     """
     if value is None:
         return None

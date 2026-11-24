@@ -9,7 +9,7 @@ The home payload is a presentation of one journey's position on a shared route. 
 
 GET /api/v1/home is the endpoint. docs/architecture.md already named it. A /me/home path would be a second name for the same authenticated read. The handler composes journey, route, expedition, and invitation reads. It does not own lifecycle rules, and activity saving does not select an image.
 
-Home adds no scene table and no second progress column. docs/architecture.md section 16 replaces the elevation line with route and checkpoint requirements. This document only reads them. Curated files under photos/ and the credits in photo_credits.json already describe the pictures. Organization and expedition branding columns already exist and stay on those owners. They decorate an expedition card. They do not replace the route scene.
+Home adds no scene table and no second progress column. docs/architecture.md section 16 replaces the elevation line with route and checkpoint requirements. This document only reads them. The home scene reads published route_media rows. The files stay under photos/. adventurer/photo_credits.json is archival editorial attribution and is not a runtime lookup. Organization and expedition branding columns already exist and stay on those owners. They decorate an expedition card. They do not replace the route scene.
 
 
 2. Domain ownership and responsibilities
@@ -61,7 +61,7 @@ Selection, in order:
 
 The next checkpoint is reported separately. Its image is not the scene. A locked place stays locked, which is the current site rule that a stop photo is available only once the stop is unlocked. Between checkpoints the scene stays on the place already reached until every threshold of the next checkpoint is met. Meeting a threshold exactly counts as reaching it.
 
-The route hero is the picture of the approach, before the first checkpoint opens. Everest has one. It shows the broader Everest and Khumbu setting, and it is not a photograph of Lukla, Timms Hill, or any later checkpoint. The opening of the journey then has its own scene without implying the person has reached a place they have not. photo_credits.json currently begins at Lukla, and the hero file is not in the repository yet. Adding that file and its credit entry is curated route content for the route-aware resolver. Until the file exists, the selector returns image null rather than borrowing a checkpoint photograph.
+The route hero is the picture of the approach, before the first checkpoint opens. Everest's hero, when a reviewed package publishes one, shows the broader Everest and Khumbu setting, and it is not a photograph of Lukla, Timms Hill, or any later checkpoint. The opening of the journey then has its own scene without implying the person has reached a place they have not. Until that row is published, the selector returns image null rather than borrowing a checkpoint photograph or a file that merely shares a slug.
 
 The choice is deterministic. The same route files and the same metric totals always return the same scene. There is no per-user scene row, no viewed-at marker, and no priority column.
 
@@ -72,41 +72,37 @@ What already exists
 
   routes has slug, name, region, summary, target_elevation_m, and status. It has no image column.
   route_checkpoints has slug, name, position, and elevation_m, unique per route for position, slug, and elevation. It has no image column.
-  The current _photo() helper resolves a stop by a flat file name, photos/{stop_slug} plus a known extension, and returns no path when the file is absent. It is not route-scoped and it has no hero lookup. That helper stays as it is. Home does not call it.
-  photo_credits.json is keyed by stop slug and already stores author, license, license_url, source_url, and alt. It is curated content, like challenges.py.
+  route_media holds the published hero, checkpoint scene, journal images, and discovery images. Home reads the first two roles. It does not discover a photograph from a filename.
+  photo_credits.json remains beside the historical files as archival editorial attribution. Runtime scene selection does not open it.
   expeditions already has accent_color, welcome_override, and image_ref.
   organizations already has logo_ref, image_ref, colors, and welcome_message.
   Organization and expedition image bytes stay out of PostgreSQL. Resolution of the existing columns is implemented. Upload and mobile painting of those files are not. This design does not add an asset-management system.
 
 Required migration
 
-  None in this document. docs/architecture.md section 16 adds the requirement rows and then drops target_elevation_m and checkpoint elevation_m as progress inputs. Home does not add a media table, a segment table, or a progress-image column. Any of those would create a second geography or a second progress value. Editorial references proposed in docs/architecture.md section 18 do not choose this scene and do not store a second total.
+  None in this document. docs/architecture.md section 16 adds the requirement rows and then drops target_elevation_m and checkpoint elevation_m as progress inputs. Home does not add a media table, a segment table, or a progress-image column. Any of those would create a second geography or a second progress value. route_media chooses this scene and does not store a second total.
 
 Image resolver
 
-  No schema migration is required. The source assets are the curated files under photos/ and the attribution already stored in photo_credits.json. Those files are route content.
+  adventurer/scene.py performs the lookup below, on the caller's database transaction. Activity services do not import it. Journey transitions do not import it. Whether a file exists has no effect on journey progress, checkpoint unlocks, or authorization. A missing picture changes only scene.image.
 
-  A later route-aware resolver, not _photo(), performs the lookup below. It belongs to route and content presentation. Activity services do not import it. Journey transitions do not import it. Whether a file exists has no effect on journey progress, checkpoint unlocks, or authorization. A missing picture changes only scene.image.
+  One select loads the route's published route_hero and checkpoint_scene rows. Draft and retired rows are left out. A row whose asset_path is missing, malformed, or outside the curated photos directory is left out. The selector does not then search the directory by slug.
 
-  The resolver is not implemented by this document.
+  Selection order:
+    1. The highest reached checkpoint with a readable published checkpoint_scene.
+    2. The nearest lower reached checkpoint with a readable published checkpoint_scene.
+    3. The route's readable published route_hero.
+    4. Null when no eligible image exists.
 
-  Lookup order for a checkpoint image:
-    photos/{route_slug}/{checkpoint_slug}{ext}
-    then the legacy flat path photos/{checkpoint_slug}{ext}
+  A checkpoint is reached only when every required metric threshold is met. An unreached checkpoint's row is never selected. checkpoint_slug names the highest reached checkpoint, or is null before the first one. fallback is null for that checkpoint's own scene and for the approach hero, lower_checkpoint for an earlier reached stop's scene, route_hero when the reached stops have no eligible scene, and none when the image is null.
 
-  Lookup order for the route hero:
-    photos/{route_slug}/hero{ext}
-    then photos/{route_slug}{ext}
-
-  The flat names keep the current Everest files working. The route-scoped names are how a later route can reuse a slug such as summit without sharing Everest's picture. Checkpoint slugs are unique per route, not globally.
-
-  Alt text and credit stay in photo_credits.json for this resolver. The key is the checkpoint slug, or the route slug for the hero. The home response copies author, license, license_url, source_url, and alt when an entry exists. A file with no credit entry is still returned, with credit null. A credit entry with no file is ignored, because the response only names a file the resolver found. That null credit is the implemented lookup. It is not a right to publish the file. docs/architecture.md section 18.4 is the later publication gate for route_media. This resolver does not read that table, and its fallback order does not change.
+  image.path is the row's asset_path. It is site-relative, such as /static/photos/lukla.jpg, and the client resolves it against the backend origin. image.alt is the row's alt text. image.credit carries author, license, license_url, source_url, and rights_basis. permission_note is not returned. A route with no published media registry entries has image null. That is the state before Everest launch content is imported.
 
 Optional later columns
 
   Nullable routes.hero_image_ref and route_checkpoints.image_ref, used only when a curator needs a path that the convention cannot express. Null means "use the convention." They are not required for Everest or for the first home implementation.
 
-  This home model does not add an asset library, an upload path, or a CMS. One scene image per reached checkpoint, then the fallback, is the whole scene. Ordering is checkpoint position. A priority column would be a second way to answer the same question. docs/architecture.md section 18 proposes route_media for editorial references, including extra journal images that this payload does not show. Those rows do not replace this fallback and do not select an unreached photograph.
+  This home model does not add an asset library, an upload path, or a CMS. One scene image per reached checkpoint, then the fallback, is the whole scene. Ordering is checkpoint position among reached stops. Journal and discovery rows in route_media stay off this payload. They do not replace this fallback and do not select an unreached photograph.
 
 What home must not store
 
@@ -205,7 +201,7 @@ Progress fields, wherever a progress body is carried
 
   On an active journey these fields live on journey. On a paused journey they live on that paused_journeys entry. On a finished focus they live on focus. They are not copied onto a second object for the same attempt.
 
-  image.path is a stable static path such as /static/photos/lukla.jpg. It does not contain the journey id, a metric total, or progress_version. image.credit uses the photo_credits.json fields. The selector compares storage meters. The client displays the metric strings. The next checkpoint has no photo path. It is not unlocked.
+  image.path is the published asset_path, a stable site-relative path such as /static/photos/lukla.jpg. It does not contain the journey id, a metric total, or progress_version. image.credit uses the public route_media fields, including rights_basis. The selector compares storage meters. The client displays the metric strings. The next checkpoint has no photo path. It is not unlocked.
 
 The home screen stays a picture of one place on one route, with one indicator per required metric of the journey in focus. A paused journey card repeats that shape for its own route. The screen does not become a fitness dashboard: no combined score, no chart of unrelated history, and no indicator for a metric the route does not require.
 
@@ -536,7 +532,7 @@ The composer reads, in one request:
   active participations joined to expeditions and, for organization expeditions, the organization row
   pending invitations
 
-Checkpoint images are not queried per stop. The future route-aware resolver lists the curated directory once and matches route and checkpoint slugs in memory. Today's flat _photo() helper is not that resolver. The home document does not contain stop stories, the full checkpoint list, roster rows, or feed rows. Those stay on their own routes.
+Checkpoint images are not queried per stop. One select loads the published hero and checkpoint scenes for that route. The home document does not contain stop stories, the full checkpoint list, roster rows, or feed rows. Those stay on their own routes.
 
 Image paths are stable. Progress changes the selected path only when the fallback result changes, usually when the total reaches a higher checkpoint that has a file. Clients cache by path. progress_version tells the client that the journey total may have changed. It is not appended to the image URL. Replacing a curated file is a new deployment of that static file, not a journey write.
 
@@ -553,7 +549,7 @@ Already in place
   Route, checkpoint, journey, participation, expedition, and organization tables.
   Journey lifecycle service and its tests.
   view_model's current and next checkpoint rule.
-  Curated photo files, photo_credits.json, and the flat _photo() helper. The route-aware resolver is not written yet.
+  Curated photo files remain in adventurer/static/photos. photo_credits.json remains as archival editorial attribution. Scene selection reads published route_media.
   docs/architecture.md's decision that GET /api/v1/home is the aggregate, and that its photographs are the curated files.
 
 Still required before the numbers and the scene are meaningful
@@ -565,7 +561,7 @@ Not required first
   Close, leave flags, and privacy removal. displayed_metrics uses the board rules once those writes exist. Until then the composer sums each required metric on the pointed journey and applies display_credits_after when the column is set.
 
 Sequence
-  1. Route-aware image resolver and the pure scene function, in route presentation: reached checkpoint, between checkpoints, below the first checkpoint, missing checkpoint file, route hero, summit. Include the Everest hero file and its photo_credits.json entry: a broader Everest and Khumbu photograph, not a checkpoint. No HTTP, no migration, and no import from activity or journey services. Image misses do not change progress, unlocks, or authorization.
+  1. The registry-backed scene function is implemented. Everest's hero is still unpublished. When launch content imports one, it is a broader Everest and Khumbu photograph, not a checkpoint. Image misses do not change progress, unlocks, or authorization.
   2. Home composer, after credit totals are readable. It calls the journey service, route reads, view_model, the scene function, participation reads, and invitations.
   3. GET /api/v1/home in the docs/architecture.md home phase, including the scene fields from the first version of the payload so a later visual pass does not change the contract.
   4. One method on the existing mobile API client. No screen in that phase.
@@ -583,9 +579,9 @@ Settled
   An active journey is the center whenever one exists. Paused and finished journeys on other routes stay visible as their own actions.
   With no active journey, paused journeys leave focus null. Each paused journey has its own resume_journey target. With neither active nor paused journeys, the latest finished current attempt is focus, and every finished current attempt still has start_new_attempt.
   next_actions is an array of eligible journey actions. Invitation accept and decline live once, on the invitation row. Home returns every eligible action and does not pick a winner. The client chooses prominence. Reading home performs none of them.
-  Scene selection is the highest reached checkpoint, then the nearest lower position with an image, then the route hero, then null. A checkpoint with several thresholds is reached only when all of them are met. The scene never uses a locked checkpoint's image. Everest's hero is a broader Everest and Khumbu photograph, not Lukla or another checkpoint. The file is added with the route-aware resolver.
+  Scene selection is the highest reached checkpoint with a published scene, then the nearest lower reached checkpoint with a published scene, then the published route hero, then null. A checkpoint with several thresholds is reached only when all of them are met. The scene never uses a locked checkpoint's image, a draft or retired row, or a file chosen by its name. Everest's hero is a broader Everest and Khumbu photograph, not Lukla or another checkpoint. That row is part of the later launch-content import.
   The personal scene uses the full capped totals of the journey. Expedition cards use the board totals. Those numbers can differ after privacy rejoin, and the scene follows the personal totals.
-  Home adds no media table of its own. The metric tables belong to docs/architecture.md section 16. The implemented files stay curated static assets, and the implemented credits and alt text stay in photo_credits.json. docs/architecture.md section 18 proposes route_media as later editorial metadata. A published scene row from that table already has the rights in section 18.4. It does not put a second photograph on this scene, and it does not put journal bodies in this payload. The active journey's pending_arrivals list names unacknowledged reached checkpoints by slug and arrival title. It carries no arrival body, journal body, or discovery. Acknowledgment stays on the journey attempt in section 18 and does not change this scene. Restart leaves those acknowledgments on the old attempt. Paused, abandoned, and completed attempts do not put that list on the home scene.
+  Home adds no media table of its own. The metric tables belong to docs/architecture.md section 16. The scene reads published route_media. A published scene row already has the rights in section 18.4. It does not put a second photograph on this scene, and it does not put journal bodies in this payload. The active journey's pending_arrivals list names unacknowledged reached checkpoints by slug and arrival title. It carries no arrival body, journal body, or discovery. Acknowledgment stays on the journey attempt in section 18 and does not change this scene. Restart leaves those acknowledgments on the old attempt. Paused, abandoned, and completed attempts do not put that list on the home scene.
   Organization branding and expedition image_ref are card fields. They do not own or override route imagery. Participation does not require organization membership. The implemented card returns the raw columns and the resolved branding object from docs/architecture.md section 19. Logo and cover upload is not implemented, and a JSON request cannot set those paths.
   The home module is a composer. Journey lifecycle, route content, and expedition rules stay in their own services. Activity writes do not select images.
 
@@ -595,7 +591,7 @@ Relationship to docs/architecture.md
 
   docs/architecture.md named next_actions as a plural list and also described a server-chosen next action. This document keeps the array. The server returns every eligible action in a stable order and does not discard one because another is a better center. docs/architecture.md's codes map onto continue_journey, resume_journey, start_new_attempt, and choose_route. review_invitation is not a competing singleton. Accept and decline are the existing invitation operations, carried on the invitation so the expedition is not described twice.
 
-  docs/architecture.md says each of the current and next checkpoints includes a photo path when the stop is unlocked. The next stop is not unlocked, so it has no photo in the home payload. The current stop's photo is the scene, subject to the fallback above. That is a refinement of the same rule, not a second progress system. The flat _photo() helper is the current file lookup. The route-aware resolver is future presentation code.
+  docs/architecture.md says each of the current and next checkpoints includes a photo path when the stop is unlocked. The next stop is not unlocked, so it has no photo in the home payload. The current stop's photo is the scene, subject to the fallback above. That is a refinement of the same rule, not a second progress system. The photograph is the published route_media asset_path.
 
   Phase 10 in docs/architecture.md still owns implementation of the endpoint and the client method. This document fixes the scene contract those deliver. It does not pull that work forward into activity services. Section 16 of docs/architecture.md replaces total_ft, remaining_ft, percent, and summit_ft with the metrics array. This document uses that array and does not keep the old fields beside it.
 
@@ -650,7 +646,7 @@ Deferred
 
   More than one photograph in the home scene, user photographs, a CMS, and a general asset library. Extra journal and discovery images may exist under docs/architecture.md section 18 and stay off this payload. Collectible files, when they exist, use that later asset decision. docs/architecture.md section 17 defines them as achievement presentation. They are not home scene files.
   Where organization logo and expedition image bytes are stored. The nullable refs remain, and branding resolution does not wait on that host. Journey and activity services do not depend on that choice. Upload and mobile rendering of those files are not implemented.
-  Image paths that do not match the slug convention, until a route actually needs the optional ref columns.
+  Everest launch photographs. The files and archival credits remain. A reviewed package still has to publish the route_media rows before those pictures appear in a scene.
   Screen layout, navigation, and interaction, except for the rule that home shows one place and one indicator per required metric. The payload names the place and the file. It does not describe how they are drawn.
   The pace calculation. The dot's place is the reached checkpoint. The forecast status is not part of this payload yet.
   Caching headers on the static files themselves. The path contract is enough for the client to cache.

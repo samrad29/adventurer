@@ -6,7 +6,7 @@ Section 16 revises progress. A route requires one or more metrics, and a journey
 
 Section 17 adds achievements, collectibles, and a personal trophy case. It does not change journeys, activity credits, expedition participation, leaderboards, the privacy-removal deletes in section 5.9, lock order, or authentication.
 
-Section 18 adds the curated narrative experience. Migration 0010, the chapter and journal API, activity arrival lists, and home pending arrivals are implemented. The content authoring pipeline is docs/content-authoring.md. Launch routes are not seeded, and scene selection does not read route_media. The home presentation rules stay in docs/dynamic-home.md, and the HTTP contract stays in docs/api-v1.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
+Section 18 adds the curated narrative experience. Migration 0010, the chapter and journal API, activity arrival lists, home pending arrivals, and registry-backed scene selection are implemented. The content authoring pipeline is docs/content-authoring.md. Launch routes are not seeded, so a route with no published route_media returns a null scene. The home presentation rules stay in docs/dynamic-home.md, and the HTTP contract stays in docs/api-v1.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
 
 Section 19 adds organization and expedition branding. The columns it uses already exist. Resolution, color validation, and branding edits are implemented. Asset upload and mobile rendering are not. It does not change journeys, activity credits, expedition standings, snapshots, lock order, privacy removal, membership, or authentication.
 
@@ -30,7 +30,7 @@ Accounts. users and user_profiles. create_adventurer inserts those two rows and 
 
 Session. Cookie adventurer_id, thirty days, HttpOnly, SameSite=Lax, Secure when RENDER is set. guard_post in adventurer/__init__.py requires a CSRF token on every non-GET, from the form or X-CSRF-Token. GET /api/v1/session returns the CSRF token and the current user. Login, join, and logout are HTML forms. There is no bearer token table.
 
-Routes. routes and route_checkpoints. Everest is a published route. Narrative text lives in adventurer/challenges.py. Stop photos live in adventurer/static/photos and are resolved by routes._photo. Users cannot create routes. Expedition pages load route structure from the database and story text from challenges.py.
+Routes. routes and route_checkpoints. Everest is a published route. Narrative text lives in adventurer/challenges.py. Stop photographs live in adventurer/static/photos. The home scene reads a published route_media row, not a filename. Users cannot create routes. Expedition pages load route structure from the database and story text from challenges.py.
 
 Expeditions. One row per group, exactly one route_id, globally unique slug. Visibility is public or private. Status is active or archived. owner_user_id is nullable. starts_at and ends_at are optional, and the end must be after the start. The Global Everest row keeps its id and slug, name "Global Everest Challenge", public, active, owner null. User-created expeditions are private. The owner can edit, transfer ownership to an active member, or archive. Archive is a status change with no snapshot. App-managed expeditions have no owner and users cannot edit them. Date windows currently block new credits through can_add_credit. They do not block joins.
 
@@ -1113,9 +1113,9 @@ No migration, service, API, or interface is part of the current change.
 
 18. Narrative experience
 
-This section is the curated storytelling contract. Migration 0010_narrative_content is applied. Published chapters, the field journal, arrival acknowledgments, activity arrival lists, and home pending arrivals are implemented. docs/content-authoring.md validates and imports a route package. Launch routes are not seeded, and scene selection does not read route_media. Journey progress, activity credits, expedition standings, scene fallback, and the privacy-removal deletes in section 5.9 stay what sections 3, 5, 16, and docs/dynamic-home.md already define. Narrative content cannot award credits, complete a journey, change a participation, or write a leaderboard.
+This section is the curated storytelling contract. Migration 0010_narrative_content is applied. Published chapters, the field journal, arrival acknowledgments, activity arrival lists, home pending arrivals, and scene selection from published route_media are implemented. docs/content-authoring.md validates and imports a route package. Launch routes are not seeded. A route with no published hero or checkpoint scene resolves to a null scene. Journey progress, activity credits, expedition standings, and the privacy-removal deletes in section 5.9 stay what sections 3, 5, and 16 already define. The scene fallback order is section 18.4. Narrative content cannot award credits, complete a journey, change a participation, or write a leaderboard.
 
-The running Everest prose is still adventurer/challenges.py. The running photographs are still adventurer/static/photos and adventurer/photo_credits.json. A package is not imported at application startup. Those files remain the live Everest source until the launch-content step in section 18.7.
+The running Everest prose is still adventurer/challenges.py. The photograph files are still adventurer/static/photos. adventurer/photo_credits.json is archival editorial attribution for those historical files. It is not read at runtime, and a file's presence there does not publish it. A package is not imported at application startup. Everest has no published route_media until the launch-content step in section 18.7, so its scene is null until that reviewed import.
 
 The story is linear. Chapters follow checkpoint position. Reaching a checkpoint reveals that checkpoint's arrival and opens its journal entry and discoveries. Nothing later on the route is shown early, and nothing branches on a choice. There is no AI-generated personal story and no general-purpose CMS. Platform curation writes the rows. Users do not.
 
@@ -1321,7 +1321,7 @@ Roles:
   journal. Additional images for a reached checkpoint's journal entry. Ordered by position. Absent from home.
   discovery. Images for one photographic or other discovery. Ordered by position. Absent from home and absent until that checkpoint is reached.
 
-A missing or unpublished asset is omitted. The selector does not borrow a later checkpoint, and it does not invent a path. A published row whose file is absent is treated as missing. Scene selection order is unchanged. docs/dynamic-home.md still allows the current resolver to return a file whose photo_credits.json entry is missing, with credit null. That is the implemented lookup. It is not permission to publish a route_media row.
+A missing, draft, retired, or unreadable asset is omitted. The selector does not borrow a later checkpoint, and it does not invent a path from a filename. A published row whose file is absent is treated as missing. The client receives the stored asset_path, which is site-relative, such as /static/photos/lukla.jpg, and resolves it against the backend origin. The response includes alt text, author, license, license URL, source URL, and rights basis. permission_note is not selected. Journal and discovery rows are not scene photographs.
 
 Publication is a commercial-use gate. A file being on the public web is not a right to use it. rights_basis records which of these cases the row actually is.
 
@@ -1359,7 +1359,16 @@ route_media_publish_rights is this check. status = 'published' is allowed only f
     )
   )
 
-Until 0010 is applied and a later cutover reads route_media, adventurer/scene.py continues to resolve adventurer/static/photos and adventurer/photo_credits.json. This design does not move, download, or replace those files. asset_path can name those static paths. Seeding a published row from an existing file copies a complete rights record from photo_credits.json. A file with no credit entry, or with a license this section does not accept, stays unpublished. A later move to object storage or a CDN replaces the path and the file host. It does not put bytes in PostgreSQL and it does not change unlock rules. Organization logo and cover bytes are section 19. That storage is specified and not implemented.
+adventurer/scene.py reads published route_hero and checkpoint_scene rows for the journey's route in one select on the caller's transaction. It does not commit, roll back, or open another transaction. It does not read adventurer/photo_credits.json, and it does not choose a file by route slug or checkpoint slug. The photograph files stay in adventurer/static/photos. asset_path names one of those static paths. Seeding a published row from an existing file copies a complete rights record. A file with no accepted rights record stays unpublished, even when the file and an archival credit entry both exist. A later move to object storage or a CDN replaces the path and the file host. It does not put bytes in PostgreSQL and it does not change unlock rules. Organization logo and cover bytes are section 19. That storage is specified and not implemented.
+
+Scene order, for the caller's capped personal totals:
+
+  1. The highest reached checkpoint that has a readable published checkpoint_scene.
+  2. The nearest lower reached checkpoint that has a readable published checkpoint_scene.
+  3. The route's readable published route_hero.
+  4. Null when no eligible image exists.
+
+A checkpoint is reached only when every one of its metric thresholds is met. An unreached checkpoint's photograph is never selected. checkpoint_slug on the scene is the highest reached checkpoint, or null when none is reached. fallback is null when the image is that checkpoint's own scene or the approach hero, lower_checkpoint when the image comes from an earlier reached stop, route_hero when a reached stop has no eligible scene, and none when the image is null. Elevation-only, distance-only, and combined routes use the same rule. An organization logo or an expedition cover is not a candidate.
 
 18.5 Authorization
 
@@ -1380,13 +1389,13 @@ Expedition membership does not grant a story the personal journey has not reache
 
 18.7 Implementation sequence
 
-Steps 1, 2, and 4 are done. The authoring pipeline in docs/content-authoring.md can validate and import one route package. It does not seed Everest or any launch route. Home lists pending arrival titles on the active journey and still omits journal bodies, discovery bodies, and arrival bodies. Steps 3 and 5 are not done. This sequence does not modify migrations 0001 through 0010.
+Steps 1, 2, 4, and 5 are done. The authoring pipeline in docs/content-authoring.md can validate and import one route package. It does not seed Everest or any launch route. Home lists pending arrival titles on the active journey and still omits journal bodies, discovery bodies, and arrival bodies. Scene selection reads published route_media. Step 3 is not done. This sequence does not modify migrations 0001 through 0010.
 
   1. Apply 0010_narrative_content on the isolated test database only.
   2. Read services and PostgreSQL tests for reach, hidden unreached bodies, acknowledgment idempotence, restart, and an edit that relocks a checkpoint.
   3. Seed rows for Everest and one distance-only route from the existing prose and photo files. Publish a photograph only when section 18.4 accepts its rights. Do not treat Everest as the only shape.
   4. Add the proposed API fields. Home still omits journal bodies.
-  5. Point scene selection at published route_hero and checkpoint_scene rows, keeping the current fallback and the current files until each asset_path resolves.
+  5. Point scene selection at published route_hero and checkpoint_scene rows. Done. A route with no published scene or hero returns a null image. Historical files stay on disk until a reviewed import publishes them.
 
 18.8 Open decisions
 
@@ -1482,7 +1491,15 @@ Accepted tokens are primary and accent. A preset the client offers is the same o
 
 Format. A color is # plus six hexadecimal digits. Uppercase and lowercase are accepted. The stored and returned form is uppercase, with the leading #. Three-digit hex, eight-digit hex, alpha, rgb(), hsl(), and named colors are rejected on write.
 
-A write of colors must be null or an object. Unknown keys are rejected. A present token must be a valid color. A missing token is allowed and means that token inherits. An empty object and a JSON null both mean the organization sets neither color. welcome_message and welcome_override are trimmed and limited to 280 characters. accent_color uses the same color rule. A JSON request cannot set logo_ref or image_ref to a path. It can clear either one with null. The upload that chooses the next path is not implemented.
+A write of colors must be null or an object. Unknown keys are rejected. Supported keys are primary and accent. A supplied non-null token must be a valid six-digit hexadecimal color, and it is stored in uppercase. A supplied null token is the same as omitting that token. Null and omitted tokens inherit their parent defaults. An empty object means neither organization color is configured. A null colors field clears the organization's complete color configuration. Omitting the top-level colors field from a branding PATCH leaves the existing configuration unchanged.
+
+A supplied colors object replaces the previous complete colors object. It is not a token-by-token merge. This object:
+
+  {"primary": "#233E34", "accent": null}
+
+is stored as {"primary": "#233E34"}. The resolved accent inherits the product default.
+
+welcome_message and welcome_override are trimmed and limited to 280 characters. accent_color uses the same color rule. A JSON request cannot set logo_ref or image_ref to a path. It can clear either one with null. The upload that chooses the next path is not implemented.
 
 A row that already holds an object is still valid at the database. Resolution ignores a token that is not #RRGGBB and ignores unknown keys. The screen then inherits that token. A check constraint is not added. The current rule only requires a JSON object, and existing objects are not all hex pairs. New API writes reject a bad token. Old rows do not have to be rewritten for the read path to be safe.
 

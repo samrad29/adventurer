@@ -478,7 +478,7 @@ A reached checkpoint with a published story and no published chapter stays in th
 }
 ```
 
-`GET /api/v1/home` adds `pending_arrivals` on the active journey: `checkpoint_slug`, `chapter_slug`, and `arrival_title` for reached checkpoints that this attempt has not acknowledged. It does not add `arrival_body`, `journal_body`, discoveries, or extra images, and it does not change scene selection. Paused, abandoned, and completed attempts do not put those titles on the home scene. Their journals stay on the journey routes. The implemented scene may still carry a null credit when `photo_credits.json` has no entry. A later scene row read from `route_media` is not selected yet. A published row from that table would already meet section 18.4.
+`GET /api/v1/home` adds `pending_arrivals` on the active journey: `checkpoint_slug`, `chapter_slug`, and `arrival_title` for reached checkpoints that this attempt has not acknowledged. It does not add `arrival_body`, `journal_body`, discoveries, or extra images. Paused, abandoned, and completed attempts do not put those titles on the home scene. Their journals stay on the journey routes. The scene image comes from one published `route_media` row. `image.path` is the stored site-relative `asset_path`, such as `/static/photos/lukla.jpg`. `image.alt` is that row's alt text. `image.credit` carries `author`, `license`, `license_url`, `source_url`, and `rights_basis`. `permission_note` is not returned. A route with no readable published hero or checkpoint scene has `image` null. A file on disk without a published row is not used.
 
 ## Branding
 
@@ -519,7 +519,13 @@ Global Everest resolves to the product colors and null logo, cover, and welcome,
 }
 ```
 
-`colors` is that object or `null`. The object may contain `primary`, `accent`, or both. It replaces the stored object and does not merge with it. A missing token inside the object inherits. `{}` and `null` both mean the organization sets neither color. `welcome_message` is text of at most 280 characters, or `null`. Blank text is stored as `""` because the column is not null. `logo_ref` and `image_ref` accept only `null`. A string is 400 `Set a logo through the branding upload.` or `Set a cover through the branding upload.` Unknown keys, including `theme`, are 400 `That branding field is not supported.`
+`colors` is that object or `null`. Supported keys are `primary` and `accent`. A supplied non-null token must be a six-digit hex color and is stored in uppercase. A supplied null token is the same as omitting that token, and the resolved color inherits its parent default. The object replaces the previous complete `colors` object. It is not a token-by-token merge. This request:
+
+```json
+{"colors": {"primary": "#233E34", "accent": null}}
+```
+
+is stored as `{"primary": "#233E34"}`. The resolved accent is the product default `#5095B6`. `{}` stores neither organization color. `null` clears the complete color configuration. Omitting the top-level `colors` field leaves the stored object unchanged. `welcome_message` is text of at most 280 characters, or `null`. Blank text is stored as `""` because the column is not null. `logo_ref` and `image_ref` accept only `null`. A string is 400 `Set a logo through the branding upload.` or `Set a cover through the branding upload.` Unknown keys, including `theme`, are 400 `That branding field is not supported.`
 
 `PATCH /api/v1/expeditions/<slug>/branding` edits expedition overrides. An active organization owner or admin may edit that organization's expedition. The private expedition's owner may edit that private expedition. A platform administrator may edit either. A participant or ordinary member receives 403 `You cannot manage this expedition.` A caller who cannot see the expedition receives 404. A completed or archived expedition receives 409 `This expedition is not open.` Global Everest receives 403 `This expedition keeps the product brand.` for every caller.
 

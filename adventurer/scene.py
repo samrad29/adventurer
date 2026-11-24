@@ -1,66 +1,110 @@
 """Route scene selection for the home payload.
 
-Checkpoint reach uses each stop's requirement thresholds and the journey's
-capped storage totals. A photograph is used only after that stop is reached.
-This module does not read or write the database.
+Published route_media rows are the only photographs. A checkpoint photograph
+is eligible only after that stop's own thresholds are met by the journey's
+capped totals. This module reads the caller's transaction and does not
+commit, roll back, or start another one.
 """
 
 from __future__ import annotations
 
 from decimal import Decimal
-from pathlib import Path
 
-from .photos import credit_for
+from .narrative import _asset_is_readable
 
-PHOTO_EXTS = (".jpg", ".jpeg", ".png", ".webp")
+_SCENE_ROLES = ("route_hero", "checkpoint_scene")
 
 
 def select_scene(
-    route_slug: str,
+    database,
+    route_id: int,
     checkpoints: list[dict],
     credited_m: dict[str, Decimal],
-    root: Path,
 ) -> dict:
-    """Choose the reached place, then the nearest usable photograph behind it."""
+    """Choose the reached place, then the nearest published photograph behind it."""
     ordered = sorted(checkpoints, key=lambda row: (row["position"], row.get("id", 0)))
-    reached_index = None
-    for index, checkpoint in enumerate(ordered):
-        if _reached(checkpoint, credited_m):
-            reached_index = index
-        else:
-            break
-    if reached_index is None:
-        image = _hero(route_slug, root)
-        return {
-            "role": "route_hero" if image is not None else "none",
-            "checkpoint_slug": None,
-            "image": image,
-            "fallback": None if image is not None else "none",
-        }
-    reached = ordered[reached_index]
-    for index in range(reached_index, -1, -1):
-        image = _checkpoint_image(route_slug, ordered[index]["slug"], root)
-        if image is not None:
-            fallback = None if index == reached_index else "lower_checkpoint"
+    reached = [checkpoint for checkpoint in ordered if _reached(checkpoint, credited_m)]
+    library = _published_scenes(database, route_id)
+    hero = _usable(library["hero"])
+    if not reached:
+        if hero is not None:
             return {
-                "role": "checkpoint",
-                "checkpoint_slug": reached["slug"],
-                "image": image,
-                "fallback": fallback,
+                "role": "route_hero",
+                "checkpoint_slug": None,
+                "image": hero,
+                "fallback": None,
             }
-    image = _hero(route_slug, root)
-    if image is not None:
+        return {
+            "role": "none",
+            "checkpoint_slug": None,
+            "image": None,
+            "fallback": "none",
+        }
+    highest = reached[-1]
+    for checkpoint in reversed(reached):
+        image = _usable(library["scenes"].get(checkpoint["id"]))
+        if image is None:
+            continue
+        return {
+            "role": "checkpoint",
+            "checkpoint_slug": highest["slug"],
+            "image": image,
+            "fallback": None if checkpoint["id"] == highest["id"] else "lower_checkpoint",
+        }
+    if hero is not None:
         return {
             "role": "route_hero",
-            "checkpoint_slug": reached["slug"],
-            "image": image,
+            "checkpoint_slug": highest["slug"],
+            "image": hero,
             "fallback": "route_hero",
         }
     return {
         "role": "none",
-        "checkpoint_slug": reached["slug"],
+        "checkpoint_slug": highest["slug"],
         "image": None,
         "fallback": "none",
+    }
+
+
+def _published_scenes(database, route_id: int) -> dict:
+    """One read for the route's published hero and checkpoint scenes."""
+    rows = database.execute(
+        """
+        SELECT checkpoint_id, role, asset_path, alt_text, rights_basis,
+               author, license, license_url, source_url
+        FROM route_media
+        WHERE route_id = ?
+          AND status = 'published'
+          AND role IN ('route_hero', 'checkpoint_scene')
+        ORDER BY position, id
+        """,
+        (route_id,),
+    ).fetchall()
+    hero = None
+    scenes: dict[int, dict] = {}
+    for row in rows:
+        if row["role"] == "route_hero":
+            if hero is None:
+                hero = row
+            continue
+        if row["role"] in _SCENE_ROLES and row["checkpoint_id"] not in scenes:
+            scenes[row["checkpoint_id"]] = row
+    return {"hero": hero, "scenes": scenes}
+
+
+def _usable(row: dict | None) -> dict | None:
+    if row is None or not _asset_is_readable(row["asset_path"]):
+        return None
+    return {
+        "path": row["asset_path"],
+        "alt": row["alt_text"],
+        "credit": {
+            "author": row["author"],
+            "license": row["license"],
+            "license_url": row["license_url"],
+            "source_url": row["source_url"],
+            "rights_basis": row["rights_basis"],
+        },
     }
 
 
@@ -69,40 +113,3 @@ def _reached(checkpoint: dict, credited_m: dict[str, Decimal]) -> bool:
     return bool(thresholds) and all(
         credited_m.get(metric, Decimal("0")) >= amount for metric, amount in thresholds
     )
-
-
-def _checkpoint_image(route_slug: str, checkpoint_slug: str, root: Path) -> dict | None:
-    path = _find(root, f"{route_slug}/{checkpoint_slug}", checkpoint_slug)
-    if path is None:
-        return None
-    return _image(path, credit_for(checkpoint_slug), checkpoint_slug)
-
-
-def _hero(route_slug: str, root: Path) -> dict | None:
-    path = _find(root, f"{route_slug}/hero", route_slug)
-    if path is None:
-        return None
-    return _image(path, credit_for(route_slug), route_slug)
-
-
-def _image(path: str, credit: dict | None, slug: str) -> dict:
-    alt = None if credit is None else credit.get("alt")
-    if not alt:
-        alt = slug.replace("-", " ")
-    public_credit = None
-    if credit is not None:
-        public_credit = {
-            "author": credit.get("author"),
-            "license": credit.get("license"),
-            "license_url": credit.get("license_url"),
-            "source_url": credit.get("source_url"),
-        }
-    return {"path": path, "alt": alt, "credit": public_credit}
-
-
-def _find(root: Path, *stems: str) -> str | None:
-    for stem in stems:
-        for ext in PHOTO_EXTS:
-            if (root / f"{stem}{ext}").is_file():
-                return f"/static/photos/{stem}{ext}"
-    return None

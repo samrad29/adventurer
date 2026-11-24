@@ -214,7 +214,9 @@ There is one published hero per route and one published scene per checkpoint. Dr
 
 A media record's identity is its role, checkpoint slug, discovery slug, and position. The same identity updates the existing row and keeps its id. Two records with that identity are an error. Position is part of the identity, so changing position does not move the old row. To replace a photograph, retire the old position and add the new position. A retired row and a new row still need different positions in the package.
 
-Every path must be an existing file under `/static/photos/`, for every status. The rules are the same ones the journal uses: one site-relative path, safe segments, and a file that resolves inside that directory. Do not add a remote URL, a path outside that directory, or a new download. Scene selection still reads `adventurer/scene.py`, not these rows.
+Every path must be an existing file under `/static/photos/`, for every status. The rules are the same ones the journal uses: one site-relative path, safe segments, and a file that resolves inside that directory. Do not add a remote URL, a path outside that directory, or a new download.
+
+After import, the home scene reads published `route_hero` and `checkpoint_scene` rows from `route_media`. The filename is not a selector. A published journal or discovery image is not the home scene, even when it points at the same file. Retiring the published scene and hero removes that photograph from the scene. The file can remain on disk. `adventurer/photo_credits.json` is archival attribution for a later reviewed import. The importer does not publish a photograph because that file has an entry.
 
 ## Publication
 

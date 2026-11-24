@@ -14,9 +14,6 @@ not called after the snapshot starts.
 from __future__ import annotations
 
 from decimal import Decimal
-from pathlib import Path
-
-from flask import current_app
 
 from .branding import resolve_branding
 from .db import get_db
@@ -179,10 +176,10 @@ def _presentation(database, journey: dict, *, focus: bool = False) -> dict:
         },
         "checkpoint": {"current": current, "next": nxt},
         "scene": select_scene(
-            route["slug"],
+            database,
+            route["id"],
             [_scene_checkpoint(mark) for mark in progress.checkpoints],
             credited,
-            _photos_root(),
         ),
     }
     if not focus and progress.status == "active":
@@ -354,11 +351,4 @@ def _invitations(database, user_id: int) -> list[dict]:
             }
         )
     return rows
-
-
-def _photos_root() -> Path:
-    configured = current_app.config.get("PHOTOS_DIR")
-    if configured:
-        return Path(configured)
-    return Path(current_app.static_folder) / "photos"
 

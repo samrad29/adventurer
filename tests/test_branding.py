@@ -100,6 +100,45 @@ def test_resolution_inherits_invalid_legacy_values_without_rewriting_them():
     assert private["welcome_message"] is None
 
 
+def test_null_color_token_replaces_the_stored_object(client, app):
+    _ada, ada, _csrf = _register(client, "Ada")
+    _owen, owen, _csrf = _register(client, "Owen")
+    app.config["PLATFORM_ADMIN_IDS"] = {_ada}
+    with app.app_context():
+        _route("color-ridge")
+    _org(client, ada, "color-club", "Owen")
+    stored = client.patch(
+        "/api/v1/organizations/color-club/branding",
+        json={"colors": {"primary": "#111111", "accent": "#222222"}},
+        headers=_auth(owen),
+    )
+    assert stored.status_code == 200, stored.get_json()
+    replaced = client.patch(
+        "/api/v1/organizations/color-club/branding",
+        json={"colors": {"primary": "#233e34", "accent": None}},
+        headers=_auth(owen),
+    )
+    assert replaced.status_code == 200, replaced.get_json()
+    organization = replaced.get_json()["organization"]
+    assert organization["colors"] == {"primary": "#233E34"}
+    assert organization["branding"]["primary_color"] == "#233E34"
+    assert organization["branding"]["accent_color"] == DEFAULT_ACCENT
+    kept = client.patch(
+        "/api/v1/organizations/color-club/branding",
+        json={"welcome_message": "Still the same colors"},
+        headers=_auth(owen),
+    )
+    assert kept.get_json()["organization"]["colors"] == {"primary": "#233E34"}
+    cleared = client.patch(
+        "/api/v1/organizations/color-club/branding",
+        json={"colors": None},
+        headers=_auth(owen),
+    )
+    assert cleared.get_json()["organization"]["colors"] is None
+    assert cleared.get_json()["organization"]["welcome_message"] == "Still the same colors"
+    assert cleared.get_json()["organization"]["branding"]["primary_color"] == DEFAULT_PRIMARY
+
+
 def test_color_and_welcome_normalization():
     assert normalize_color("#aabbcc") == "#AABBCC"
     assert normalize_colors({"accent": "#aabbcc"}) == {"accent": "#AABBCC"}

@@ -4,14 +4,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
 from adventurer import limits
 from adventurer.db import get_db
 from adventurer.measures import feet_to_meters
-from adventurer.scene import select_scene
 
 DAY = "2026-01-02"
 
@@ -116,46 +114,29 @@ def _checkpoint(route_id: int, slug: str, feet: str, position: int) -> None:
     database.commit()
 
 
+def _publish_scene(database, route_id, checkpoint_id, role, path, alt, *, position: int = 0) -> None:
+    database.execute(
+        """
+        INSERT INTO route_media (
+            route_id, checkpoint_id, role, asset_path, alt_text, rights_basis,
+            author, license, license_url, source_url, permission_note, position, status
+        )
+        VALUES (
+            ?, ?, ?, ?, ?, 'creative_commons',
+            'Ada', 'CC BY 4.0', 'https://creativecommons.org/licenses/by/4.0',
+            'https://example.com/vista', 'private grant', ?, 'published'
+        )
+        """,
+        (route_id, checkpoint_id, role, path, alt, position),
+    )
+
+
 def _count(table: str, where: str = "TRUE", params: tuple = ()) -> int:
     row = get_db().execute(
         f"SELECT COUNT(*) AS count FROM {table} WHERE {where}",
         params,
     ).fetchone()
     return row["count"]
-
-
-def test_scene_never_uses_an_unreached_checkpoint(tmp_path: Path):
-    checkpoints = [
-        {"slug": "low", "position": 1, "thresholds": (("elevation", Decimal("10")),)},
-        {"slug": "high", "position": 2, "thresholds": (("elevation", Decimal("50")),)},
-    ]
-    (tmp_path / "ridge").mkdir()
-    (tmp_path / "ridge" / "hero.jpg").write_bytes(b"hero")
-    (tmp_path / "ridge" / "low.jpg").write_bytes(b"low")
-    (tmp_path / "high.jpg").write_bytes(b"locked")
-    below = select_scene("ridge", checkpoints, {}, tmp_path)
-    assert below["role"] == "route_hero"
-    assert below["checkpoint_slug"] is None
-    assert below["fallback"] is None
-    assert below["image"]["path"].endswith("/ridge/hero.jpg")
-    assert "high" not in below["image"]["path"]
-    reached = select_scene("ridge", checkpoints, {"elevation": Decimal("10")}, tmp_path)
-    assert reached["role"] == "checkpoint"
-    assert reached["checkpoint_slug"] == "low"
-    assert reached["fallback"] is None
-    missing = select_scene(
-        "ridge",
-        [
-            {"slug": "low", "position": 1, "thresholds": (("elevation", Decimal("10")),)},
-            {"slug": "bare", "position": 2, "thresholds": (("elevation", Decimal("40")),)},
-        ],
-        {"elevation": Decimal("40")},
-        tmp_path,
-    )
-    assert missing["checkpoint_slug"] == "bare"
-    assert missing["image"]["path"].endswith("/ridge/low.jpg")
-    assert missing["fallback"] == "lower_checkpoint"
-    assert "high" not in missing["image"]["path"]
 
 
 def test_unauthenticated_and_bad_bearer_do_not_use_the_cookie(client):
@@ -582,18 +563,43 @@ def test_organization_enrollment_slot_and_admin_boundary(client, app):
     ).get_json()["expedition"]["status"] == "completed"
 
 
-def test_home_states_actions_photos_and_no_writes(client, app, tmp_path):
-    photos = tmp_path / "photos"
-    (photos / "vista").mkdir(parents=True)
-    (photos / "vista" / "hero.jpg").write_bytes(b"hero")
-    (photos / "vista" / "camp.jpg").write_bytes(b"camp")
-    (photos / "vista" / "summit.jpg").write_bytes(b"summit")
-    app.config["PHOTOS_DIR"] = str(photos)
+def test_home_states_actions_photos_and_no_writes(client, app):
     with app.app_context():
         vista = _route("vista", "1000")
         _checkpoint(vista, "camp", "100", 1)
         _route("other", "1000")
         _route("done", "100")
+        database = get_db()
+        camp_id = database.execute(
+            "SELECT id FROM route_checkpoints WHERE route_id = ? AND slug = 'camp'",
+            (vista,),
+        ).fetchone()["id"]
+        summit_id = database.execute(
+            "SELECT id FROM route_checkpoints WHERE route_id = ? AND slug = 'summit'",
+            (vista,),
+        ).fetchone()["id"]
+        _publish_scene(database, vista, None, "route_hero", "/static/photos/lukla.jpg", "Vista approach")
+        _publish_scene(
+            database, vista, camp_id, "checkpoint_scene", "/static/photos/namche.jpg", "Vista camp"
+        )
+        _publish_scene(
+            database,
+            vista,
+            camp_id,
+            "journal",
+            "/static/photos/tengboche.jpg",
+            "Vista journal",
+            position=0,
+        )
+        _publish_scene(
+            database,
+            vista,
+            summit_id,
+            "checkpoint_scene",
+            "/static/photos/summit.jpg",
+            "Vista summit",
+        )
+        database.commit()
     _id, token, _csrf = _register(client, "Sam")
     headers = _auth(token)
     ready = client.get("/api/v1/home", headers=headers).get_json()
@@ -615,7 +621,9 @@ def test_home_states_actions_photos_and_no_writes(client, app, tmp_path):
     assert below["focus"] == {"journey_id": below["journey"]["id"], "status": "active"}
     assert below["journey"]["checkpoint"]["current"] is None
     assert below["journey"]["scene"]["role"] == "route_hero"
-    assert below["journey"]["scene"]["image"]["path"].endswith("/vista/hero.jpg")
+    assert below["journey"]["scene"]["image"]["path"] == "/static/photos/lukla.jpg"
+    assert below["journey"]["scene"]["image"]["alt"] == "Vista approach"
+    assert "permission_note" not in below["journey"]["scene"]["image"]["credit"]
     assert "path" not in below["journey"]["checkpoint"]["next"]
     client.post(
         "/api/v1/activities",
@@ -631,8 +639,10 @@ def test_home_states_actions_photos_and_no_writes(client, app, tmp_path):
     assert "total_ft" not in camp["journey"]
     assert "summit_ft" not in camp["journey"]["route"]
     assert camp["journey"]["scene"]["checkpoint_slug"] == "camp"
-    assert camp["journey"]["scene"]["image"]["path"].endswith("/vista/camp.jpg")
-    assert "summit" not in camp["journey"]["scene"]["image"]["path"]
+    assert camp["journey"]["scene"]["image"]["path"] == "/static/photos/namche.jpg"
+    assert camp["journey"]["scene"]["image"]["alt"] == "Vista camp"
+    assert "summit.jpg" not in camp["journey"]["scene"]["image"]["path"]
+    assert "tengboche.jpg" not in camp["journey"]["scene"]["image"]["path"]
     client.post("/api/v1/journeys/switch", json={"route_slug": "other"}, headers=headers)
     client.post("/api/v1/journeys/start", json={"route_slug": "done"}, headers=headers)
     preview = client.post(
