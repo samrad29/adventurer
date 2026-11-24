@@ -62,7 +62,15 @@ def test_migration_accepts_cycling_types_and_backfills_origins(app):
         saved = create_activity(user_id, _fields(elevation="100"))
         credit = _credit_row(saved["activity"]["id"])
         origin = _origin_row(saved["activity"]["id"], "elevation")
-        assert origin["credited_at"] == credit["created_at"]
+        assigned_at = get_db().execute(
+            """
+            SELECT created_at
+            FROM activity_journey_assignments
+            WHERE activity_id = ?
+            """,
+            (saved["activity"]["id"],),
+        ).fetchone()["created_at"]
+        assert origin["credited_at"] == assigned_at
         assert credit["credited_amount"] == _feet("100")
         totals_before = _totals(journey_id)
         with pytest.raises(Exception, match="cannot be deleted"):
@@ -75,7 +83,7 @@ def test_migration_accepts_cycling_types_and_backfills_origins(app):
             )
         get_db().rollback()
         restored = _origin_row(saved["activity"]["id"], "elevation")
-        assert restored["credited_at"] == credit["created_at"]
+        assert restored["credited_at"] == assigned_at
         assert _totals(journey_id) == totals_before
         assert _credit_row(saved["activity"]["id"])["credited_amount"] == _feet("100")
 

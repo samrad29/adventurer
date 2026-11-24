@@ -19,6 +19,7 @@ from decimal import Decimal
 
 from flask import current_app
 
+from .allocation import next_serialized_mark
 from .branding import (
     BrandingError,
     normalize_color,
@@ -2044,18 +2045,16 @@ def _save_participation(database, user_id: int, expedition, journey_id: int) -> 
     # A deleted participation cannot mark itself. The privacy-removal row is
     # the signal that this insert is a rejoin, which is when the board clock starts.
     after_privacy = _consume_privacy(database, expedition["id"], user_id)
+    cutoff = next_serialized_mark(database, journey_id) if after_privacy else None
     row = database.execute(
         """
         INSERT INTO expedition_participations (
             user_id, expedition_id, route_id, journey_id, status, display_credits_after
         )
-        VALUES (
-            ?, ?, ?, ?, 'active',
-            CASE WHEN ? THEN now() ELSE NULL END
-        )
+        VALUES (?, ?, ?, ?, 'active', ?)
         RETURNING id
         """,
-        (user_id, expedition["id"], expedition["route_id"], journey_id, after_privacy),
+        (user_id, expedition["id"], expedition["route_id"], journey_id, cutoff),
     ).fetchone()
     return _participation(database, row["id"])
 

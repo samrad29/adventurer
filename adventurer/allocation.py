@@ -2,8 +2,8 @@
 
 The credit rows are the result of this walk. A new activity that sorts last
 can be inserted by the same walk; there is no second allocator. The preflight
-reads unfinished journeys and writes nothing. A non-empty report means the
-deterministic writer must not be enabled.
+reads unfinished journeys and writes nothing. It is a diagnostic. It is not a
+deployment gate and it does not repair rows.
 """
 
 from __future__ import annotations
@@ -58,6 +58,41 @@ class MeasuredAssignment:
 
 def canonical_meters(value: Decimal) -> str:
     return format(Decimal(value).quantize(STORAGE_QUANTUM), "f")
+
+
+def next_serialized_mark(database, journey_id: int):
+    """The next assignment or privacy-cutoff time for one journey.
+
+    Call it only while that journey row is locked. The mark is strictly after
+    every assignment ``created_at`` and every ``display_credits_after`` already
+    stored for the journey, and not earlier than the clock observed under the
+    lock. Transaction start time is not an order.
+    """
+    row = database.execute(
+        """
+        SELECT GREATEST(
+            marks.clock_now,
+            COALESCE(marks.max_assignment + interval '1 microsecond', marks.clock_now),
+            COALESCE(marks.max_cutoff + interval '1 microsecond', marks.clock_now)
+        ) AS mark
+        FROM (
+            SELECT clock_timestamp() AS clock_now,
+                   (
+                       SELECT MAX(created_at)
+                       FROM activity_journey_assignments
+                       WHERE journey_id = ?
+                   ) AS max_assignment,
+                   (
+                       SELECT MAX(display_credits_after)
+                       FROM expedition_participations
+                       WHERE journey_id = ?
+                         AND display_credits_after IS NOT NULL
+                   ) AS max_cutoff
+        ) AS marks
+        """,
+        (journey_id, journey_id),
+    ).fetchone()
+    return row["mark"]
 
 
 def ordered_assignments(assignments: list[MeasuredAssignment]) -> list[MeasuredAssignment]:

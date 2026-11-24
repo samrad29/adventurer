@@ -16,8 +16,6 @@ import pytest
 
 from adventurer.activities import (
     ActivityError,
-    _canonical_credits,
-    _portion,
     create_activity,
     delete_activity,
     get_activity,
@@ -26,6 +24,7 @@ from adventurer.activities import (
     preview_activity_update,
     update_activity,
 )
+from adventurer.allocation import canonical_meters
 from adventurer.db import DB, get_db
 from adventurer.journeys import abandon_journey, restart_journey, start_journey, switch_journey
 from adventurer.metrics import parse_measurement
@@ -35,14 +34,12 @@ DAY = date(2026, 6, 1)
 
 
 def test_credit_math_caps_each_metric_in_decimal_storage():
-    assert _portion(None, Decimal("10"), Decimal("1")) == Decimal("0")
-    assert _portion(Decimal("0"), Decimal("10"), Decimal("1")) == Decimal("0")
-    assert _portion(Decimal("4"), Decimal("10"), Decimal("7")) == Decimal("3")
-    assert _portion(Decimal("2"), Decimal("10"), Decimal("10")) == Decimal("0")
-    text = _canonical_credits(
-        {"elevation": Decimal("152.4"), "distance": Decimal("3218.688")}
-    )
-    assert text == "distance=3218.688000,elevation=152.400000"
+    assert _last_remainder(None, Decimal("10"), Decimal("1")) == Decimal("0")
+    assert _last_remainder(Decimal("0"), Decimal("10"), Decimal("1")) == Decimal("0")
+    assert _last_remainder(Decimal("4"), Decimal("10"), Decimal("7")) == Decimal("3")
+    assert _last_remainder(Decimal("2"), Decimal("10"), Decimal("10")) == Decimal("0")
+    assert canonical_meters(Decimal("152.4")) == "152.400000"
+    assert canonical_meters(Decimal("3218.688")) == "3218.688000"
 
 
 def test_kilometers_are_rejected_and_miles_use_the_statute_conversion(app):
@@ -1214,6 +1211,18 @@ def _race_activity_against(app, monkeypatch, other_write, activity_write) -> dic
     return holder
 
 
+def _last_remainder(measurement: Decimal | None, target: Decimal, current: Decimal) -> Decimal:
+    """The last activity's share when earlier assignments are left unchanged."""
+    if measurement is None or measurement <= 0:
+        return Decimal("0")
+    remaining = target - current
+    if remaining <= 0:
+        return Decimal("0")
+    if measurement < remaining:
+        return measurement
+    return remaining
+
+
 def _fields(**extra) -> dict:
     payload = {"happened_on": DAY}
     if "elevation" in extra:
@@ -1240,7 +1249,7 @@ def _assert_preview_baseline(preview: dict) -> None:
         measurement = metric["measurement_m"]
         assert current + metric["existing_credit_m"] == stored[metric["metric"]]
         assert remaining == (target - current if target > current else Decimal("0"))
-        assert credit == _portion(measurement, target, current)
+        assert credit == _last_remainder(measurement, target, current)
         assert resulting == current + credit
         assert resulting <= target
 
