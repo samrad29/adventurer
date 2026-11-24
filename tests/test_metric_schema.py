@@ -1914,9 +1914,22 @@ def test_credit_moves_between_journeys_lock_lower_id_first():
         )
         conn.commit()
     move = """
-        UPDATE adventurer.journey_credits
-        SET assignment_id = %s, journey_id = %s
-        WHERE id = %s
+        WITH moved AS (
+            UPDATE adventurer.journey_credits AS credit
+            SET assignment_id = %s, journey_id = %s
+            FROM (
+                SELECT id, assignment_id AS old_assignment_id, metric_code
+                FROM adventurer.journey_credits
+                WHERE id = %s
+            ) AS target
+            WHERE credit.id = target.id
+            RETURNING credit.assignment_id, credit.metric_code, target.old_assignment_id
+        )
+        UPDATE adventurer.journey_credit_origins AS origin
+        SET assignment_id = moved.assignment_id
+        FROM moved
+        WHERE origin.assignment_id = moved.old_assignment_id
+          AND origin.metric_code = moved.metric_code
     """
     try:
         moved = _overlap_writes(

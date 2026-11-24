@@ -1725,10 +1725,14 @@ def _progress_bundle(database, journey_ids: list[int]) -> dict:
     credits: dict[int, dict[str, list]] = {}
     for row in database.execute(
         """
-        SELECT journey_id, metric_code, credited_amount, created_at
-        FROM journey_credits
-        WHERE journey_id = ANY(?)
-        ORDER BY journey_id, metric_code, created_at, id
+        SELECT credit.journey_id, credit.metric_code, credit.credited_amount,
+               origin.credited_at
+        FROM journey_credits AS credit
+        JOIN journey_credit_origins AS origin
+            ON origin.assignment_id = credit.assignment_id
+           AND origin.metric_code = credit.metric_code
+        WHERE credit.journey_id = ANY(?)
+        ORDER BY credit.journey_id, credit.metric_code, origin.credited_at, credit.id
         """,
         (unique,),
     ).fetchall():
@@ -1750,7 +1754,7 @@ def _visible_metrics(requirements, progress, journey_id: int, cutoff):
     for code, target in requirements:
         history = lines.get(code, [])
         if cutoff is not None:
-            history = [row for row in history if row["created_at"] >= cutoff]
+            history = [row for row in history if row["credited_at"] >= cutoff]
             raw = sum((row["credited_amount"] for row in history), Decimal("0"))
         else:
             raw = stored.get(code, Decimal("0"))
@@ -1776,7 +1780,7 @@ def _first_reached(history, credited: Decimal):
     for row in history:
         running += row["credited_amount"]
         if running >= credited:
-            return row["created_at"]
+            return row["credited_at"]
     return None
 
 

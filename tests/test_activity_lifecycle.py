@@ -478,13 +478,13 @@ def test_edits_recalculate_each_metric_and_the_progress_version(app):
         taller = update_activity(user_id, activity_id, {"elevation_ft": "1200"})
         assert taller["activity"]["elevation_gain_m"] == _feet("1200")
         assert _credit_map(taller)["elevation"] == _feet("1000")
-        assert _journey_row(journey_id)["progress_version"] == held
+        assert _journey_row(journey_id)["progress_version"] == held + 1
 
         cleared = update_activity(user_id, activity_id, {"elevation_ft": "0", "distance_mi": None})
         assert cleared["credits"] == []
         assert _assignment_count(activity_id) == 0
         assert _totals(journey_id) == {}
-        assert _journey_row(journey_id)["progress_version"] == held + 1
+        assert _journey_row(journey_id)["progress_version"] == held + 2
 
         regained = update_activity(user_id, activity_id, {"distance_mi": "0.5"})
         assert _credit_map(regained) == {"distance": _miles("0.5")}
@@ -593,9 +593,15 @@ def test_completed_progress_stays_fixed_and_other_fields_remain_editable(app):
         with pytest.raises(ActivityError) as caught:
             update_activity(user_id, activity_id, {"elevation_ft": "80"})
         assert caught.value.code == "invalid_state"
-        updated = update_activity(user_id, activity_id, {"distance_mi": "4", "note": "kept"})
-        assert updated["activity"]["distance_m"] == _miles("4")
+        with pytest.raises(ActivityError) as distance:
+            update_activity(user_id, activity_id, {"distance_mi": "4"})
+        assert distance.value.code == "invalid_state"
+        updated = update_activity(
+            user_id, activity_id, {"note": "kept", "activity_type": "hike"}
+        )
+        assert updated["activity"]["distance_m"] == _miles("2")
         assert updated["activity"]["note"] == "kept"
+        assert updated["activity"]["activity_type"] == "hike"
         assert updated["activity"]["elevation_gain_m"] == _feet("100")
         assert _journey_row(journey["id"])["progress_version"] == version
         with pytest.raises(ActivityError) as deleted:

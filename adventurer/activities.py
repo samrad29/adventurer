@@ -29,10 +29,21 @@ MANUAL_EVENT_REASON = "Manual entry. Manual entries are not independently verifi
 TOKEN_TTL_SECONDS = 600
 MAX_ELEVATION_M = Decimal("10000") * FOOT_IN_METERS
 MAX_DISTANCE_M = Decimal("75") * MILE_IN_METERS
+MAX_CYCLE_DISTANCE_M = Decimal("200") * MILE_IN_METERS
 MAX_NOTE = 280
 ACTIVITY_TYPES = frozenset(
-    {"run", "hike", "walk", "stair_climb", "other", "unspecified"}
+    {
+        "run",
+        "hike",
+        "walk",
+        "stair_climb",
+        "other",
+        "unspecified",
+        "cycle",
+        "indoor_cycle",
+    }
 )
+CYCLING_TYPES = frozenset({"cycle", "indoor_cycle"})
 _FIELDS = frozenset(
     {
         "elevation_ft",
@@ -102,6 +113,7 @@ def preview_activity(user_id: int, fields: dict) -> dict:
     database = get_db()
     try:
         _require_user(database, user_id, lock=False)
+        _validate_distance(changes["activity_type"], changes.get("distance_m"))
         return _preview_new(database, user_id, changes)
     except ActivityError:
         database.rollback()
@@ -123,17 +135,24 @@ def create_activity(
         _require_user(database, user_id, lock=True)
         journey = _lock_active_journey(database, user_id)
         measurements = _measurements_from_changes(changes)
+        _validate_distance(changes["activity_type"], measurements.get("distance"))
         if journey is None:
             if confirmation_token:
                 raise _confirmation(_empty_preview(measurements))
             activity_id = _insert_activity(database, user_id, changes)
-            return _with_arrivals(_saved(database, activity_id, None), []), True
+            saved = _with_arrivals(_saved(database, activity_id, None), [])
+            saved["no_credit_reason"] = "no_active_journey"
+            return saved, True
         proposal = _proposal(journey, measurements, previous={})
         _require_confirmation(confirmation_token, user_id, journey, proposal)
         activity_id = _insert_activity(database, user_id, changes)
         reached = []
-        if proposal["credits"]:
-            _insert_assignment_credits(database, activity_id, user_id, journey, proposal["credits"])
+        assigned = _positive_required(journey, measurements)
+        if assigned:
+            _insert_assignment_credits(
+                database, activity_id, user_id, journey, proposal["credits"]
+            )
+        if proposal["credits"] or proposal["will_complete"]:
             _touch_journey(
                 database,
                 journey["id"],
@@ -147,8 +166,22 @@ def create_activity(
                 proposal["resulting"],
             )
             _write_create_feed(database, user_id, activity_id, journey, proposal, reached)
-        saved = _saved(database, activity_id, journey["id"] if proposal["credits"] else None)
-        return _with_arrivals(saved, arrival_reveals(database, journey["id"], reached)), True
+        elif assigned:
+            _touch_journey(
+                database,
+                journey["id"],
+                credit_changed=False,
+                complete=False,
+                inputs_changed=True,
+            )
+        saved = _with_arrivals(
+            _saved(database, activity_id, journey["id"] if assigned else None),
+            arrival_reveals(database, journey["id"], reached),
+        )
+        saved["no_credit_reason"] = _no_credit_reason(
+            journey, measurements, proposal["credits"]
+        )
+        return saved, True
 
     return _commit(write)
 
@@ -172,6 +205,11 @@ def preview_activity_update(user_id: int, activity_id: int, fields: dict) -> dic
     try:
         _require_user(database, user_id, lock=False)
         loaded = _load_owned(database, user_id, activity_id)
+        measurements = _merged_measurements(loaded, changes)
+        _validate_distance(
+            changes.get("activity_type", loaded["activity_type"]),
+            measurements.get("distance"),
+        )
         return _preview_edit(database, user_id, loaded, changes)
     except ActivityError:
         database.rollback()
@@ -195,6 +233,10 @@ def update_activity(
         _require_user(database, user_id, lock=True)
         loaded, journey = _lock_for_update(database, user_id, activity_id, changes)
         measurements = _merged_measurements(loaded, changes)
+        _validate_distance(
+            changes.get("activity_type", loaded["activity_type"]),
+            measurements.get("distance"),
+        )
         credit_journey = journey if _credits_can_change(loaded, journey, changes) else None
         proposal = None
         if credit_journey is not None:
@@ -217,12 +259,24 @@ def update_activity(
         _apply_changes(database, activity_id, loaded, changes)
         journey_id = loaded["journey_id"]
         arrivals = []
+        reason = None
         if proposal is not None:
-            _increase_credits(database, activity_id, user_id, credit_journey, loaded, proposal["credits"])
-            if not proposal["credits"] and loaded["assignment_id"] is not None:
-                _delete_assignment(database, loaded["assignment_id"])
-            if proposal["credits"] or proposal["credit_changed"] or proposal["will_complete"]:
+            assigned_before = loaded["assignment_id"] is not None
+            kept = _retain_assignment(
+                database,
+                activity_id,
+                user_id,
+                credit_journey,
+                loaded,
+                proposal,
+            )
+            if kept:
                 journey_id = credit_journey["id"]
+            else:
+                journey_id = None
+            inputs_changed = _measurement_inputs_changed(loaded, changes) or (
+                kept and not assigned_before
+            )
             if proposal["credit_changed"] or proposal["will_complete"]:
                 _touch_journey(
                     database,
@@ -237,6 +291,14 @@ def update_activity(
                     proposal["resulting"],
                 )
                 arrivals = arrival_reveals(database, credit_journey["id"], reached)
+            elif inputs_changed:
+                _touch_journey(
+                    database,
+                    credit_journey["id"],
+                    credit_changed=False,
+                    complete=False,
+                    inputs_changed=True,
+                )
             if proposal["will_complete"]:
                 _write_summit_feed(
                     database,
@@ -245,7 +307,12 @@ def update_activity(
                     credit_journey,
                     proposal["resulting"],
                 )
-        return _with_arrivals(_saved(database, activity_id, journey_id), arrivals), True
+            reason = _no_credit_reason(
+                credit_journey, measurements, proposal["credits"]
+            )
+        saved = _with_arrivals(_saved(database, activity_id, journey_id), arrivals)
+        saved["no_credit_reason"] = reason
+        return saved, True
 
     return _commit(write)
 
@@ -274,7 +341,11 @@ def delete_activity(user_id: int, activity_id: int) -> dict:
                 "The activity changed during this update. Try again.",
                 status=409,
             )
-        if loaded["credits"] and journey is not None and journey["status"] == "completed":
+        if (
+            loaded["assignment_id"] is not None
+            and journey is not None
+            and journey["status"] == "completed"
+        ):
             raise ActivityError(
                 "invalid_state",
                 "An activity credited to a completed journey cannot be deleted.",
@@ -286,6 +357,14 @@ def delete_activity(user_id: int, activity_id: int) -> dict:
                 journey["id"],
                 credit_changed=True,
                 complete=False,
+            )
+        elif loaded["assignment_id"] is not None and journey is not None:
+            _touch_journey(
+                database,
+                journey["id"],
+                credit_changed=False,
+                complete=False,
+                inputs_changed=True,
             )
         database.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
         summary = None if journey is None else _saved_journey(database, journey["id"])
@@ -690,6 +769,7 @@ def _load_owned(database, user_id: int, activity_id: int) -> dict:
         "distance_m": row["distance_m"],
         "started_at": row["started_at"],
         "ended_at": row["ended_at"],
+        "activity_type": row["activity_type"],
         "assignment_id": assignment_id,
         "journey_id": journey_id,
         "credits": credits,
@@ -844,6 +924,9 @@ def _preview_from_proposal(journey: dict, proposal: dict) -> dict:
         "will_complete": proposal["will_complete"],
         "credits_journey": bool(proposal["credits"]),
         "saved_without_credit": not proposal["credits"],
+        "no_credit_reason": _no_credit_reason(
+            journey, measurements, proposal["credits"]
+        ),
         "resume_required": proposal["resume_required"],
         "confirmation_token": token,
         "confirmation_expires_at": expires,
@@ -859,6 +942,7 @@ def _empty_preview(measurements: dict[str, Decimal | None]) -> dict:
         "will_complete": False,
         "credits_journey": False,
         "saved_without_credit": True,
+        "no_credit_reason": "no_active_journey",
         "resume_required": False,
         "confirmation_token": None,
         "confirmation_expires_at": None,
@@ -891,7 +975,82 @@ def _journey_public(journey: dict) -> dict:
     }
 
 
+def _positive_required(journey: dict, measurements: dict[str, Decimal | None]) -> bool:
+    required = {item["metric_code"] for item in journey["requirements"]}
+    for code in required:
+        amount = measurements.get(code)
+        if amount is not None and amount > 0:
+            return True
+    return False
+
+
+def _no_credit_reason(journey: dict | None, measurements: dict, credits: dict) -> str | None:
+    if credits:
+        return None
+    if journey is None:
+        return "no_active_journey"
+    if not _positive_required(journey, measurements):
+        return "no_positive_measurement"
+    return "metric_already_complete"
+
+
+def _measurement_inputs_changed(loaded: dict, changes: dict) -> bool:
+    for key in ("elevation_m", "distance_m"):
+        if key in changes and changes[key] != loaded[key]:
+            return True
+    return False
+
+
+def _validate_distance(activity_type: str, distance_m: Decimal | None) -> None:
+    if distance_m is None:
+        return
+    cycling = activity_type in CYCLING_TYPES
+    limit = MAX_CYCLE_DISTANCE_M if cycling else MAX_DISTANCE_M
+    label = "200 mi" if cycling else "75 mi"
+    if distance_m > limit:
+        raise ActivityError(
+            "invalid",
+            f"Log one outing at a time, up to {label}.",
+            status=400,
+        )
+
+
+def _retain_assignment(
+    database,
+    activity_id: int,
+    user_id: int,
+    journey: dict,
+    loaded: dict,
+    proposal: dict,
+) -> bool:
+    """Keep an assignment that still has a positive required measurement."""
+    if proposal["credits"]:
+        _increase_credits(
+            database, activity_id, user_id, journey, loaded, proposal["credits"]
+        )
+        return True
+    if _positive_required(journey, proposal["measurements"]):
+        if loaded["assignment_id"] is None:
+            loaded["assignment_id"] = _insert_assignment(
+                database, activity_id, user_id, journey
+            )
+        return True
+    if loaded["assignment_id"] is not None:
+        _delete_assignment(database, loaded["assignment_id"])
+        loaded["assignment_id"] = None
+    return False
+
+
 def _reject_completed_progress_edit(loaded: dict, changes: dict) -> None:
+    if loaded["assignment_id"] is not None:
+        for key in ("elevation_m", "distance_m"):
+            if key in changes and changes[key] != loaded[key]:
+                raise ActivityError(
+                    "invalid_state",
+                    "Progress on a completed journey cannot change.",
+                    status=409,
+                )
+        return
     for metric, key in (("elevation", "elevation_m"), ("distance", "distance_m")):
         if key not in changes or metric not in loaded["credits"]:
             continue
@@ -1045,7 +1204,14 @@ def _delete_assignment(database, assignment_id: int) -> None:
     )
 
 
-def _touch_journey(database, journey_id: int, *, credit_changed: bool, complete: bool) -> None:
+def _touch_journey(
+    database,
+    journey_id: int,
+    *,
+    credit_changed: bool,
+    complete: bool,
+    inputs_changed: bool = False,
+) -> None:
     if complete:
         cursor = database.execute(
             """
@@ -1057,7 +1223,7 @@ def _touch_journey(database, journey_id: int, *, credit_changed: bool, complete:
             """,
             (journey_id,),
         )
-    elif credit_changed:
+    elif credit_changed or inputs_changed:
         cursor = database.execute(
             """
             UPDATE route_journeys
@@ -1356,6 +1522,14 @@ def _group_history(rows: list[dict]) -> list[dict]:
         if item is None:
             item = _activity_dict(row)
             item["credit"] = None
+            item["association"] = None
+            if row["journey_id"] is not None:
+                item["association"] = {
+                    "journey_id": row["journey_id"],
+                    "journey_status": row["journey_status"],
+                    "route_id": row["credit_route_id"],
+                    "route_slug": row["route_slug"],
+                }
             index[row["id"]] = item
             grouped.append(item)
         if row["metric_code"] is None:
@@ -1453,12 +1627,10 @@ def _measurement(metric: str, value) -> Decimal | None:
         raise ActivityError("invalid", str(exc), status=400) from exc
     if meters is None:
         return None
-    limit = MAX_ELEVATION_M if metric == "elevation" else MAX_DISTANCE_M
-    label = "10,000 ft" if metric == "elevation" else "75 mi"
-    if meters > limit:
+    if metric == "elevation" and meters > MAX_ELEVATION_M:
         raise ActivityError(
             "invalid",
-            f"Log one outing at a time, up to {label}.",
+            "Log one outing at a time, up to 10,000 ft.",
             status=400,
         )
     return meters
