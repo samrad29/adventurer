@@ -161,7 +161,7 @@ Another person's activity or journey returns 403 `forbidden`, which is the servi
 
 ## Home
 
-`GET /api/v1/home` is aggregation only. It does not resume, restart, accept an invitation, or complete a due expedition. `docs/architecture.md` says lazy completion runs before a home read. This API does not do that, because a home GET is not allowed to change domain state. Due organization expeditions still complete on the next join or expedition read. The implemented home payload does not include journal bodies, discovery bodies, or arrival bodies. The active journey includes `pending_arrivals` for reached stories this attempt has not acknowledged.
+`GET /api/v1/home` is aggregation only. It does not resume, restart, accept an invitation, or complete a due expedition. The implemented expedition cards return raw private overrides or the raw organization columns. They do not include the resolved `branding` object in section "Proposed branding" below. `docs/architecture.md` says lazy completion runs before a home read. This API does not do that, because a home GET is not allowed to change domain state. Due organization expeditions still complete on the next join or expedition read. The implemented home payload does not include journal bodies, discovery bodies, or arrival bodies. The active journey includes `pending_arrivals` for reached stories this attempt has not acknowledged.
 
 `journey` is the active journey, or null. A paused, completed, or abandoned attempt is never placed there. `focus` is `{journey_id, status: "active"}` when a journey is active, the full presentation of one finished attempt when nothing is active or paused, and null when the state is `ready` or `resume`. `state` is `ready`, `active`, `resume`, `completed`, or `abandoned`.
 
@@ -479,6 +479,35 @@ A reached checkpoint with a published story and no published chapter stays in th
 ```
 
 `GET /api/v1/home` adds `pending_arrivals` on the active journey: `checkpoint_slug`, `chapter_slug`, and `arrival_title` for reached checkpoints that this attempt has not acknowledged. It does not add `arrival_body`, `journal_body`, discoveries, or extra images, and it does not change scene selection. Paused, abandoned, and completed attempts do not put those titles on the home scene. Their journals stay on the journey routes. The implemented scene may still carry a null credit when `photo_credits.json` has no entry. A later scene row read from `route_media` is not selected yet. A published row from that table would already meet section 18.4.
+
+## Proposed branding
+
+This contract is not implemented. `docs/architecture.md` section 19 is the rule. The columns already exist. The resolved object, the color validation, the branding edits, and the uploads do not.
+
+A reader that is allowed to see the surface receives one resolved object. The server applies The Adventurer defaults, then the organization, then the expedition overrides. The client does not. `image_ref` is the cover. It is not a route scene.
+
+```json
+"branding": {
+  "primary_color": "#18354C",
+  "accent_color": "#5095B6",
+  "logo_ref": null,
+  "image_ref": null,
+  "welcome_message": null
+}
+```
+
+`primary_color` and `accent_color` are always `#RRGGBB` in uppercase. `logo_ref`, `image_ref`, and `welcome_message` are null when the chain did not supply them. A stored empty welcome is null here. An invalid stored color is skipped and the parent color is used.
+
+Management responses keep the raw fields beside that object.
+
+- Organization list and `GET /api/v1/organizations/<slug>` keep `logo_ref`, `image_ref`, `colors`, and `welcome_message`. `colors` is the stored object, `{"primary": "#18354C", "accent": "#5095B6"}`, or null. `welcome_message` stays the stored string, including `""`. These routes stay member or platform-admin reads. `branding` on them is the organization layer with no expedition override.
+- An expedition profile keeps `accent_color`, `welcome_override`, `image_ref`, and `organization_id`, and adds `branding` resolved for that expedition.
+- A home expedition card adds `branding`. The implemented private `accent_color`, `welcome_override`, and `image_ref`, and the implemented `organization` object, stay raw. The card paint uses `branding`. The journey `scene` does not.
+- An invitation the caller can already see, and an enrollment profile the caller can already read, add `branding`. The route catalog does not.
+
+Global Everest resolves to the product colors and null logo, cover, and welcome. A private expedition has no organization layer. An organization expedition inherits the organization and then its own `accent_color`, `welcome_override`, and `image_ref`. There is no expedition primary-color field.
+
+A later write accepts `colors` as that object or null, `welcome_message` as a string of at most 280 characters, and `accent_color` as `#RRGGBB` or null. Unknown color keys, three-digit hex, alpha, and named colors are invalid. Logo and cover bytes are not JSON. They are a later upload, and the columns store the path from section 19.7. Owner and admin, or a platform administrator, edit an organization's brand. The same organization managers edit that organization's expedition overrides. A private owner edits that private expedition's overrides. A participant does not become an organization manager by joining. Organization creation stays platform-admin only.
 
 ## What the Expo client needs first
 

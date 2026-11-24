@@ -8,6 +8,8 @@ Section 17 adds achievements, collectibles, and a personal trophy case. It does 
 
 Section 18 adds the curated narrative experience. Migration 0010, the chapter and journal API, activity arrival lists, and home pending arrivals are implemented. The content authoring pipeline is docs/content-authoring.md. Launch routes are not seeded, and scene selection does not read route_media. The home presentation rules stay in docs/dynamic-home.md, and the HTTP contract stays in docs/api-v1.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
 
+Section 19 adds organization and expedition branding. The columns it uses already exist. Resolved branding, color validation, branding edits, and asset upload are not implemented. It does not change journeys, activity credits, expedition standings, snapshots, lock order, privacy removal, membership, or authentication.
+
 
 1. Executive summary
 
@@ -71,7 +73,7 @@ expeditions, altered
   organization_id, nullable, foreign key, restrict on delete
   enrollment: open or invitation, required for organization, null otherwise
   enrollment_opens_at, enrollment_closes_at
-  Optional presentation overrides: accent_color, welcome_override, image_ref
+  Optional presentation overrides: accent_color, welcome_override, image_ref. How those override the organization, and how a client receives one resolved brand, is section 19. That resolution is not implemented.
   status gains completed. Private expeditions use archived. Organization expeditions use completed. Global Everest stays active.
   New unique (id, route_id), so a participation can reference the pair.
   Checks:
@@ -470,7 +472,7 @@ Withdrawn, flag false, private expedition
   No expedition read. Personal journey remains.
 
 Private owner
-  Edit name and description, invite, revoke, transfer to an active member, archive, and rejoin without an invitation.
+  Edit name and description, invite, revoke, transfer to an active member, archive, and rejoin without an invitation. A later branding edit for this expedition is section 19. It is not implemented, and it does not add a role.
   These management actions remain available after a normal withdraw.
   They do not remain after ownership release.
 
@@ -480,7 +482,7 @@ Organization member
   No expedition create.
 
 Organization admin or owner
-  Create expeditions for that organization, choose open or invitation enrollment, invite non-members, end an expedition early, and extend ends_at while it is active.
+  Create expeditions for that organization, choose open or invitation enrollment, invite non-members, end an expedition early, and extend ends_at while it is active. A later edit of this organization's brand, and of its expeditions' presentation overrides, is section 19. It is not implemented. A member, and a participant who is not an owner or admin, does not gain it.
   Read rosters and boards for that organization's expeditions.
   No access to another organization's membership list, and no access to a private expedition they do not belong to.
 
@@ -807,7 +809,7 @@ The active journey is the focus: route name, curated route image, current checkp
 
 Curated chapters, arrivals, journal entries, and discoveries are section 18. They are shared route content, not activity rows. The journal API, activity arrival lists, and home pending-arrival titles are implemented. Home still does not carry journal bodies, discovery bodies, or arrival bodies. docs/dynamic-home.md governs the scene.
 
-Organization profiles supply the branded place a Community tab can open: name, colors, welcome, and that organization's expeditions. Roster and party details stay on the expedition endpoints, for participants and managers only.
+Organization profiles supply the branded place a Community tab can open: name, colors, welcome, and that organization's expeditions. Roster and party details stay on the expedition endpoints, for participants and managers only. The resolved brand in section 19 is presentation on those surfaces. It does not replace the route scene, the journal, or the personal home.
 
 
 13. Deferred
@@ -840,7 +842,7 @@ One lock order covers every multi-row flow in section 5.
 
 1. Which user ids belong in PLATFORM_ADMIN_IDS. The allowlist mechanism is decided. The ids are operational.
 
-2. Where organization logo and image bytes are stored. The columns may stay null until that choice is made. Journey work does not depend on it.
+2. Where organization logo and image bytes are stored. Section 19 specifies the object-storage approach and leaves the columns nullable. The bucket is not created, and journey work does not depend on it.
 
 3. The failure-limit numbers. A limit is part of the auth phase. Five failures in fifteen minutes is the default written into that phase, and it can change without a domain change.
 
@@ -1357,7 +1359,7 @@ route_media_publish_rights is this check. status = 'published' is allowed only f
     )
   )
 
-Until 0010 is applied and a later cutover reads route_media, adventurer/scene.py continues to resolve adventurer/static/photos and adventurer/photo_credits.json. This design does not move, download, or replace those files. asset_path can name those static paths. Seeding a published row from an existing file copies a complete rights record from photo_credits.json. A file with no credit entry, or with a license this section does not accept, stays unpublished. A later move to object storage or a CDN replaces the path and the file host. It does not put bytes in PostgreSQL and it does not change unlock rules. Organization logo bytes remain the separate open question in section 15.
+Until 0010 is applied and a later cutover reads route_media, adventurer/scene.py continues to resolve adventurer/static/photos and adventurer/photo_credits.json. This design does not move, download, or replace those files. asset_path can name those static paths. Seeding a published row from an existing file copies a complete rights record from photo_credits.json. A file with no credit entry, or with a license this section does not accept, stays unpublished. A later move to object storage or a CDN replaces the path and the file host. It does not put bytes in PostgreSQL and it does not change unlock rules. Organization logo and cover bytes are section 19. That storage is specified and not implemented.
 
 18.5 Authorization
 
@@ -1392,7 +1394,164 @@ These are not settled by the rest of this document.
 
   1. The per-account trail name in challenges.py. Section 18.6 leaves it out of 0010. Retiring the draw, or keeping it as a label beside the shared checkpoint name, needs a product decision.
   2. A retired story or media row is hidden from every caller, including an attempt that already acknowledged it. The alternative is to keep serving it to attempts that have a view row. Section 18.4 already blocks publishing an undocumented or noncommercial photograph. Retirement is how a published asset is pulled later.
-  3. Route photography bytes stay in adventurer/static/photos until a later move to object storage or a CDN. The column is only a path. Organization logo storage remains section 15 and is a separate choice.
+  3. Route photography bytes stay in adventurer/static/photos until a later move to object storage or a CDN. The column is only a path. Organization logo and cover storage is section 19 and uses a different bucket from these route files.
   4. Published chapter titles and their checkpoint slugs are public on the route catalog. Bodies are not. If a title would spoil a later place, the catalog rule needs to change before implementation.
   5. A view row survives an edit or delete that drops the checkpoint below its thresholds. The content is hidden until the same attempt reaches it again, and the automatic reveal does not play twice. Deleting the view on relock would show the reveal again.
   6. Discovery bodies are prose. A recipe does not get an ingredients table in 0010. Add columns later if the layout needs them.
+
+
+19. Organization and expedition branding
+
+This section is the branding contract. The columns it uses are already in migration 0007. Resolved branding, color validation, branding edits, and asset upload are not implemented. No new table and no new column are required. Branding does not change journey progress, activity credits, expedition standings, result snapshots, permissions, organization membership, achievements, or checkpoint unlocking.
+
+An organization can look like itself on the expeditions it sponsors. It does not get a separate application. The Adventurer keeps navigation, typography, core screen layout, the personal immersive home, route discovery, the Field Journal, canonical route imagery, the personal trophy case, and the semantic status colors.
+
+19.1 What is already stored
+
+organizations
+
+  logo_ref, nullable text. No writer sets it. No reader fetches bytes.
+  image_ref, nullable text. This is the organization cover, not a route photograph. No writer sets it.
+  colors, nullable jsonb. The only database rule is that a non-null value is an object. Keys and color strings are not checked. create_organization does not send colors. A stored object may contain anything an object can contain.
+  welcome_message, text, not null, default empty string. Empty means no message. create_organization leaves the default.
+
+expeditions
+
+  accent_color, welcome_override, and image_ref, all nullable text. There is no format check.
+  create_organization_expedition accepts all three and stores them as submitted. There is no later edit.
+  create_private_expedition does not accept them. They stay null.
+  Global Everest has all three null and has no organization.
+
+Home reads these fields and does not resolve them. A private card returns the three expedition values. An organization card returns the organization's slug, name, logo_ref, image_ref, colors, and welcome_message, and it does not apply that expedition's accent_color, welcome_override, or image_ref. A global card has organization null and no accent fields. GET /api/v1/organizations/<slug> returns the raw organization columns to a member or a platform administrator. An expedition profile returns the raw expedition overrides and organization_id. It does not embed the organization brand. Invitations do not carry a brand.
+
+expedition_result_entries and expedition_result_metrics record standings. They do not record colors, logos, or welcome text.
+
+19.2 Inheritance
+
+Three layers, in this order. A null or blank override uses the parent. The server resolves the chain. The mobile client does not.
+
+  1. The Adventurer defaults.
+  2. The organization, when the expedition kind is organization.
+  3. The expedition's own overrides.
+
+Organization branding is not copied onto each sponsored expedition. The expedition row keeps only the overrides a manager set. A later change to the organization appears on every expedition that still inherits that field.
+
+primary_color
+
+  Default #18354C.
+  Organization colors.primary when that token is a valid color.
+  An expedition cannot override the primary. accent_color is the only color override, so one organization keeps one primary and a season can still change its accent. A second primary column is not added.
+
+accent_color
+
+  Default #5095B6.
+  Organization colors.accent when that token is a valid color.
+  Expedition accent_color when it is a valid color. Null inherits. A private expedition has no organization, so its accent replaces the product accent directly. Global Everest inherits the product accent.
+
+logo_ref
+
+  Default null. The product mark is application chrome, not a logo_ref.
+  Organization logo_ref when it is not null.
+  No expedition logo override. A private or global expedition resolves to null.
+
+image_ref
+
+  Default null.
+  Organization image_ref when it is not null.
+  Expedition image_ref when it is not null. That replaces the cover for this expedition only.
+  This value is card and detail artwork. It is not the route scene. select_scene does not read it. A cover cannot replace a checkpoint photograph or the route hero.
+
+welcome_message
+
+  Default null.
+  Organization welcome_message when it is not blank after trim.
+  Expedition welcome_override when it is not null and not blank after trim.
+  A blank string is the same as null and inherits. The stored organization column can remain an empty string. The resolved object uses null.
+
+The working default pair is ink #18354C and steel #5095B6. A visual pass may replace those two hex values in one place. The field names and the inheritance do not change with the hex values.
+
+A completed or archived expedition keeps resolving live. Close and archive do not copy the brand into the result snapshot, and they do not clear the expedition's override columns. A sponsor that wants one season to keep a cover or an accent sets those overrides before close. Those columns remain on the expedition. A later organization rebrand changes only the fields that season was still inheriting. Freezing a full brand onto the result rows would copy organization branding into every expedition and would widen an immutable standings snapshot. This section does not do that.
+
+19.3 Colors
+
+colors is a small object of semantic tokens. It is not CSS, and it is not a theme document.
+
+  {"primary": "#18354C", "accent": "#5095B6"}
+
+Accepted tokens are primary and accent. A preset the client offers is the same object. There is no preset id and no preset table. The product default, and any later suggested pairs, are that object with different hex values.
+
+Format. A color is # plus six hexadecimal digits. Uppercase and lowercase are accepted. The stored and returned form is uppercase, with the leading #. Three-digit hex, eight-digit hex, alpha, rgb(), hsl(), and named colors are rejected on write.
+
+A write of colors must be null or an object. Unknown keys are rejected. A present token must be a valid color. A missing token is allowed and means that token inherits. An empty object and a JSON null both mean the organization sets neither color. welcome_message and welcome_override are trimmed and limited to 280 characters. accent_color uses the same color rule. logo_ref and image_ref are not free text once upload exists. Until then they stay nullable and unused.
+
+A row that already holds an object is still valid at the database. Resolution ignores a token that is not #RRGGBB and ignores unknown keys. The screen then inherits that token. A check constraint is not added. The current rule only requires a JSON object, and existing objects are not all hex pairs. New API writes reject a bad token. Old rows do not have to be rewritten for the read path to be safe.
+
+The client derives foreground colors. The server does not accept a text color, a background color, or a contrast override. For text on a branded fill, use white when white against that fill is at least 4.5 to 1. Otherwise use #18354C when that pair meets 4.5 to 1. Otherwise use #111111. Icons and hairline borders may use the accent at full strength. Success, warning, error, and the journey pace states stay on the product palette. They are not tokens in colors, and an organization cannot replace them.
+
+19.4 Where the brand appears
+
+The resolved brand may be used on organization expedition cards, expedition details, expedition leaderboards, invitations, organization expedition enrollment, and a group's completion celebration. The celebration is presentation after the existing close. It does not write the snapshot and it does not change who finished.
+
+The Adventurer keeps:
+
+  Application navigation, typography, and core screen layout.
+  The personal immersive home and its route scene.
+  Route discovery and canonical route imagery.
+  The Field Journal.
+  The personal trophy case.
+  Accessibility colors and the semantic status colors above.
+
+19.5 Resolved object
+
+Readers that are allowed to see a surface receive one object. The names match the columns already in the API. image_ref is the cover. A second name for that column is not introduced.
+
+  "branding": {
+    "primary_color": "#18354C",
+    "accent_color": "#5095B6",
+    "logo_ref": null,
+    "image_ref": null,
+    "welcome_message": null
+  }
+
+primary_color and accent_color are always resolved hex colors. logo_ref, image_ref, and welcome_message are null when nothing in the chain supplied them.
+
+Proposed placement. The current responses stay until that work is implemented.
+
+  GET /api/v1/organizations and GET /api/v1/organizations/<slug> keep the raw logo_ref, image_ref, colors, and welcome_message so an editor can see what is stored, including an empty welcome string and a partial colors object. They add branding for the organization layer with no expedition overrides. These routes stay limited to a member or a platform administrator.
+  An expedition profile adds branding resolved for that expedition. It keeps accent_color, welcome_override, image_ref, and organization_id so a manager can see the raw overrides.
+  A home expedition card adds branding. The implemented private accent fields and the implemented organization object remain raw values. The client that paints the card uses branding. The scene on the journey is unchanged.
+  An invitation the caller is allowed to see, and the enrollment profile the caller is already allowed to read, add the same object. Discovery and access rules do not change. The route catalog stays unbranded. An anonymous route list does not gain an organization directory.
+
+Global Everest resolves to the product colors and null logo, cover, and welcome. A private expedition resolves the product colors, then its own accent_color, image_ref, and welcome_override. It has no organization layer. An organization expedition resolves the product, then the organization, then its own overrides.
+
+19.6 Who may edit
+
+Roles stay section 5. Joining an expedition does not create an organization membership, and a membership does not by itself create a participation.
+
+  Set or clear organization colors, welcome_message, logo_ref, and image_ref: an active owner or admin of that organization, or a platform administrator. A member cannot. A participant who is not an owner or admin cannot.
+  Set or clear expedition accent_color, welcome_override, and image_ref: an active owner or admin of that expedition's organization. A private expedition's owner may do it for that expedition. A platform administrator may do it. A participant who is not that owner or an organization manager cannot.
+  Clearing a value stores null, or an empty welcome on the organization column, and the next read inherits the parent.
+  View a resolved brand: anyone who can already read that expedition profile, home card, or invitation. Organization profile branding stays on the member-only organization read. Open enrollment still shows the expedition's resolved brand to a signed-in user who can see that expedition, including a non-member. It does not show the membership list.
+  Upload or replace a logo or cover: the same people who may set that ref. The bytes are not accepted on the JSON routes. Section 19.7 is the upload path, and it is not built.
+
+Platform administrators remain the only creators of an organization. There is no public self-service organization signup.
+
+19.7 Assets
+
+Logo and cover bytes do not go in PostgreSQL. They do not go in adventurer/static/photos, and they do not go in route_media. Route photography keeps its own files, rights, and publication rules.
+
+The proposed host is object storage with public read, evaluated as a Supabase Storage bucket and not created here. Another host can serve the same refs. The column stores a stable path, not the file.
+
+  Organization logo: branding/organizations/<organization id>/logo/<asset id>.<ext>
+  Organization cover: branding/organizations/<organization id>/cover/<asset id>.<ext>
+  Expedition cover, only when that expedition sets its own image_ref: branding/expeditions/<expedition id>/cover/<asset id>.<ext>
+
+The returned ref is that path with a leading slash. The client loads it from the branding origin. A replacement uses a new asset id, then updates the column. Caches key on the path. After the column update commits, the previous object may be deleted. A failed delete leaves an unreferenced object. The column is the source of truth. Clearing the column stores null and then deletes the object. A fetch that fails is treated as null by the client, which then shows the inherited cover or no cover. The read API does not check the bucket on each request.
+
+Accepted files are JPEG, PNG, and WebP. SVG and GIF are not accepted. A logo is at most 512 KB, with each side from 128 to 1024 pixels, and a recommended square of 512. A cover is at most 1.5 MB, with a long side of at most 2400 pixels, and a recommended 16:9 frame of 1200 by 675. The server checks type, size, and pixel bounds. It does not reject a cover for being a few pixels off 16:9.
+
+The objects are public-read because an open expedition shows its brand to people who are not organization members. A logo or cover must not contain member data or a private roster. Signed URLs are not required for these assets.
+
+19.8 What this section does not change
+
+No migration. No upload route. No bucket. No change to scene selection, the journal, the trophy case, or the result snapshot. The implemented reads continue to return the raw columns described in section 19.1 until a later change adds the resolved object and the write validation.

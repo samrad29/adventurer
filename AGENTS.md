@@ -4,7 +4,7 @@ Expo/React Native client in `apps/mobile`, Flask JSON API, PostgreSQL. The mobil
 
 ## Read first
 
-- `docs/architecture.md` is the canonical domain architecture. Preserve its invariants. Section 16 is the progress contract. Section 17 is the award contract and is not implemented. Section 18 is the narrative contract. The journal API is implemented. Launch content is not seeded, and scene selection does not read `route_media`.
+- `docs/architecture.md` is the canonical domain architecture. Preserve its invariants. Section 16 is the progress contract. Section 17 is the award contract and is not implemented. Section 18 is the narrative contract. The journal API is implemented. Launch content is not seeded, and scene selection does not read `route_media`. Section 19 is the organization and expedition branding contract. The columns exist. Resolved branding and asset upload are not implemented.
 - `docs/content-authoring.md` is the editorial package format. Importing a package does not change journey progress.
 - `docs/api-v1.md` is the HTTP contract. Fields and routes marked proposed are not implemented.
 - `docs/dynamic-home.md` is the home presentation spec. It does not override `docs/architecture.md`.
