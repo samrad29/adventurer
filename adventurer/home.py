@@ -225,6 +225,9 @@ def _presentation(database, journey: dict, *, focus: bool = False) -> dict:
         body["journey_id"] = journey["id"]
     else:
         body["id"] = journey["id"]
+    from .activity_policy import journey_policy_fields
+
+    body.update(journey_policy_fields(database, journey["id"]))
     return body
 
 

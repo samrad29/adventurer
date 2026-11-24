@@ -233,27 +233,31 @@ def journeys_journal_acknowledge(journey_id: int, checkpoint_slug: str):
 
 @bp.post("/journeys/start")
 def journeys_start():
-    return _ok(journey=start_journey(_actor(), _route_id(_object()))), 201
+    return _ok(journey=_with_metrics([start_journey(_actor(), _route_id(_object()))])[0]), 201
 
 
 @bp.post("/journeys/switch")
 def journeys_switch():
-    return _ok(journey=switch_journey(_actor(), _route_id(_object())))
+    return _ok(journey=_with_metrics([switch_journey(_actor(), _route_id(_object()))])[0])
 
 
 @bp.post("/journeys/resume")
 def journeys_resume():
-    return _ok(journey=resume_journey(_actor(), _route_id(_object())))
+    return _ok(journey=_with_metrics([resume_journey(_actor(), _route_id(_object()))])[0])
 
 
 @bp.post("/journeys/abandon")
 def journeys_abandon():
-    return _ok(journey=abandon_journey(_actor(), _route_id(_object())))
+    return _ok(journey=_with_metrics([abandon_journey(_actor(), _route_id(_object()))])[0])
 
 
 @bp.post("/journeys/restart")
 def journeys_restart():
-    return _ok(**restart_journey(_actor(), _route_id(_object())))
+    result = restart_journey(_actor(), _route_id(_object()))
+    result["journey"] = _with_metrics([result["journey"]])[0]
+    if result.get("paused_journey") is not None:
+        result["paused_journey"] = _with_metrics([result["paused_journey"]])[0]
+    return _ok(**result)
 
 
 @bp.post("/journeys/<int:journey_id>/activity-policy/preview")
@@ -274,7 +278,9 @@ def journeys_policy_choice(journey_id: int):
     token = body.get("confirmation_token")
     if token is not None and not isinstance(token, str):
         raise ApiError("invalid", "Send confirmation_token as text.")
-    return _ok(journey=_with_metrics([choose_activity_policy(_actor(), journey_id, choice, token)])[0])
+    chosen = _with_metrics([choose_activity_policy(_actor(), journey_id, choice, token)])[0]
+    arrivals = chosen.pop("arrivals", [])
+    return _ok(journey=chosen, arrivals=arrivals)
 
 
 @bp.get("/activities")
@@ -797,28 +803,12 @@ def _with_metrics(journeys: list[dict]) -> list[dict]:
 
 
 def _journey_body(database, row) -> dict:
-    from .activity_policy import expansion_state, load_journey_policy, public_policy
+    from .activity_policy import journey_policy_fields
 
     body = {**dict(row), "metrics": progress_metrics(database, row["id"])}
-    governor_id = body.pop("governing_expedition_id", None)
-    policy = load_journey_policy(database, row["id"])
-    body["activity_policy"] = public_policy(policy)
-    slug = None
-    if governor_id is not None:
-        found = database.execute(
-            "SELECT slug FROM expeditions WHERE id = ?",
-            (governor_id,),
-        ).fetchone()
-        slug = None if found is None else found["slug"]
-    body["governing_expedition_slug"] = slug
-    state = expansion_state(database, row["id"])
-    if state["available"]:
-        body["eligibility_expansion"] = {"available": True}
-    else:
-        body["eligibility_expansion"] = {
-            "available": False,
-            "reason": state["reason"],
-        }
+    body.pop("governing_expedition_id", None)
+    body.pop("activity_policy", None)
+    body.update(journey_policy_fields(database, row["id"]))
     return body
 
 

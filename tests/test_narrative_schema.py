@@ -336,7 +336,7 @@ def _media(conn, route_id: int, **extra) -> int:
 
 def test_migration_adds_the_narrative_catalog_and_leaves_everest(db):
     version = db.execute("SELECT version_num FROM adventurer.alembic_version").fetchone()
-    assert version["version_num"] == "0013_activity_policy"
+    assert version["version_num"] == "0014_completed_eligibility"
     for table in (
         "route_chapters",
         "checkpoint_stories",

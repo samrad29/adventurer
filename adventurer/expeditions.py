@@ -37,7 +37,7 @@ from .branding import (
 )
 from .db import get_db
 from .journey_progress import CheckpointMark, assess_checkpoints
-from .journeys import JourneyError, activate_for_participation
+from .journeys import JourneyError, activate_for_participation, present_journey
 
 INVITE_DAYS = 30
 MISSED = "That expedition does not exist."
@@ -138,8 +138,8 @@ def create_private_expedition(
             proposed=chosen_policy,
         )
         participation = _save_participation(database, user_id, expedition, journey["id"])
-        _finish_join_policy(database, user_id, journey, decision)
-        return _joined(database, row["id"], participation, journey), True
+        arrivals = _finish_join_policy(database, user_id, journey, decision)
+        return _joined(database, row["id"], participation, journey, arrivals), True
 
     return _commit(write)
 
@@ -168,8 +168,8 @@ def join_expedition(
         participation = _save_participation(
             database, user_id, expedition, journey["id"]
         )
-        _finish_join_policy(database, user_id, journey, decision)
-        return _joined(database, expedition["id"], participation, journey), True
+        arrivals = _finish_join_policy(database, user_id, journey, decision)
+        return _joined(database, expedition["id"], participation, journey, arrivals), True
 
     return _commit(write)
 
@@ -435,7 +435,7 @@ def accept_invitation(
         participation = _save_participation(
             database, user_id, expedition, journey["id"]
         )
-        _finish_join_policy(database, user_id, journey, decision)
+        arrivals = _finish_join_policy(database, user_id, journey, decision)
         if invitation["invited_user_id"] is not None:
             database.execute(
                 """
@@ -445,7 +445,7 @@ def accept_invitation(
                 """,
                 (invitation["id"],),
             )
-        body = _joined(database, expedition["id"], participation, journey)
+        body = _joined(database, expedition["id"], participation, journey, arrivals)
         body["invitation_id"] = invitation["id"]
         return body, True
 
@@ -1402,6 +1402,16 @@ def _privacy_once(database, user_id: int, expedition_id: int) -> dict:
             (expedition_id,),
         ).fetchone()["count"]
         if remaining_people == 0 and remaining_results == 0:
+            database.execute(
+                """
+                SELECT id
+                FROM route_journeys
+                WHERE governing_expedition_id = ?
+                ORDER BY id
+                FOR UPDATE
+                """,
+                (expedition_id,),
+            )
             database.execute("DELETE FROM expeditions WHERE id = ?", (expedition_id,))
             return {"removed": True, "expedition": None}
         database.execute(
@@ -2183,7 +2193,9 @@ def _open_journey(
     adopt = None
     if current is not None:
         relation = classify(load_journey_policy(database, current["id"]), receiver)
-        if current["status"] in ("active", "paused") and relation != "share":
+        if current["status"] in ("active", "paused") and (
+            relation != "share" or confirmation_token
+        ):
             try:
                 decision = assert_join(
                     database,
@@ -2227,26 +2239,27 @@ def _open_journey(
     return journey, decision
 
 
-def _finish_join_policy(database, user_id: int, journey, decision) -> None:
+def _finish_join_policy(database, user_id: int, journey, decision) -> list:
     from .activities import apply_eligibility
     from .activity_policy import store_journey_policy
 
     if decision.get("born_restricted"):
         store_journey_policy(database, journey["id"], decision["policy"], None)
         refresh_governor(database, journey["id"], reason=None, former_id=None)
-        return
+        return []
     if decision.get("change"):
         store_journey_policy(database, journey["id"], decision["policy"], None)
         refresh_governor(database, journey["id"], reason=None, former_id=None)
-        apply_eligibility(
+        applied = apply_eligibility(
             database,
             user_id,
             journey["id"],
             policy_changed=True,
             complete=bool(decision.get("complete")),
         )
-        return
+        return applied["arrivals"]
     refresh_governor(database, journey["id"], reason=None, former_id=None)
+    return []
 
 
 def _policy_error(exc: PolicyError) -> ExpeditionError:
@@ -2711,12 +2724,14 @@ def _profile(database, user_id: int, expedition, organization_brand=_UNSET) -> d
     }
 
 
-def _joined(database, expedition_id: int, participation, journey) -> dict:
+def _joined(database, expedition_id: int, participation, journey, arrivals=None) -> dict:
     expedition = _expedition(database, expedition_id)
+    presented = None if journey is None else present_journey(database, journey["id"], arrivals or [])
     return {
         "expedition": _profile(database, participation["user_id"], expedition),
         "participation": participation,
-        "journey": journey,
+        "journey": presented,
+        "arrivals": [] if arrivals is None else arrivals,
     }
 
 

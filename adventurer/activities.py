@@ -81,6 +81,7 @@ _COMPLETED_JOURNEY = (
     "an assignment on a completed journey cannot be changed",
     "elevation credited to a completed journey cannot change",
     "distance credited to a completed journey cannot change",
+    "activity eligibility on a completed journey cannot change",
 )
 
 
@@ -279,6 +280,7 @@ def update_activity(
         credit_journey = journey if _credits_can_change(loaded, journey, changes) else None
         if credit_journey is not None and credit_journey["status"] == "completed":
             _reject_completed_progress_edit(loaded, changes)
+            _reject_completed_eligibility_edit(credit_journey, loaded, changes)
             _apply_changes(database, activity_id, loaded, changes)
             saved = _with_arrivals(
                 _saved(database, activity_id, loaded["journey_id"]), []
@@ -587,6 +589,9 @@ def _policy_binding(user_id: int, journey: dict, proposal: dict) -> dict:
         ),
         "totals": totals_text(requirements, proposal["resulting"]),
         "progress_version": journey["progress_version"],
+        "activity_id": None if proposal.get("activity_token") in (None, "-") else int(proposal["activity_token"]),
+        "activity_type": proposal.get("activity_type") or "-",
+        "measurements": proposal.get("measurements_token") or "-",
     }
 
 
@@ -847,7 +852,11 @@ def _lock_for_update(database, user_id: int, activity_id: int, changes: dict) ->
     elif "elevation_m" in changes or "distance_m" in changes:
         journey = _lock_active_journey(database, user_id)
     activity_ids = [activity_id]
-    if journey is not None and ("elevation_m" in changes or "distance_m" in changes):
+    if journey is not None and (
+        "elevation_m" in changes
+        or "distance_m" in changes
+        or _type_changes_eligibility(database, journey, activity_id, changes)
+    ):
         activity_ids.extend(_assigned_activity_ids(database, journey["id"]))
     _lock_activity_ids(database, activity_ids)
     loaded = _load_owned(database, user_id, activity_id)
@@ -860,6 +869,41 @@ def _lock_for_update(database, user_id: int, activity_id: int, changes: dict) ->
     if journey is not None and loaded["journey_id"] == journey["id"]:
         journey["participations"] = journey.get("participations") or []
     return loaded, journey
+
+
+def lock_policy_scope(database, user_id: int, journey_id: int) -> None:
+    """Lock the journey, its participations, then its assigned activities.
+
+    The caller already holds the user and the expeditions this confirmation needs.
+    The proposal is read after these locks and before any policy or credit write.
+    """
+    row = database.execute(
+        """
+        SELECT id, route_id, user_id
+        FROM route_journeys
+        WHERE id = ?
+        FOR UPDATE
+        """,
+        (journey_id,),
+    ).fetchone()
+    if row is None or row["user_id"] != user_id:
+        return
+    _lock_participations(database, user_id, journey_id, row["route_id"])
+    _lock_activity_ids(database, _assigned_activity_ids(database, journey_id))
+
+
+def _type_changes_eligibility(database, journey: dict, activity_id: int, changes: dict) -> bool:
+    if "activity_type" not in changes or journey.get("policy") is None:
+        return False
+    current = database.execute(
+        "SELECT activity_type FROM activities WHERE id = ?",
+        (activity_id,),
+    ).fetchone()
+    if current is None or current["activity_type"] == changes["activity_type"]:
+        return False
+    return accepts(journey["policy"], current["activity_type"]) != accepts(
+        journey["policy"], changes["activity_type"]
+    )
 
 
 def _assigned_activity_ids(database, journey_id: int) -> list[int]:
@@ -1035,6 +1079,7 @@ def _preview_edit(database, user_id: int, loaded: dict, changes: dict) -> dict:
         return _empty_preview(measurements)
     if journey["status"] == "completed":
         _reject_completed_progress_edit(loaded, changes)
+        _reject_completed_eligibility_edit(journey, loaded, changes)
     activity_type = changes.get("activity_type", loaded["activity_type"])
     eligibility_changed = _eligibility_changed(journey, loaded, activity_type)
     allocate_now = (
@@ -1540,7 +1585,9 @@ def _journey_public(journey: dict) -> dict:
                 "complete": credited >= target,
             }
         )
-    return {
+    from .activity_policy import journey_policy_fields
+
+    body = {
         "id": journey["id"],
         "status": journey["status"],
         "progress_version": journey["progress_version"],
@@ -1548,6 +1595,8 @@ def _journey_public(journey: dict) -> dict:
         "route_slug": journey["route_slug"],
         "metrics": metrics,
     }
+    body.update(journey_policy_fields(_binding_database(), journey["id"]))
+    return body
 
 
 def _positive_required(journey: dict, measurements: dict[str, Decimal | None]) -> bool:
@@ -1595,6 +1644,17 @@ def _validate_distance(activity_type: str, distance_m: Decimal | None) -> None:
             "invalid",
             f"Log one outing at a time, up to {label}.",
             status=400,
+        )
+
+
+def _reject_completed_eligibility_edit(journey: dict, loaded: dict, changes: dict) -> None:
+    if loaded.get("assignment_id") is None or "activity_type" not in changes:
+        return
+    if _eligibility_changed(journey, loaded, changes["activity_type"]):
+        raise ActivityError(
+            "invalid_state",
+            "Progress on a completed journey cannot change.",
+            status=409,
         )
 
 
@@ -1946,8 +2006,10 @@ def _saved_journey(database, journey_id: int) -> dict:
         "SELECT slug FROM routes WHERE id = ?",
         (progress.route_id,),
     ).fetchone()["slug"]
+    from .activity_policy import journey_policy_fields
+
     final = progress.final_checkpoint_reached
-    return {
+    body = {
         "id": progress.journey_id,
         "status": progress.status,
         "progress_version": progress.progress_version,
@@ -1967,6 +2029,8 @@ def _saved_journey(database, journey_id: int) -> dict:
             for metric in progress.metrics
         ],
     }
+    body.update(journey_policy_fields(database, journey_id))
+    return body
 
 
 _ACTIVITY_COLUMNS = """

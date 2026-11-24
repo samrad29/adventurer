@@ -119,6 +119,17 @@ def _prepare_database() -> None:
                     """
                 ).fetchone()
                 is not None
+                and conn.execute(
+                    """
+                    SELECT 1
+                    FROM pg_proc AS proc
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = proc.pronamespace
+                    WHERE namespace.nspname = 'adventurer'
+                      AND proc.proname = 'protect_completed_activity_eligibility'
+                    """
+                ).fetchone()
+                is not None
                 and constraint is not None
                 and "expired" in constraint[0]
             )

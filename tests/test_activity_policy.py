@@ -5,11 +5,18 @@ Runs against the isolated PostgreSQL database named by TEST_DATABASE_URL.
 
 from __future__ import annotations
 
+import threading
 from decimal import Decimal
 
 import pytest
 
-from adventurer.activities import create_activity, preview_activity, update_activity
+from adventurer.activities import (
+    ActivityError,
+    create_activity,
+    preview_activity,
+    preview_activity_update,
+    update_activity,
+)
 from adventurer.activity_policy import PolicyError
 from adventurer.db import get_db
 from adventurer.expeditions import (
@@ -24,7 +31,12 @@ from adventurer.expeditions import (
     remove_participation_privacy,
     accept_invitation,
 )
-from adventurer.journeys import choose_activity_policy, restart_journey, start_journey
+from adventurer.journeys import (
+    active_journey,
+    choose_activity_policy,
+    restart_journey,
+    start_journey,
+)
 from adventurer.measures import feet_to_meters
 from adventurer.metrics import parse_measurement
 from adventurer.services import create_adventurer
@@ -569,3 +581,500 @@ def test_a_sealed_expedition_rejects_a_later_type(app):
             )
             database.commit()
         database.rollback()
+
+
+def _status(journey_id: int) -> str:
+    return get_db().execute(
+        "SELECT status FROM route_journeys WHERE id = ?",
+        (journey_id,),
+    ).fetchone()["status"]
+
+
+def _choice(journey_id: int):
+    return get_db().execute(
+        "SELECT reason FROM journey_policy_choices WHERE journey_id = ?",
+        (journey_id,),
+    ).fetchone()
+
+
+def _ledger(journey_id: int) -> list[tuple]:
+    rows = get_db().execute(
+        """
+        SELECT activity.activity_type, credit.metric_code, credit.credited_amount,
+               origin.credited_at
+        FROM activity_journey_assignments AS assignment
+        JOIN activities AS activity ON activity.id = assignment.activity_id
+        LEFT JOIN journey_credits AS credit
+          ON credit.assignment_id = assignment.id
+        LEFT JOIN journey_credit_origins AS origin
+          ON origin.assignment_id = assignment.id
+         AND origin.metric_code = credit.metric_code
+        WHERE assignment.journey_id = ?
+        ORDER BY activity.id, credit.metric_code
+        """,
+        (journey_id,),
+    ).fetchall()
+    return [
+        (row["activity_type"], row["metric_code"], row["credited_amount"], row["credited_at"])
+        for row in rows
+    ]
+
+
+def _views(journey_id: int) -> int:
+    return get_db().execute(
+        "SELECT COUNT(*) AS n FROM journey_story_views WHERE journey_id = ?",
+        (journey_id,),
+    ).fetchone()["n"]
+
+
+def test_restart_repoints_a_governed_journey_without_stranding_the_old_governor(app):
+    with app.app_context():
+        user_id = _user("Govern")
+        route_id = _elevation_route("policy-govern", "1000")
+        other_id = _elevation_route("policy-other", "1000")
+        low = create_private_expedition(
+            user_id,
+            slug="govern-low",
+            name="Low",
+            route_slug="policy-govern",
+            activity_policy={"mode": "restricted", "activity_types": ["hike", "walk"]},
+        )
+        high = create_private_expedition(
+            user_id,
+            slug="govern-high",
+            name="High",
+            route_slug="policy-govern",
+            activity_policy={"mode": "restricted", "activity_types": ["hike", "walk"]},
+        )
+        wide = create_private_expedition(
+            user_id,
+            slug="govern-wide",
+            name="Wide",
+            route_slug="policy-govern",
+        )
+        journey_id = low["journey"]["id"]
+        lowest = min(low["expedition"]["id"], high["expedition"]["id"])
+        assert _policy(journey_id)[2] == lowest
+        assert _policy(journey_id)[2] != wide["expedition"]["id"]
+        _log(user_id, "40", "hike")
+        kept = _ledger(journey_id)
+        checkpoint_id = get_db().execute(
+            "SELECT id FROM route_checkpoints WHERE route_id = ?",
+            (route_id,),
+        ).fetchone()["id"]
+        get_db().execute(
+            """
+            INSERT INTO journey_story_views (
+                journey_id, user_id, route_id, checkpoint_id
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (journey_id, user_id, route_id, checkpoint_id),
+        )
+        get_db().commit()
+        restarted = restart_journey(user_id, route_id)
+        new_id = restarted["journey"]["id"]
+        assert _status(journey_id) == "abandoned"
+        assert _policy(journey_id)[2] is None
+        assert _choice(journey_id) is None
+        assert _policy(journey_id)[1] == ("hike", "walk")
+        assert _ledger(journey_id) == kept
+        assert _views(journey_id) == 1
+        assert _ledger(new_id) == []
+        assert _views(new_id) == 0
+        assert _policy(new_id)[1] == ("hike", "walk")
+        assert _policy(new_id)[2] == lowest
+        assert _choice(new_id) is None
+        assert restarted["journey"]["governing_expedition_slug"] == "govern-low"
+        assert restarted["journey"]["activity_policy"]["mode"] == "restricted"
+        assert restarted["journey"]["status"] == "active"
+        start_journey(user_id, other_id)
+        assert _status(new_id) == "paused"
+        paused = restart_journey(user_id, route_id)
+        assert _status(new_id) == "abandoned"
+        assert _policy(new_id)[2] is None
+        assert _choice(new_id) is None
+        third = paused["journey"]["id"]
+        assert _status(third) == "active"
+        assert _policy(third)[2] == lowest
+        assert active_journey(user_id)["route_id"] == route_id
+        governor = _policy(third)[2]
+        _log(user_id, "1000", "hike")
+        finished_id = third
+        restart_journey(user_id, route_id)
+        assert _status(finished_id) == "completed"
+        assert _policy(finished_id)[2] == governor
+
+
+def test_expansion_of_a_paused_journey_leaves_both_routes_as_they_are(app):
+    with app.app_context():
+        user_id = _user("Pause")
+        paused_route = _elevation_route("policy-paused", "1000")
+        active_route = _elevation_route("policy-active", "1000")
+        created = create_private_expedition(
+            user_id,
+            slug="paused-feet",
+            name="Feet",
+            route_slug="policy-paused",
+            activity_policy={"mode": "restricted", "activity_types": ["hike"]},
+        )
+        journey_id = created["journey"]["id"]
+        leave_expedition(user_id, "paused-feet")
+        choose_activity_policy(user_id, journey_id, "keep", None)
+        start_journey(user_id, active_route)
+        assert _status(journey_id) == "paused"
+        assert active_journey(user_id)["route_id"] == active_route
+        with pytest.raises(Exception) as caught:
+            choose_activity_policy(user_id, journey_id, "expand", None)
+        preview = caught.value.details["policy_preview"]
+        assert preview["lifecycle"] is None
+        assert preview["will_resume"] is False
+        assert preview["will_complete"] is False
+        expanded = choose_activity_policy(
+            user_id, journey_id, "expand", caught.value.details["confirmation_token"]
+        )
+        assert expanded["status"] == "paused"
+        assert _policy(journey_id)[0] == "unrestricted"
+        assert active_journey(user_id)["route_id"] == active_route
+        assert _status(journey_id) == "paused"
+        assert paused_route == get_db().execute(
+            "SELECT route_id FROM route_journeys WHERE id = ?",
+            (journey_id,),
+        ).fetchone()["route_id"]
+
+
+def test_a_completed_journey_rejects_an_eligibility_change(app):
+    with app.app_context():
+        user_id = _user("Frozen")
+        route_id = _elevation_route("policy-frozen", "100")
+        created = create_private_expedition(
+            user_id,
+            slug="frozen-feet",
+            name="Feet",
+            route_slug="policy-frozen",
+            activity_policy={"mode": "restricted", "activity_types": ["hike", "walk"]},
+        )
+        journey_id = created["journey"]["id"]
+        cycle = _log(user_id, "20", "cycle")
+        hike = _log(user_id, "100", "hike")
+        assert _status(journey_id) == "completed"
+        checkpoint_id = get_db().execute(
+            "SELECT id FROM route_checkpoints WHERE route_id = ?",
+            (route_id,),
+        ).fetchone()["id"]
+        get_db().execute(
+            """
+            INSERT INTO journey_story_views (
+                journey_id, user_id, route_id, checkpoint_id
+            )
+            VALUES (?, ?, ?, ?)
+            """,
+            (journey_id, user_id, route_id, checkpoint_id),
+        )
+        get_db().commit()
+        before = (_ledger(journey_id), _version(journey_id), _views(journey_id), _status(journey_id))
+        hike_id = hike["activity"]["id"]
+        cycle_id = cycle["activity"]["id"]
+        for activity_id, activity_type in ((hike_id, "cycle"), (cycle_id, "hike")):
+            with pytest.raises(ActivityError) as preview:
+                preview_activity_update(
+                    user_id, activity_id, {"activity_type": activity_type}
+                )
+            assert preview.value.code == "invalid_state"
+            with pytest.raises(ActivityError) as saved:
+                update_activity(user_id, activity_id, {"activity_type": activity_type})
+            assert saved.value.code == "invalid_state"
+        assert (_ledger(journey_id), _version(journey_id), _views(journey_id), _status(journey_id)) == before
+        update_activity(user_id, hike_id, {"activity_type": "walk", "note": "ridge"})
+        update_activity(user_id, cycle_id, {"activity_type": "indoor_cycle"})
+        after = _ledger(journey_id)
+        assert [item[1:] for item in after] == [item[1:] for item in before[0]]
+        assert [item[0] for item in after] == ["indoor_cycle", "walk"]
+        assert (_version(journey_id), _views(journey_id), _status(journey_id)) == before[1:]
+        kept = (_ledger(journey_id), _version(journey_id), _views(journey_id), _status(journey_id))
+        database = get_db()
+        for activity_id, activity_type in ((hike_id, "cycle"), (cycle_id, "hike")):
+            with pytest.raises(Exception) as raw:
+                database.execute(
+                    "UPDATE activities SET activity_type = ? WHERE id = ?",
+                    (activity_type, activity_id),
+                )
+            assert "activity eligibility on a completed journey cannot change" in str(raw.value)
+            database.rollback()
+        assert (_ledger(journey_id), _version(journey_id), _views(journey_id), _status(journey_id)) == kept
+
+
+def test_a_narrowing_token_does_not_become_a_share(app):
+    with app.app_context():
+        user_id = _user("Share")
+        _elevation_route("policy-share", "1000")
+        create_private_expedition(
+            user_id, slug="share-open", name="Open", route_slug="policy-share"
+        )
+        with pytest.raises(ExpeditionError) as first:
+            create_private_expedition(
+                user_id,
+                slug="share-later",
+                name="Later",
+                route_slug="policy-share",
+                activity_policy={"mode": "restricted", "activity_types": ["hike"]},
+            )
+        with pytest.raises(ExpeditionError) as second:
+            create_private_expedition(
+                user_id,
+                slug="share-now",
+                name="Now",
+                route_slug="policy-share",
+                activity_policy={"mode": "restricted", "activity_types": ["hike"]},
+            )
+        create_private_expedition(
+            user_id,
+            slug="share-now",
+            name="Now",
+            route_slug="policy-share",
+            activity_policy={"mode": "restricted", "activity_types": ["hike"]},
+            confirmation_token=second.value.details["confirmation_token"],
+        )
+        with pytest.raises(ExpeditionError) as stale:
+            create_private_expedition(
+                user_id,
+                slug="share-later",
+                name="Later",
+                route_slug="policy-share",
+                activity_policy={"mode": "restricted", "activity_types": ["hike"]},
+                confirmation_token=first.value.details["confirmation_token"],
+            )
+        assert stale.value.code == "stale_preview"
+        assert get_db().execute(
+            "SELECT 1 FROM expeditions WHERE slug = 'share-later'"
+        ).fetchone() is None
+        assert _policy(_journey_id(user_id))[1] == ("hike",)
+
+
+def test_a_policy_confirm_waits_out_an_activity_save_and_rejects_the_old_token(app):
+    with app.app_context():
+        user_id = _user("Race")
+        _dual_route(
+            "policy-race",
+            {
+                "elevation": _feet("1000"),
+                "distance": parse_measurement("distance", "50"),
+            },
+        )
+        create_private_expedition(
+            user_id, slug="race-open", name="Open", route_slug="policy-race"
+        )
+        journey_id = _journey_id(user_id)
+        first = _log(user_id, "600", "hike")
+        _log(user_id, "400", "walk")
+        with pytest.raises(ExpeditionError) as caught:
+            create_private_expedition(
+                user_id,
+                slug="race-hike",
+                name="Hike",
+                route_slug="policy-race",
+                activity_policy={"mode": "restricted", "activity_types": ["hike", "walk"]},
+            )
+        token = caught.value.details["confirmation_token"]
+        version = _version(journey_id)
+
+    started = threading.Event()
+    late_done = threading.Event()
+    holder: dict = {}
+
+    def early() -> None:
+        with app.app_context():
+            try:
+                get_db().execute("SELECT 1")
+                started.set()
+                assert late_done.wait(timeout=20)
+                create_private_expedition(
+                    user_id,
+                    slug="race-hike",
+                    name="Hike",
+                    route_slug="policy-race",
+                    activity_policy={"mode": "restricted", "activity_types": ["hike", "walk"]},
+                    confirmation_token=token,
+                )
+                holder["wrote"] = True
+            except Exception as exc:
+                holder["early_error"] = exc
+            finally:
+                get_db().close()
+
+    def late() -> None:
+        with app.app_context():
+            try:
+                assert started.wait(timeout=20)
+                holder["late"] = update_activity(
+                    user_id, first["activity"]["id"], {"elevation_ft": "700"}
+                )
+            except Exception as exc:
+                holder["late_error"] = exc
+            finally:
+                get_db().close()
+                late_done.set()
+
+    threads = [threading.Thread(target=early), threading.Thread(target=late)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+    assert not any(thread.is_alive() for thread in threads)
+    assert "late_error" not in holder, holder.get("late_error")
+    assert "wrote" not in holder
+    assert holder["early_error"].code == "stale_preview"
+    with app.app_context():
+        assert get_db().execute(
+            "SELECT 1 FROM expeditions WHERE slug = 'race-hike'"
+        ).fetchone() is None
+        assert _policy(journey_id)[0] == "unrestricted"
+        assert _credit(journey_id) == _feet("1000")
+        assert _version(journey_id) == version + 1
+        amounts = sorted(
+            row["credited_amount"]
+            for row in get_db().execute(
+                """
+                SELECT credited_amount
+                FROM journey_credits
+                WHERE journey_id = ? AND metric_code = 'elevation'
+                """,
+                (journey_id,),
+            ).fetchall()
+        )
+        assert amounts == [_feet("300"), _feet("700")]
+
+
+def test_http_policy_responses_reload_the_journey_and_keep_arrivals(client, app):
+    with app.app_context():
+        route_id = _elevation_route("policy-http", "100")
+        checkpoint_id = get_db().execute(
+            "SELECT id FROM route_checkpoints WHERE route_id = ?",
+            (route_id,),
+        ).fetchone()["id"]
+        get_db().execute(
+            """
+            INSERT INTO checkpoint_stories (
+                checkpoint_id, route_id, arrival_title, arrival_body, status
+            )
+            VALUES (?, ?, 'The ridge', 'The ridge opens.', 'published')
+            """,
+            (checkpoint_id, route_id),
+        )
+        get_db().commit()
+    response = client.post(
+        "/api/v1/auth/register",
+        json={"name": "Http", "password": "trailhead"},
+    )
+    user_id = response.get_json()["you"]["id"]
+    token = response.get_json()["token"]
+    headers = {"Authorization": f"Bearer {token}"}
+    created = client.post(
+        "/api/v1/expeditions",
+        json={
+            "slug": "http-feet",
+            "name": "Feet",
+            "route_slug": "policy-http",
+            "activity_policy": {"mode": "restricted", "activity_types": ["hike"]},
+        },
+        headers=headers,
+    )
+    assert created.status_code == 201, created.get_json()
+    body = created.get_json()
+    journey = body["journey"]
+    assert journey["activity_policy"]["mode"] == "restricted"
+    assert journey["governing_expedition_slug"] == "http-feet"
+    assert body["arrivals"] == []
+    journey_id = journey["id"]
+    for feet, activity_type in (("60", "cycle"), ("40", "hike")):
+        saved = client.post(
+            "/api/v1/activities",
+            json={"elevation_ft": feet, "happened_on": DAY, "activity_type": activity_type},
+            headers=headers,
+        )
+        assert saved.status_code == 201, saved.get_json()
+        assert "activity_policy" in saved.get_json()["journey"]
+    left = client.post("/api/v1/expeditions/http-feet/leave", headers=headers)
+    assert left.status_code == 200, left.get_json()
+    kept = client.post(
+        f"/api/v1/journeys/{journey_id}/activity-policy",
+        json={"choice": "keep"},
+        headers=headers,
+    )
+    assert kept.status_code == 200, kept.get_json()
+    opened = client.post(
+        "/api/v1/expeditions",
+        json={"slug": "http-open", "name": "Open", "route_slug": "policy-http"},
+        headers=headers,
+    )
+    assert opened.status_code == 201, opened.get_json()
+    with app.app_context():
+        before = {
+            row["kind"]: row["n"]
+            for row in get_db().execute(
+                """
+                SELECT kind, COUNT(*) AS n
+                FROM expedition_updates
+                WHERE user_id = ?
+                GROUP BY kind
+                """,
+                (user_id,),
+            ).fetchall()
+        }
+    preview = client.post(
+        f"/api/v1/journeys/{journey_id}/activity-policy/preview",
+        json={"operation": "expand"},
+        headers=headers,
+    )
+    assert preview.status_code == 200, preview.get_json()
+    assert preview.get_json()["policy_preview"]["will_complete"] is True
+    assert preview.get_json()["policy_preview"]["will_resume"] is False
+    missing = client.post(
+        f"/api/v1/journeys/{journey_id}/activity-policy",
+        json={"choice": "expand"},
+        headers=headers,
+    )
+    assert missing.status_code == 409
+    assert missing.get_json()["code"] == "confirmation_required"
+    confirmed = client.post(
+        f"/api/v1/journeys/{journey_id}/activity-policy",
+        json={
+            "choice": "expand",
+            "confirmation_token": preview.get_json()["confirmation_token"],
+        },
+        headers=headers,
+    )
+    assert confirmed.status_code == 200, confirmed.get_json()
+    finished = confirmed.get_json()
+    assert finished["journey"]["status"] == "completed"
+    assert finished["journey"]["activity_policy"]["mode"] == "unrestricted"
+    assert finished["journey"]["governing_expedition_slug"] is None
+    assert finished["arrivals"][0]["arrival_title"] == "The ridge"
+    with app.app_context():
+        kinds = {
+            row["kind"]: row["n"]
+            for row in get_db().execute(
+                """
+                SELECT kind, COUNT(*) AS n
+                FROM expedition_updates
+                WHERE user_id = ?
+                GROUP BY kind
+                """,
+                (user_id,),
+            ).fetchall()
+        }
+    assert kinds.get("activity_logged", 0) == before.get("activity_logged", 0)
+    assert kinds.get("checkpoint_reached", 0) == before.get("checkpoint_reached", 0)
+    assert kinds.get("summit_reached", 0) == before.get("summit_reached", 0) + 1
+    home = client.get("/api/v1/home", headers=headers)
+    assert home.status_code == 200
+    assert home.get_json()["focus"]["activity_policy"]["mode"] == "unrestricted"
+    restarted = client.post(
+        "/api/v1/journeys/restart",
+        json={"route_slug": "policy-http"},
+        headers=headers,
+    )
+    assert restarted.status_code == 200, restarted.get_json()
+    assert restarted.get_json()["journey"]["attempt_number"] == 2
+    assert restarted.get_json()["journey"]["activity_policy"]["mode"] == "unrestricted"
+    assert restarted.get_json()["journey"]["eligibility_expansion"]["available"] is False

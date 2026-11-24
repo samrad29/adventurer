@@ -220,7 +220,7 @@ def choose_activity_policy(user_id: int, journey_id: int, choice: str, confirmat
             if pending is None:
                 raise JourneyError("invalid_state", "There is no activity-rule choice waiting.")
             clear_choice(database, journey["id"])
-            return _load(database, journey["id"]), True
+            return present_journey(database, journey["id"]), True
         try:
             decision = assert_join(
                 database,
@@ -234,25 +234,16 @@ def choose_activity_policy(user_id: int, journey_id: int, choice: str, confirmat
             )
         except PolicyError as exc:
             raise _policy_as_journey(exc) from exc
-        if journey["status"] == "paused":
-            database.execute(
-                """
-                UPDATE route_journeys
-                SET status = 'active'
-                WHERE id = ? AND status = 'paused'
-                """,
-                (journey["id"],),
-            )
         store_journey_policy(database, journey["id"], UNRESTRICTED, None)
         clear_choice(database, journey["id"])
-        apply_eligibility(
+        applied = apply_eligibility(
             database,
             user_id,
             journey["id"],
             policy_changed=True,
             complete=bool(decision.get("complete")),
         )
-        return _load(database, journey["id"]), True
+        return present_journey(database, journey["id"], applied["arrivals"]), True
 
     return _commit(write)
 
@@ -339,7 +330,13 @@ def _restart_locked(database, user_id: int, route_id: int, adopt=None) -> dict:
     attempt = _next_attempt(database, user_id, route["id"])
     created = _insert_attempt(database, user_id, route["id"], attempt)
     reset = _repoint_active_participations(database, user_id, route["id"], created["id"])
-    from .activity_policy import clear_choice, copy_journey_policy, refresh_governor, store_journey_policy
+    from .activity_policy import (
+        clear_choice,
+        clear_unfinished_governor,
+        copy_journey_policy,
+        refresh_governor,
+        store_journey_policy,
+    )
 
     if adopt is None:
         copy_journey_policy(database, current["id"], created["id"])
@@ -347,11 +344,13 @@ def _restart_locked(database, user_id: int, route_id: int, adopt=None) -> dict:
         policy, governor_id = adopt
         store_journey_policy(database, created["id"], policy, governor_id)
         clear_choice(database, current["id"])
-        refresh_governor(database, created["id"], reason=None, former_id=None)
+    clear_unfinished_governor(database, current["id"])
+    refresh_governor(database, created["id"], reason=None, former_id=None)
     return {
-        "journey": created,
-        "paused_journey": None if paused is None else _load(database, paused["id"]),
+        "journey": present_journey(database, created["id"], []),
+        "paused_journey": None if paused is None else present_journey(database, paused["id"]),
         "reset_expedition_slugs": reset,
+        "arrivals": [],
     }
 
 
@@ -655,3 +654,19 @@ def _load(database, journey_id: int) -> dict | None:
         """,
         (journey_id,),
     ).fetchone()
+
+
+def present_journey(database, journey_id: int, arrivals: list | None = None) -> dict:
+    """Reload the journey after a policy or lifecycle write."""
+    row = _load(database, journey_id)
+    if row is None:
+        raise JourneyError("not_found", "Choose one of your journeys.")
+    from .activity_policy import journey_policy_fields
+
+    body = {key: row[key] for key in row.keys()}
+    body.pop("governing_expedition_id", None)
+    body.pop("activity_policy", None)
+    body.update(journey_policy_fields(database, journey_id))
+    if arrivals is not None:
+        body["arrivals"] = arrivals
+    return body

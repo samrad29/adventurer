@@ -285,6 +285,34 @@ def write_choice(database, journey_id: int, reason: str, former_id: int | None) 
     )
 
 
+def clear_unfinished_governor(database, journey_id: int) -> None:
+    """Drop a governor after its participation has left an unfinished attempt.
+
+    A completed journey keeps its pointer. Restart does not open a policy
+    choice on the attempt it abandons.
+    """
+    row = database.execute(
+        """
+        SELECT status
+        FROM route_journeys
+        WHERE id = ?
+        FOR UPDATE
+        """,
+        (journey_id,),
+    ).fetchone()
+    if row is None or row["status"] == "completed":
+        return
+    database.execute(
+        """
+        UPDATE route_journeys
+        SET governing_expedition_id = NULL
+        WHERE id = ?
+        """,
+        (journey_id,),
+    )
+    clear_choice(database, journey_id)
+
+
 def refresh_governor(database, journey_id: int, *, reason: str | None, former_id: int | None) -> None:
     """Set the lowest same-list governor, or keep the list and open a choice."""
     row = database.execute(
@@ -391,6 +419,37 @@ def _lowest_same_list(database, journey_id: int) -> int | None:
     return row["id"]
 
 
+def journey_policy_fields(database, journey_id: int) -> dict:
+    """Public policy, governor, and expansion state read after the mutation."""
+    policy = load_journey_policy(database, journey_id)
+    governor = database.execute(
+        """
+        SELECT governing_expedition_id
+        FROM route_journeys
+        WHERE id = ?
+        """,
+        (journey_id,),
+    ).fetchone()
+    governor_id = None if governor is None else governor["governing_expedition_id"]
+    slug = None
+    if governor_id is not None:
+        found = database.execute(
+            "SELECT slug FROM expeditions WHERE id = ?",
+            (governor_id,),
+        ).fetchone()
+        slug = None if found is None else found["slug"]
+    state = expansion_state(database, journey_id)
+    if state["available"]:
+        expansion = {"available": True}
+    else:
+        expansion = {"available": False, "reason": state["reason"]}
+    return {
+        "activity_policy": public_policy(policy),
+        "governing_expedition_slug": slug,
+        "eligibility_expansion": expansion,
+    }
+
+
 def expansion_state(database, journey_id: int) -> dict:
     row = database.execute(
         """
@@ -477,11 +536,14 @@ def issue_token(
     allocation: str,
     totals: str,
     progress_version: int,
+    activity_id: int | None = None,
+    activity_type: str | None = None,
+    measurements: str | None = None,
 ) -> tuple[str, int]:
     expires = int(time.time()) + TOKEN_TTL
     payload = "|".join(
         [
-            "p1",
+            "p2",
             str(user_id),
             str(journey_id),
             operation,
@@ -493,6 +555,9 @@ def issue_token(
             allocation,
             totals,
             str(progress_version),
+            "-" if activity_id is None else str(activity_id),
+            activity_type or "-",
+            measurements or "-",
             str(expires),
         ]
     )
@@ -504,22 +569,23 @@ def token_matches(token: str | None, **expected) -> bool:
     if not token or not isinstance(token, str):
         return False
     payload, separator, signature = token.rpartition("|")
-    if not separator or payload.count("|") != 12:
+    if not separator or payload.count("|") != 15:
         return False
     digest = hmac.new(_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(digest, signature):
         return False
     parts = payload.split("|")
-    if parts[0] != "p1":
+    if parts[0] != "p2":
         return False
     try:
-        expires = int(parts[12])
+        expires = int(parts[15])
     except ValueError:
         return False
     if expires < int(time.time()):
         return False
     expedition = "-" if expected["expedition_id"] is None else str(expected["expedition_id"])
     participations = ",".join(str(item) for item in expected["participation_ids"])
+    activity = "-" if expected.get("activity_id") is None else str(expected["activity_id"])
     return (
         parts[1] == str(expected["user_id"])
         and parts[2] == str(expected["journey_id"])
@@ -532,6 +598,9 @@ def token_matches(token: str | None, **expected) -> bool:
         and parts[9] == expected["allocation"]
         and parts[10] == expected["totals"]
         and parts[11] == str(expected["progress_version"])
+        and parts[12] == activity
+        and parts[13] == (expected.get("activity_type") or "-")
+        and parts[14] == (expected.get("measurements") or "-")
     )
 
 
@@ -675,6 +744,24 @@ def _compatible_slugs(database, user_id: int, route_id: int, proposed: Policy) -
     ]
 
 
+def _require_expansion(database, journey_id: int, current: Policy) -> None:
+    state = expansion_state(database, journey_id)
+    if state["available"]:
+        return
+    if state["reason"] == "incompatible_participation":
+        raise PolicyError(
+            "activity_policy_conflict",
+            "Another expedition still limits this journey.",
+            status=409,
+            **conflict_body(current, [], [{"slug": slug} for slug in state["blocked_by"]]),
+        )
+    raise PolicyError(
+        "invalid_state",
+        "This journey cannot change activity rules.",
+        status=409,
+    )
+
+
 def assert_join(
     database,
     *,
@@ -692,13 +779,14 @@ def assert_join(
     Returns ``{"change": False}`` when the journey policy stays as it is.
     A mismatch raises and the caller rolls the transaction back.
     """
-    from .activities import propose_policy_allocation
+    from .activities import lock_policy_scope, propose_policy_allocation
 
     current = load_journey_policy(database, journey_id)
     if proposed is None:
         proposed = load_expedition_policy(database, expedition_id)
-    relation = "expand" if operation == "expand" else classify(current, proposed)
-    if operation != "expand" and relation == "share":
+    receiver = proposed
+    relation = "expand" if operation == "expand" else classify(current, receiver)
+    if operation != "expand" and relation == "share" and not confirmation_token:
         return {"change": False, "policy": current, "complete": False}
     if operation != "expand" and relation == "conflict":
         raise PolicyError(
@@ -707,36 +795,53 @@ def assert_join(
             status=409,
             **conflict_body(
                 current,
-                rejected_types(current, proposed),
+                rejected_types(current, receiver),
                 [expedition_brief(database, expedition_id)] if expedition_id else [],
             ),
         )
     if operation == "expand":
-        state = expansion_state(database, journey_id)
-        if not state["available"]:
-            if state["reason"] == "incompatible_participation":
-                raise PolicyError(
-                    "activity_policy_conflict",
-                    "Another expedition still limits this journey.",
-                    status=409,
-                    **conflict_body(current, [], [{"slug": slug} for slug in state["blocked_by"]]),
-                )
-            raise PolicyError(
-                "invalid_state",
-                "This journey cannot change activity rules.",
-                status=409,
-            )
-        proposed = UNRESTRICTED
+        _require_expansion(database, journey_id, current)
+        receiver = UNRESTRICTED
     else:
-        blocked = conflicting_receivers(database, user_id, route_id, proposed, expedition_id)
+        blocked = conflicting_receivers(database, user_id, route_id, receiver, expedition_id)
         if blocked:
             raise PolicyError(
                 "activity_policy_conflict",
                 "Another expedition does not accept that activity list.",
                 status=409,
-                **conflict_body(current, rejected_types(current, proposed), blocked),
+                **conflict_body(current, rejected_types(current, receiver), blocked),
             )
-    proposal = propose_policy_allocation(database, journey_id, proposed)
+    if confirmation_token:
+        lock_policy_scope(database, user_id, journey_id)
+        current = load_journey_policy(database, journey_id)
+    if operation == "expand":
+        _require_expansion(database, journey_id, current)
+        target = UNRESTRICTED
+        changing = True
+    else:
+        relation = classify(current, receiver)
+        if relation == "conflict":
+            raise PolicyError(
+                "activity_policy_conflict",
+                "That expedition does not fit this journey's activity rules.",
+                status=409,
+                **conflict_body(
+                    current,
+                    rejected_types(current, receiver),
+                    [expedition_brief(database, expedition_id)] if expedition_id else [],
+                ),
+            )
+        blocked = conflicting_receivers(database, user_id, route_id, receiver, expedition_id)
+        if blocked:
+            raise PolicyError(
+                "activity_policy_conflict",
+                "Another expedition does not accept that activity list.",
+                status=409,
+                **conflict_body(current, rejected_types(current, receiver), blocked),
+            )
+        changing = relation != "share"
+        target = current if not changing else receiver
+    proposal = propose_policy_allocation(database, journey_id, target)
     would_finish = proposal["would_finish"]
     if prior_status in ("paused", "abandoned") and would_finish:
         raise PolicyError(
@@ -753,7 +858,7 @@ def assert_join(
             status=409,
         )
     lifecycle = "none"
-    will_resume = prior_status == "paused"
+    will_resume = operation != "expand" and prior_status == "paused" and not would_finish
     will_complete = prior_status == "active" and would_finish
     if will_complete:
         lifecycle = "complete"
@@ -773,7 +878,7 @@ def assert_join(
         "operation": operation,
         "expedition_id": None if operation in ("create", "expand", "type") else expedition_id,
         "current": current,
-        "proposed": proposed,
+        "proposed": target,
         "participation_ids": participations,
         "lifecycle": lifecycle,
         "allocation": policy_allocation_fingerprint(
@@ -783,7 +888,9 @@ def assert_join(
         "progress_version": proposal["journey"]["progress_version"],
     }
     if token_matches(confirmation_token, **binding):
-        return {"change": True, "policy": proposed, "complete": will_complete}
+        if not changing:
+            return {"change": False, "policy": current, "complete": False}
+        return {"change": True, "policy": target, "complete": will_complete}
     replacement, _expires = issue_token(**binding)
     code = "stale_preview" if confirmation_token else "confirmation_required"
     message = (
@@ -801,7 +908,7 @@ def assert_join(
             journey_id=journey_id,
             route_id=route_id,
             current=current,
-            proposed=proposed,
+            proposed=target,
             proposal=proposal,
             lifecycle=lifecycle,
             will_resume=will_resume,
