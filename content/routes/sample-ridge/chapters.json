@@ -1,0 +1,18 @@
+{
+  "chapters": [
+    {
+      "slug": "approach",
+      "title": "The cedar approach",
+      "summary": "A fictional walk to the first gate on Sample Ridge.",
+      "position": 0,
+      "status": "published"
+    },
+    {
+      "slug": "ridge",
+      "title": "Blue camp",
+      "summary": "A draft chapter. This is not a real route.",
+      "position": 1,
+      "status": "draft"
+    }
+  ]
+}

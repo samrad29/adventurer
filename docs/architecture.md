@@ -6,7 +6,7 @@ Section 16 revises progress. A route requires one or more metrics, and a journey
 
 Section 17 adds achievements, collectibles, and a personal trophy case. It does not change journeys, activity credits, expedition participation, leaderboards, the privacy-removal deletes in section 5.9, lock order, or authentication.
 
-Section 18 adds the curated narrative experience. Migration 0010, the chapter and journal API, activity arrival lists, and home pending arrivals are implemented. Content seeding and scene selection from route_media are not. The home presentation rules stay in docs/dynamic-home.md, and the HTTP contract stays in docs/api-v1.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
+Section 18 adds the curated narrative experience. Migration 0010, the chapter and journal API, activity arrival lists, and home pending arrivals are implemented. The content authoring pipeline is docs/content-authoring.md. Launch routes are not seeded, and scene selection does not read route_media. The home presentation rules stay in docs/dynamic-home.md, and the HTTP contract stays in docs/api-v1.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
 
 
 1. Executive summary
@@ -1111,9 +1111,9 @@ No migration, service, API, or interface is part of the current change.
 
 18. Narrative experience
 
-This section is the curated storytelling contract. Migration 0010_narrative_content is applied. Published chapters, the field journal, arrival acknowledgments, activity arrival lists, and home pending arrivals are implemented. Content seeding and scene selection from route_media are not. Journey progress, activity credits, expedition standings, scene fallback, and the privacy-removal deletes in section 5.9 stay what sections 3, 5, 16, and docs/dynamic-home.md already define. Narrative content cannot award credits, complete a journey, change a participation, or write a leaderboard.
+This section is the curated storytelling contract. Migration 0010_narrative_content is applied. Published chapters, the field journal, arrival acknowledgments, activity arrival lists, and home pending arrivals are implemented. docs/content-authoring.md validates and imports a route package. Launch routes are not seeded, and scene selection does not read route_media. Journey progress, activity credits, expedition standings, scene fallback, and the privacy-removal deletes in section 5.9 stay what sections 3, 5, 16, and docs/dynamic-home.md already define. Narrative content cannot award credits, complete a journey, change a participation, or write a leaderboard.
 
-The implemented prose is still adventurer/challenges.py. The implemented photographs are still adventurer/static/photos and adventurer/photo_credits.json. Section 18 is the replacement to build later, not a second live source.
+The running Everest prose is still adventurer/challenges.py. The running photographs are still adventurer/static/photos and adventurer/photo_credits.json. A package is not imported at application startup. Those files remain the live Everest source until the launch-content step in section 18.7.
 
 The story is linear. Chapters follow checkpoint position. Reaching a checkpoint reveals that checkpoint's arrival and opens its journal entry and discoveries. Nothing later on the route is shown early, and nothing branches on a choice. There is no AI-generated personal story and no general-purpose CMS. Platform curation writes the rows. Users do not.
 
@@ -1374,11 +1374,11 @@ Expedition membership does not grant a story the personal journey has not reache
   No user photographs, comments, or social posts. Section 13 stays deferred.
   Achievements stay section 17. Reading a story does not issue an award.
   Forecasts stay section 16.6. A story does not move the pace dot.
-  challenges.py remains the running text until a reviewed migration and an explicit content cutover replace it.
+  challenges.py remains the running text until a reviewed content import replaces it. The authoring pipeline can load a route that already has geography. It has not replaced this text.
 
 18.7 Implementation sequence
 
-Steps 1, 2, and 4 are done. Home lists pending arrival titles on the active journey and still omits journal bodies, discovery bodies, and arrival bodies. Steps 3 and 5 are not done. This sequence does not modify migrations 0001 through 0010.
+Steps 1, 2, and 4 are done. The authoring pipeline in docs/content-authoring.md can validate and import one route package. It does not seed Everest or any launch route. Home lists pending arrival titles on the active journey and still omits journal bodies, discovery bodies, and arrival bodies. Steps 3 and 5 are not done. This sequence does not modify migrations 0001 through 0010.
 
   1. Apply 0010_narrative_content on the isolated test database only.
   2. Read services and PostgreSQL tests for reach, hidden unreached bodies, acknowledgment idempotence, restart, and an edit that relocks a checkpoint.

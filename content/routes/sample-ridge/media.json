@@ -1,0 +1,55 @@
+{
+  "media": [
+    {
+      "role": "route_hero",
+      "path": "/static/photos/lukla.jpg",
+      "alt_text": "Stand-in photograph for the fictional Sample Ridge hero. This file is not a claim about that photograph.",
+      "rights_basis": "undocumented",
+      "position": 0,
+      "status": "draft"
+    },
+    {
+      "role": "journal",
+      "checkpoint": "gate",
+      "path": "/static/photos/lukla.jpg",
+      "alt_text": "Stand-in photograph beside the fictional cedar gate.",
+      "rights_basis": "creative_commons",
+      "author": "Sample Author",
+      "license": "CC BY 4.0",
+      "license_url": "https://creativecommons.org/licenses/by/4.0/",
+      "source_url": "https://example.com/sample-ridge/gate",
+      "position": 0,
+      "status": "published"
+    },
+    {
+      "role": "checkpoint_scene",
+      "checkpoint": "gate",
+      "path": "/static/photos/lukla.jpg",
+      "alt_text": "Unpublished stand-in scene for the fictional cedar gate.",
+      "rights_basis": "undocumented",
+      "position": 0,
+      "status": "draft"
+    },
+    {
+      "role": "discovery",
+      "checkpoint": "gate",
+      "discovery": "old-post",
+      "path": "/static/photos/lukla.jpg",
+      "alt_text": "Stand-in photograph for the fictional old post.",
+      "rights_basis": "public_domain",
+      "license": "Public domain",
+      "source_url": "https://example.com/sample-ridge/old-post",
+      "position": 0,
+      "status": "published"
+    },
+    {
+      "role": "journal",
+      "checkpoint": "gate",
+      "path": "/static/photos/lukla.jpg",
+      "alt_text": "Retired stand-in photograph for the fictional cedar gate.",
+      "rights_basis": "undocumented",
+      "position": 1,
+      "status": "retired"
+    }
+  ]
+}
