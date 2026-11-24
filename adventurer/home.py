@@ -18,6 +18,7 @@ from pathlib import Path
 
 from flask import current_app
 
+from .branding import resolve_branding
 from .db import get_db
 from .expeditions import board_metrics, read_received_invitations
 from .journey_progress import CheckpointMark, read_journey_progress
@@ -287,8 +288,21 @@ def _expeditions(database, user_id: int, active_journey_id: int | None) -> list[
             }
         else:
             card["organization"] = None
+        card["branding"] = _card_branding(row)
         cards.append(card)
     return cards
+
+
+def _card_branding(row) -> dict:
+    organization = None
+    if row["kind"] == "organization":
+        organization = {
+            "logo_ref": row["logo_ref"],
+            "image_ref": row["organization_image_ref"],
+            "colors": row["colors"],
+            "welcome_message": row["welcome_message"],
+        }
+    return resolve_branding(kind=row["kind"], organization=organization, expedition=row)
 
 
 def _begin_consistent_read(database) -> None:
@@ -335,6 +349,7 @@ def _invitations(database, user_id: int) -> list[dict]:
                     "name": expedition["name"],
                     "route_slug": expedition["route_slug"],
                 },
+                "branding": invitation["branding"],
                 "actions": actions,
             }
         )

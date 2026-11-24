@@ -24,6 +24,7 @@ from .activities import (
     preview_activity_update,
     update_activity,
 )
+from .branding import resolve_branding
 from .db import get_db
 from .expeditions import (
     ExpeditionError,
@@ -56,6 +57,8 @@ from .expeditions import (
     revoke_invitation,
     suspend_organization,
     transfer_ownership,
+    update_expedition_branding,
+    update_organization_branding,
     update_organization_role,
     update_private_expedition,
 )
@@ -351,7 +354,12 @@ def routes_get(slug: str):
     expeditions = database.execute(
         """
         SELECT expedition.slug, expedition.name, expedition.kind,
-               expedition.status, expedition.visibility
+               expedition.status, expedition.visibility,
+               expedition.accent_color, expedition.welcome_override,
+               expedition.image_ref,
+               organization.logo_ref,
+               organization.image_ref AS organization_image_ref,
+               organization.colors, organization.welcome_message
         FROM expeditions AS expedition
         LEFT JOIN organizations AS organization
           ON organization.id = expedition.organization_id
@@ -386,7 +394,7 @@ def routes_get(slug: str):
         requirements=requirements,
         checkpoints=checkpoint_bodies,
         chapters=chapters,
-        expeditions=[dict(row) for row in expeditions],
+        expeditions=[_enrollment_expedition(row) for row in expeditions],
         journeys=journeys,
     )
 
@@ -408,6 +416,11 @@ def expeditions_create():
         confirm_new_attempt=_flag(body, "confirm_new_attempt"),
     )
     return _ok(**created), 201
+
+
+@bp.patch("/expeditions/<slug>/branding")
+def expeditions_branding(slug: str):
+    return _ok(expedition=update_expedition_branding(_actor(), slug, _object()))
 
 
 @bp.patch("/expeditions/<slug>")
@@ -591,6 +604,11 @@ def organizations_remove_member(slug: str):
     return _ok(**remove_organization_member(_actor(), slug, _text(_object(), "username")))
 
 
+@bp.patch("/organizations/<slug>/branding")
+def organizations_branding(slug: str):
+    return _ok(organization=update_organization_branding(_actor(), slug, _object()))
+
+
 @bp.get("/organizations/<slug>/expeditions")
 def organizations_expeditions(slug: str):
     return _ok(expeditions=list_organization_expeditions(_actor(), slug))
@@ -626,6 +644,27 @@ def admin_owner(slug: str):
 @bp.post("/admin/organizations/<slug>/suspend")
 def admin_suspend(slug: str):
     return _ok(organization=suspend_organization(_actor(), slug))
+
+
+def _enrollment_expedition(row) -> dict:
+    organization = None
+    if row["kind"] == "organization":
+        organization = {
+            "logo_ref": row["logo_ref"],
+            "image_ref": row["organization_image_ref"],
+            "colors": row["colors"],
+            "welcome_message": row["welcome_message"],
+        }
+    return {
+        "slug": row["slug"],
+        "name": row["name"],
+        "kind": row["kind"],
+        "status": row["status"],
+        "visibility": row["visibility"],
+        "branding": resolve_branding(
+            kind=row["kind"], organization=organization, expedition=row
+        ),
+    }
 
 
 def _actor() -> int:

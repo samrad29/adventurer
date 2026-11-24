@@ -10,6 +10,7 @@ to lock; its new id sorts after the active expeditions already locked.
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import re
 import secrets
@@ -18,12 +19,22 @@ from decimal import Decimal
 
 from flask import current_app
 
+from .branding import (
+    BrandingError,
+    normalize_color,
+    normalize_colors,
+    normalize_welcome,
+    resolve_branding,
+)
 from .db import get_db
 from .journey_progress import CheckpointMark, assess_checkpoints
 from .journeys import JourneyError, activate_for_participation
 
 INVITE_DAYS = 30
 MISSED = "That expedition does not exist."
+_UNSET = object()
+_ORGANIZATION_BRAND_FIELDS = {"colors", "welcome_message", "logo_ref", "image_ref"}
+_EXPEDITION_BRAND_FIELDS = {"accent_color", "welcome_override", "image_ref"}
 _SLUG = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 _RESERVED = {
     "join",
@@ -280,7 +291,7 @@ def create_username_invitation(user_id: int, slug: str, username: str) -> dict:
             (expedition["id"], invited["id"]),
         ).fetchone()
         if existing is not None:
-            return _invitation_body(database, existing, token=None), False
+            return _branded_invitation(database, existing, token=None), False
         raw, digest = _new_token()
         row = database.execute(
             """
@@ -294,7 +305,7 @@ def create_username_invitation(user_id: int, slug: str, username: str) -> dict:
             (expedition["id"], user_id, invited["id"], digest),
         ).fetchone()
         stored = _invitation_row(database, row["id"])
-        return _invitation_body(database, stored, token=raw), True
+        return _branded_invitation(database, stored, token=raw), True
 
     return _commit(write)
 
@@ -314,7 +325,7 @@ def create_share_link(user_id: int, slug: str) -> dict:
         ).fetchone()
         if existing is not None:
             stored = _invitation_row(database, existing["id"])
-            return _invitation_body(database, stored, token=None), False
+            return _branded_invitation(database, stored, token=None), False
         raw, digest = _new_token()
         row = database.execute(
             """
@@ -328,7 +339,7 @@ def create_share_link(user_id: int, slug: str) -> dict:
             (expedition["id"], user_id, digest),
         ).fetchone()
         stored = _invitation_row(database, row["id"])
-        return _invitation_body(database, stored, token=raw), True
+        return _branded_invitation(database, stored, token=raw), True
 
     return _commit(write)
 
@@ -404,7 +415,9 @@ def decline_invitation(user_id: int, invitation_id: int) -> dict:
             "UPDATE expedition_invitations SET status = 'declined' WHERE id = ?",
             (invitation["id"],),
         )
-        return _invitation_body(database, _invitation_row(database, invitation["id"]), token=None), True
+        return _branded_invitation(
+            database, _invitation_row(database, invitation["id"]), token=None
+        ), True
 
     result = _commit(write)
     if result.get("expired"):
@@ -435,7 +448,9 @@ def revoke_invitation(user_id: int, invitation_id: int) -> dict:
             "UPDATE expedition_invitations SET status = 'revoked' WHERE id = ?",
             (invitation["id"],),
         )
-        return _invitation_body(database, _invitation_row(database, invitation["id"]), token=None), True
+        return _branded_invitation(
+            database, _invitation_row(database, invitation["id"]), token=None
+        ), True
 
     return _commit(write)
 
@@ -457,7 +472,7 @@ def read_received_invitations(database, user_id: int) -> list[dict]:
         """,
         (user_id,),
     ).fetchall()
-    return [_invitation_body(database, row, token=None) for row in rows]
+    return _branded_invitations(database, rows)
 
 
 def list_received_invitations(user_id: int) -> list[dict]:
@@ -489,7 +504,7 @@ def list_expedition_invitations(user_id: int, slug: str) -> list[dict]:
             """,
             (expedition["id"],),
         ).fetchall()
-        return [_invitation_body(database, row, token=None) for row in rows]
+        return _branded_invitations(database, rows)
     except ExpeditionError:
         database.rollback()
         raise
@@ -765,6 +780,10 @@ def create_organization_expedition(
         and enrollment_closes_at <= enrollment_opens_at
     ):
         raise ExpeditionError("invalid", "Choose an enrollment close later than the open.")
+    cleaned_welcome = _optional_welcome(welcome_override)
+    cleaned_accent = _optional_color(accent_color)
+    if image_ref is not None:
+        raise ExpeditionError("invalid", "Set a cover through the branding upload.")
 
     def write(database):
         _lock_user(database, user_id)
@@ -795,12 +814,87 @@ def create_organization_expedition(
                 ends_at,
                 enrollment_opens_at,
                 enrollment_closes_at,
-                welcome_override,
-                accent_color,
-                image_ref,
+                cleaned_welcome,
+                cleaned_accent,
+                None,
             ),
         ).fetchone()
         return _profile(database, user_id, _lock_expedition(database, row["id"])), True
+
+    return _commit(write)
+
+
+def update_organization_branding(user_id: int, slug: str, changes: dict) -> dict:
+    """Apply only the branding keys present in changes. A missing key is left alone."""
+    parsed = _organization_brand_changes(changes)
+
+    def write(database):
+        _lock_user(database, user_id)
+        organization = _find_organization(database, slug)
+        if organization is None:
+            raise ExpeditionError("not_found", "That organization does not exist.", status=404)
+        admin = user_id in _admin_ids()
+        if not admin and not _is_org_manager(database, user_id, organization["id"]):
+            if _can_read_organization(database, user_id, organization["id"]):
+                raise ExpeditionError(
+                    "forbidden", "You cannot edit this organization.", status=403
+                )
+            raise ExpeditionError("not_found", "That organization does not exist.", status=404)
+        locked = database.execute(
+            "SELECT id, status FROM organizations WHERE id = ? FOR UPDATE",
+            (organization["id"],),
+        ).fetchone()
+        if not admin and locked["status"] != "active":
+            raise ExpeditionError("invalid_state", "This organization is suspended.", status=409)
+        _write_brand_columns(
+            database,
+            "organizations",
+            locked["id"],
+            parsed,
+            jsonb=("colors",),
+        )
+        return _organization_body(database, user_id, locked["id"]), True
+
+    return _commit(write)
+
+
+def update_expedition_branding(user_id: int, slug: str, changes: dict) -> dict:
+    """Apply only the override keys present in changes. A missing key is left alone."""
+    parsed = _expedition_brand_changes(changes)
+
+    def write(database):
+        _lock_user(database, user_id)
+        expedition = _find_slug(database, slug)
+        if expedition is None:
+            raise ExpeditionError("not_found", MISSED, status=404)
+        if expedition["kind"] == "global":
+            raise ExpeditionError(
+                "forbidden", "This expedition keeps the product brand.", status=403
+            )
+        locked = _lock_expedition(database, expedition["id"])
+        admin = user_id in _admin_ids()
+        if not admin:
+            if locked["kind"] == "private":
+                if locked["owner_user_id"] != user_id:
+                    raise _manage_denied(database, user_id, locked)
+            elif locked["kind"] == "organization":
+                if not _is_org_manager(database, user_id, locked["organization_id"]):
+                    raise _manage_denied(database, user_id, locked)
+            else:
+                raise ExpeditionError("not_found", MISSED, status=404)
+        if locked["status"] != "active":
+            raise ExpeditionError("invalid_state", "This expedition is not open.", status=409)
+        if locked["kind"] == "organization" and not admin:
+            organization = database.execute(
+                "SELECT status FROM organizations WHERE id = ?",
+                (locked["organization_id"],),
+            ).fetchone()
+            if organization is None or organization["status"] != "active":
+                raise ExpeditionError(
+                    "invalid_state", "This organization is suspended.", status=409
+                )
+        _write_brand_columns(database, "expeditions", locked["id"], parsed)
+        return _profile(database, user_id, _lock_expedition(database, locked["id"])), True
 
     return _commit(write)
 
@@ -992,7 +1086,14 @@ def list_organizations(user_id: int) -> list[dict]:
             """,
             (user_id,),
         ).fetchall()
-        return [dict(row) for row in rows]
+        bodies = []
+        for row in rows:
+            body = dict(row)
+            body["branding"] = resolve_branding(
+                kind="organization", organization=body, expedition=None
+            )
+            bodies.append(body)
+        return bodies
     except ExpeditionError:
         database.rollback()
         raise
@@ -1062,6 +1163,7 @@ def list_organization_expeditions(user_id: int, slug: str) -> list[dict]:
             """,
             (organization["id"],),
         ).fetchall()
+        brand = _organization_brand(database, organization["id"])
         visible = []
         for row in rows:
             expedition = _expedition(database, row["id"])
@@ -1069,7 +1171,7 @@ def list_organization_expeditions(user_id: int, slug: str) -> list[dict]:
             if manager or access in ("profile", "read", "manage"):
                 if not manager and expedition["enrollment"] == "invitation" and access == "none":
                     continue
-                profile = _profile(database, user_id, expedition)
+                profile = _profile(database, user_id, expedition, brand)
                 profile["can_manage"] = manager
                 visible.append(profile)
         return visible
@@ -2212,6 +2314,165 @@ def _is_due(database, expedition) -> bool:
     return bool(row["due"])
 
 
+def _optional_color(value):
+    if value is None:
+        return None
+    try:
+        return normalize_color(value)
+    except BrandingError as exc:
+        raise ExpeditionError("invalid", exc.message) from exc
+
+
+def _optional_welcome(value):
+    try:
+        return normalize_welcome(value)
+    except BrandingError as exc:
+        raise ExpeditionError("invalid", exc.message) from exc
+
+
+def _reject_brand_keys(changes: dict, allowed: set[str]) -> None:
+    if not isinstance(changes, dict):
+        raise ExpeditionError("invalid", "Send a JSON object.")
+    if set(changes) - allowed:
+        raise ExpeditionError("invalid", "That branding field is not supported.")
+
+
+def _reject_asset(value, message: str) -> None:
+    if value is not None:
+        raise ExpeditionError("invalid", message)
+
+
+def _organization_brand_changes(changes: dict) -> dict:
+    _reject_brand_keys(changes, _ORGANIZATION_BRAND_FIELDS)
+    parsed = {}
+    if "colors" in changes:
+        try:
+            parsed["colors"] = normalize_colors(changes["colors"])
+        except BrandingError as exc:
+            raise ExpeditionError("invalid", exc.message) from exc
+    if "welcome_message" in changes:
+        parsed["welcome_message"] = _optional_welcome(changes["welcome_message"]) or ""
+    if "logo_ref" in changes:
+        _reject_asset(changes["logo_ref"], "Set a logo through the branding upload.")
+        parsed["logo_ref"] = None
+    if "image_ref" in changes:
+        _reject_asset(changes["image_ref"], "Set a cover through the branding upload.")
+        parsed["image_ref"] = None
+    return parsed
+
+
+def _expedition_brand_changes(changes: dict) -> dict:
+    _reject_brand_keys(changes, _EXPEDITION_BRAND_FIELDS)
+    parsed = {}
+    if "accent_color" in changes:
+        parsed["accent_color"] = _optional_color(changes["accent_color"])
+    if "welcome_override" in changes:
+        parsed["welcome_override"] = _optional_welcome(changes["welcome_override"])
+    if "image_ref" in changes:
+        _reject_asset(changes["image_ref"], "Set a cover through the branding upload.")
+        parsed["image_ref"] = None
+    return parsed
+
+
+def _write_brand_columns(database, table: str, row_id: int, parsed: dict, jsonb=()) -> None:
+    if table not in ("organizations", "expeditions") or not parsed:
+        return
+    assignments = []
+    params = []
+    for column, value in parsed.items():
+        if column in jsonb:
+            assignments.append(f"{column} = ?::jsonb")
+            params.append(None if value is None else json.dumps(value))
+        else:
+            assignments.append(f"{column} = ?")
+            params.append(value)
+    params.append(row_id)
+    database.execute(
+        f"UPDATE {table} SET {', '.join(assignments)} WHERE id = ?",
+        tuple(params),
+    )
+
+
+def _organization_brand(database, organization_id: int | None):
+    if organization_id is None:
+        return None
+    return database.execute(
+        """
+        SELECT logo_ref, image_ref, colors, welcome_message
+        FROM organizations
+        WHERE id = ?
+        """,
+        (organization_id,),
+    ).fetchone()
+
+
+def _resolved_brand(database, expedition, organization_brand=_UNSET) -> dict:
+    organization = None
+    if expedition["kind"] == "organization":
+        if organization_brand is _UNSET:
+            organization = _organization_brand(database, expedition["organization_id"])
+        else:
+            organization = organization_brand
+    return resolve_branding(
+        kind=expedition["kind"],
+        organization=None if organization is None else dict(organization),
+        expedition=expedition,
+    )
+
+
+def _brands_for(database, expedition_ids: list[int]) -> dict[int, dict]:
+    unique = list(dict.fromkeys(expedition_ids))
+    rows = database.execute(
+        """
+        SELECT expedition.id, expedition.kind, expedition.accent_color,
+               expedition.welcome_override, expedition.image_ref,
+               organization.logo_ref,
+               organization.image_ref AS organization_image_ref,
+               organization.colors, organization.welcome_message
+        FROM expeditions AS expedition
+        LEFT JOIN organizations AS organization
+          ON organization.id = expedition.organization_id
+        WHERE expedition.id = ANY(?)
+        """,
+        (unique,),
+    ).fetchall()
+    found = {}
+    for row in rows:
+        organization = None
+        if row["kind"] == "organization":
+            organization = {
+                "logo_ref": row["logo_ref"],
+                "image_ref": row["organization_image_ref"],
+                "colors": row["colors"],
+                "welcome_message": row["welcome_message"],
+            }
+        found[row["id"]] = resolve_branding(
+            kind=row["kind"], organization=organization, expedition=row
+        )
+    fallback = resolve_branding(kind="global", organization=None, expedition=None)
+    return {expedition_id: found.get(expedition_id, fallback) for expedition_id in unique}
+
+
+def _attach_branding(database, bodies: list[dict]) -> None:
+    if not bodies:
+        return
+    brands = _brands_for(database, [body["expedition_id"] for body in bodies])
+    for body in bodies:
+        body["branding"] = brands[body["expedition_id"]]
+
+
+def _branded_invitation(database, row, *, token) -> dict:
+    body = _invitation_body(database, row, token=token)
+    _attach_branding(database, [body])
+    return body
+
+
+def _branded_invitations(database, rows) -> list[dict]:
+    bodies = [_invitation_body(database, row, token=None) for row in rows]
+    _attach_branding(database, bodies)
+    return bodies
+
+
 def _managed_private(database, user_id: int, slug: str):
     expedition = _find_slug(database, slug)
     if expedition is None or expedition["kind"] != "private":
@@ -2228,7 +2489,7 @@ def _manage_denied(database, user_id: int, expedition):
     return ExpeditionError("forbidden", "You cannot manage this expedition.", status=403)
 
 
-def _profile(database, user_id: int, expedition) -> dict:
+def _profile(database, user_id: int, expedition, organization_brand=_UNSET) -> dict:
     route = database.execute(
         "SELECT slug, name FROM routes WHERE id = ?",
         (expedition["route_id"],),
@@ -2260,6 +2521,7 @@ def _profile(database, user_id: int, expedition) -> dict:
         "owner": expedition["owner_user_id"] == user_id,
         "participation_status": None if participation is None else participation["status"],
         "mode": "live" if expedition["status"] == "active" else "final",
+        "branding": _resolved_brand(database, expedition, organization_brand),
     }
 
 
@@ -2541,6 +2803,9 @@ def _organization_body(database, user_id: int, organization_id: int) -> dict:
     ).fetchone()
     body = dict(row)
     body["role"] = None if membership is None else membership["role"]
+    body["branding"] = resolve_branding(
+        kind="organization", organization=body, expedition=None
+    )
     return body
 
 

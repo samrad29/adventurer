@@ -76,7 +76,7 @@ What already exists
   photo_credits.json is keyed by stop slug and already stores author, license, license_url, source_url, and alt. It is curated content, like challenges.py.
   expeditions already has accent_color, welcome_override, and image_ref.
   organizations already has logo_ref, image_ref, colors, and welcome_message.
-  Organization and expedition image bytes stay unresolved on purpose. The nullable logo_ref and image_ref columns are enough for journey and activity work. Storage is chosen later, when organization branding and image upload or display are implemented. This design does not add an asset-management system.
+  Organization and expedition image bytes stay out of PostgreSQL. Resolution of the existing columns is implemented. Upload and mobile painting of those files are not. This design does not add an asset-management system.
 
 Required migration
 
@@ -329,7 +329,14 @@ Active journey and a private expedition on that route. Scene selection ignores t
     "accent_color": null,
     "welcome_override": null,
     "image_ref": null,
-    "organization": null
+    "organization": null,
+    "branding": {
+      "primary_color": "#18354C",
+      "accent_color": "#5095B6",
+      "logo_ref": null,
+      "image_ref": null,
+      "welcome_message": null
+    }
   }]
 
 Active journey and an organization expedition. The participant need not be a member. Branding is the organization row. The route scene is unchanged. colors is the stored jsonb object, or null.
@@ -348,6 +355,13 @@ Active journey and an organization expedition. The participant need not be a mem
       "logo_ref": null,
       "image_ref": null,
       "colors": null,
+      "welcome_message": "A season on Everest."
+    },
+    "branding": {
+      "primary_color": "#18354C",
+      "accent_color": "#5095B6",
+      "logo_ref": null,
+      "image_ref": null,
       "welcome_message": "A season on Everest."
     }
   }]
@@ -509,7 +523,7 @@ Private expeditions do not borrow an organization. Their optional accent_color, 
 
 Expedition image_ref and organization image_ref are card artwork. The scene function does not read them. A branded expedition on Everest still shows the Everest checkpoint the journey has reached. Route photographs remain platform content. An organization does not receive a private copy of the route, and it cannot override a checkpoint image.
 
-The card above is the implemented payload. docs/architecture.md section 19 adds a proposed `branding` object on the same card. The server resolves product defaults, then the organization, then the expedition's accent, cover, and welcome. The client paints `branding` and does not merge those layers itself. The raw `organization` object and the raw private override fields stay in the payload so existing readers keep working. `branding.image_ref` is still card artwork. It does not enter `scene`, and a missing or broken branding file does not change the checkpoint photograph.
+The card above is the implemented payload, including `branding`. The server resolves product defaults, then the organization, then the expedition's accent, cover, and welcome. The client paints `branding` and does not merge those layers itself. The raw `organization` object and the raw private override fields stay in the payload so existing readers keep working. `branding.image_ref` is still card artwork. It does not enter `scene`. If a resolved logo or cover fails to load, the client uses a product placeholder or omits the image. It does not walk back through the inheritance chain, and it does not change the checkpoint photograph. Home loads the card columns in the same repeatable-read snapshot as the scene.
 
 
 8. Performance and caching
@@ -572,7 +586,7 @@ Settled
   Scene selection is the highest reached checkpoint, then the nearest lower position with an image, then the route hero, then null. A checkpoint with several thresholds is reached only when all of them are met. The scene never uses a locked checkpoint's image. Everest's hero is a broader Everest and Khumbu photograph, not Lukla or another checkpoint. The file is added with the route-aware resolver.
   The personal scene uses the full capped totals of the journey. Expedition cards use the board totals. Those numbers can differ after privacy rejoin, and the scene follows the personal totals.
   Home adds no media table of its own. The metric tables belong to docs/architecture.md section 16. The implemented files stay curated static assets, and the implemented credits and alt text stay in photo_credits.json. docs/architecture.md section 18 proposes route_media as later editorial metadata. A published scene row from that table already has the rights in section 18.4. It does not put a second photograph on this scene, and it does not put journal bodies in this payload. The active journey's pending_arrivals list names unacknowledged reached checkpoints by slug and arrival title. It carries no arrival body, journal body, or discovery. Acknowledgment stays on the journey attempt in section 18 and does not change this scene. Restart leaves those acknowledgments on the old attempt. Paused, abandoned, and completed attempts do not put that list on the home scene.
-  Organization branding and expedition image_ref are card fields. They do not own or override route imagery. Participation does not require organization membership. The implemented card returns the raw columns. docs/architecture.md section 19 is the proposed resolution and the object-storage layout. Those uploads are not implemented, and the nullable refs stay as they are.
+  Organization branding and expedition image_ref are card fields. They do not own or override route imagery. Participation does not require organization membership. The implemented card returns the raw columns and the resolved branding object from docs/architecture.md section 19. Logo and cover upload is not implemented, and a JSON request cannot set those paths.
   The home module is a composer. Journey lifecycle, route content, and expedition rules stay in their own services. Activity writes do not select images.
 
 Relationship to docs/architecture.md
@@ -635,7 +649,7 @@ Open questions
 Deferred
 
   More than one photograph in the home scene, user photographs, a CMS, and a general asset library. Extra journal and discovery images may exist under docs/architecture.md section 18 and stay off this payload. Collectible files, when they exist, use that later asset decision. docs/architecture.md section 17 defines them as achievement presentation. They are not home scene files.
-  Where organization logo and expedition image bytes are stored. The nullable refs remain. Journey and activity services do not depend on that choice. It is made when branding and image upload or display are implemented.
+  Where organization logo and expedition image bytes are stored. The nullable refs remain, and branding resolution does not wait on that host. Journey and activity services do not depend on that choice. Upload and mobile rendering of those files are not implemented.
   Image paths that do not match the slug convention, until a route actually needs the optional ref columns.
   Screen layout, navigation, and interaction, except for the rule that home shows one place and one indicator per required metric. The payload names the place and the file. It does not describe how they are drawn.
   The pace calculation. The dot's place is the reached checkpoint. The forecast status is not part of this payload yet.

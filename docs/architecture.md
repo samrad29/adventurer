@@ -8,7 +8,7 @@ Section 17 adds achievements, collectibles, and a personal trophy case. It does 
 
 Section 18 adds the curated narrative experience. Migration 0010, the chapter and journal API, activity arrival lists, and home pending arrivals are implemented. The content authoring pipeline is docs/content-authoring.md. Launch routes are not seeded, and scene selection does not read route_media. The home presentation rules stay in docs/dynamic-home.md, and the HTTP contract stays in docs/api-v1.md. Section 18 does not change journeys, activity credits, expedition standings, lock order, privacy removal, or authentication.
 
-Section 19 adds organization and expedition branding. The columns it uses already exist. Resolved branding, color validation, branding edits, and asset upload are not implemented. It does not change journeys, activity credits, expedition standings, snapshots, lock order, privacy removal, membership, or authentication.
+Section 19 adds organization and expedition branding. The columns it uses already exist. Resolution, color validation, and branding edits are implemented. Asset upload and mobile rendering are not. It does not change journeys, activity credits, expedition standings, snapshots, lock order, privacy removal, membership, or authentication.
 
 
 1. Executive summary
@@ -73,7 +73,7 @@ expeditions, altered
   organization_id, nullable, foreign key, restrict on delete
   enrollment: open or invitation, required for organization, null otherwise
   enrollment_opens_at, enrollment_closes_at
-  Optional presentation overrides: accent_color, welcome_override, image_ref. How those override the organization, and how a client receives one resolved brand, is section 19. That resolution is not implemented.
+  Optional presentation overrides: accent_color, welcome_override, image_ref. How those override the organization, and how a client receives one resolved brand, is section 19. That resolution is implemented. Upload of a logo or cover is not.
   status gains completed. Private expeditions use archived. Organization expeditions use completed. Global Everest stays active.
   New unique (id, route_id), so a participation can reference the pair.
   Checks:
@@ -472,7 +472,7 @@ Withdrawn, flag false, private expedition
   No expedition read. Personal journey remains.
 
 Private owner
-  Edit name and description, invite, revoke, transfer to an active member, archive, and rejoin without an invitation. A later branding edit for this expedition is section 19. It is not implemented, and it does not add a role.
+  Edit name and description, invite, revoke, transfer to an active member, archive, and rejoin without an invitation. The private branding edit in section 19 is implemented for an active expedition. It does not add a role.
   These management actions remain available after a normal withdraw.
   They do not remain after ownership release.
 
@@ -482,7 +482,7 @@ Organization member
   No expedition create.
 
 Organization admin or owner
-  Create expeditions for that organization, choose open or invitation enrollment, invite non-members, end an expedition early, and extend ends_at while it is active. A later edit of this organization's brand, and of its expeditions' presentation overrides, is section 19. It is not implemented. A member, and a participant who is not an owner or admin, does not gain it.
+  Create expeditions for that organization, choose open or invitation enrollment, invite non-members, end an expedition early, and extend ends_at while it is active. The organization brand edit, and the expedition presentation edit, in section 19 are implemented. A member, and a participant who is not an owner or admin, does not gain them.
   Read rosters and boards for that organization's expeditions.
   No access to another organization's membership list, and no access to a private expedition they do not belong to.
 
@@ -1402,7 +1402,7 @@ These are not settled by the rest of this document.
 
 19. Organization and expedition branding
 
-This section is the branding contract. The columns it uses are already in migration 0007. Resolved branding, color validation, branding edits, and asset upload are not implemented. No new table and no new column are required. Branding does not change journey progress, activity credits, expedition standings, result snapshots, permissions, organization membership, achievements, or checkpoint unlocking.
+This section is the branding contract. The columns it uses are already in migration 0007. Resolution, color validation, and branding edits are implemented. Asset upload is not. No new table and no new column are required. Branding does not change journey progress, activity credits, expedition standings, result snapshots, permissions, organization membership, achievements, or checkpoint unlocking.
 
 An organization can look like itself on the expeditions it sponsors. It does not get a separate application. The Adventurer keeps navigation, typography, core screen layout, the personal immersive home, route discovery, the Field Journal, canonical route imagery, the personal trophy case, and the semantic status colors.
 
@@ -1410,19 +1410,19 @@ An organization can look like itself on the expeditions it sponsors. It does not
 
 organizations
 
-  logo_ref, nullable text. No writer sets it. No reader fetches bytes.
-  image_ref, nullable text. This is the organization cover, not a route photograph. No writer sets it.
-  colors, nullable jsonb. The only database rule is that a non-null value is an object. Keys and color strings are not checked. create_organization does not send colors. A stored object may contain anything an object can contain.
-  welcome_message, text, not null, default empty string. Empty means no message. create_organization leaves the default.
+  logo_ref, nullable text. A branding edit can clear it. It cannot set a path. The upload that sets the path is not implemented. No reader fetches bytes.
+  image_ref, nullable text. This is the organization cover, not a route photograph. A branding edit can clear it and cannot set a path.
+  colors, nullable jsonb. The database still only requires an object. The branding edit validates keys and hex. create_organization does not send colors. A row written before validation may still hold a non-hex token. Reads do not rewrite it.
+  welcome_message, text, not null, default empty string. Empty means no message. create_organization leaves the default. The branding edit stores a trimmed string, or empty when the message is cleared.
 
 expeditions
 
-  accent_color, welcome_override, and image_ref, all nullable text. There is no format check.
-  create_organization_expedition accepts all three and stores them as submitted. There is no later edit.
-  create_private_expedition does not accept them. They stay null.
-  Global Everest has all three null and has no organization.
+  accent_color, welcome_override, and image_ref, all nullable text. The database has no format check. New writes validate accent and welcome. image_ref can be cleared and cannot be set to an arbitrary path.
+  create_organization_expedition accepts accent_color and welcome_override under those rules and rejects an image path.
+  create_private_expedition does not accept them. A later branding edit on an active private expedition can set accent and welcome, and can clear image_ref.
+  Global Everest keeps the product defaults. A branding edit is rejected.
 
-Home reads these fields and does not resolve them. A private card returns the three expedition values. An organization card returns the organization's slug, name, logo_ref, image_ref, colors, and welcome_message, and it does not apply that expedition's accent_color, welcome_override, or image_ref. A global card has organization null and no accent fields. GET /api/v1/organizations/<slug> returns the raw organization columns to a member or a platform administrator. An expedition profile returns the raw expedition overrides and organization_id. It does not embed the organization brand. Invitations do not carry a brand.
+Home reads these fields, keeps the raw card fields, and adds branding. A private card returns the three expedition values. An organization card returns the organization's slug, name, logo_ref, image_ref, colors, and welcome_message. A global card has organization null. GET /api/v1/organizations/<slug> returns the raw organization columns to a member or a platform administrator, plus branding for the organization layer. An expedition profile returns the raw overrides, organization_id, and branding resolved for that expedition. An invitation the caller can see carries branding.
 
 expedition_result_entries and expedition_result_metrics record standings. They do not record colors, logos, or welcome text.
 
@@ -1482,11 +1482,11 @@ Accepted tokens are primary and accent. A preset the client offers is the same o
 
 Format. A color is # plus six hexadecimal digits. Uppercase and lowercase are accepted. The stored and returned form is uppercase, with the leading #. Three-digit hex, eight-digit hex, alpha, rgb(), hsl(), and named colors are rejected on write.
 
-A write of colors must be null or an object. Unknown keys are rejected. A present token must be a valid color. A missing token is allowed and means that token inherits. An empty object and a JSON null both mean the organization sets neither color. welcome_message and welcome_override are trimmed and limited to 280 characters. accent_color uses the same color rule. logo_ref and image_ref are not free text once upload exists. Until then they stay nullable and unused.
+A write of colors must be null or an object. Unknown keys are rejected. A present token must be a valid color. A missing token is allowed and means that token inherits. An empty object and a JSON null both mean the organization sets neither color. welcome_message and welcome_override are trimmed and limited to 280 characters. accent_color uses the same color rule. A JSON request cannot set logo_ref or image_ref to a path. It can clear either one with null. The upload that chooses the next path is not implemented.
 
 A row that already holds an object is still valid at the database. Resolution ignores a token that is not #RRGGBB and ignores unknown keys. The screen then inherits that token. A check constraint is not added. The current rule only requires a JSON object, and existing objects are not all hex pairs. New API writes reject a bad token. Old rows do not have to be rewritten for the read path to be safe.
 
-The client derives foreground colors. The server does not accept a text color, a background color, or a contrast override. For text on a branded fill, use white when white against that fill is at least 4.5 to 1. Otherwise use #18354C when that pair meets 4.5 to 1. Otherwise use #111111. Icons and hairline borders may use the accent at full strength. Success, warning, error, and the journey pace states stay on the product palette. They are not tokens in colors, and an organization cannot replace them.
+The client derives foreground colors. The server does not accept a text color, a background color, or a contrast override. Normal text on a branded background must achieve at least 4.5 to 1 contrast. Pure black or white, whichever provides higher contrast, is the final fallback. Meaningful icons and interactive component boundaries must meet the applicable accessibility contrast requirements. Success, warning, error, and the journey pace states stay on the product palette. They are not tokens in colors, and an organization cannot replace them.
 
 19.4 Where the brand appears
 
@@ -1515,12 +1515,12 @@ Readers that are allowed to see a surface receive one object. The names match th
 
 primary_color and accent_color are always resolved hex colors. logo_ref, image_ref, and welcome_message are null when nothing in the chain supplied them.
 
-Proposed placement. The current responses stay until that work is implemented.
+Implemented placement.
 
   GET /api/v1/organizations and GET /api/v1/organizations/<slug> keep the raw logo_ref, image_ref, colors, and welcome_message so an editor can see what is stored, including an empty welcome string and a partial colors object. They add branding for the organization layer with no expedition overrides. These routes stay limited to a member or a platform administrator.
   An expedition profile adds branding resolved for that expedition. It keeps accent_color, welcome_override, image_ref, and organization_id so a manager can see the raw overrides.
-  A home expedition card adds branding. The implemented private accent fields and the implemented organization object remain raw values. The client that paints the card uses branding. The scene on the journey is unchanged.
-  An invitation the caller is allowed to see, and the enrollment profile the caller is already allowed to read, add the same object. Discovery and access rules do not change. The route catalog stays unbranded. An anonymous route list does not gain an organization directory.
+  A home expedition card adds branding. The private accent fields and the organization object remain raw values. The client that paints the card uses branding. The scene on the journey is unchanged. Home still reads all of this in one repeatable-read, read-only transaction.
+  An invitation the caller is allowed to see adds the same object. The expedition entries already listed on GET /api/v1/routes/<slug> add branding for open enrollment. That list does not add an organization directory, a membership, or a roster. GET /api/v1/routes stays a route catalog and does not carry branding. Discovery and access rules do not change.
 
 Global Everest resolves to the product colors and null logo, cover, and welcome. A private expedition resolves the product colors, then its own accent_color, image_ref, and welcome_override. It has no organization layer. An organization expedition resolves the product, then the organization, then its own overrides.
 
@@ -1532,7 +1532,7 @@ Roles stay section 5. Joining an expedition does not create an organization memb
   Set or clear expedition accent_color, welcome_override, and image_ref: an active owner or admin of that expedition's organization. A private expedition's owner may do it for that expedition. A platform administrator may do it. A participant who is not that owner or an organization manager cannot.
   Clearing a value stores null, or an empty welcome on the organization column, and the next read inherits the parent.
   View a resolved brand: anyone who can already read that expedition profile, home card, or invitation. Organization profile branding stays on the member-only organization read. Open enrollment still shows the expedition's resolved brand to a signed-in user who can see that expedition, including a non-member. It does not show the membership list.
-  Upload or replace a logo or cover: the same people who may set that ref. The bytes are not accepted on the JSON routes. Section 19.7 is the upload path, and it is not built.
+  Clear a logo or cover: the same people, by sending null. A JSON request cannot set the path. Upload or replace is section 19.7, and it is not built.
 
 Platform administrators remain the only creators of an organization. There is no public self-service organization signup.
 
@@ -1546,7 +1546,7 @@ The proposed host is object storage with public read, evaluated as a Supabase St
   Organization cover: branding/organizations/<organization id>/cover/<asset id>.<ext>
   Expedition cover, only when that expedition sets its own image_ref: branding/expeditions/<expedition id>/cover/<asset id>.<ext>
 
-The returned ref is that path with a leading slash. The client loads it from the branding origin. A replacement uses a new asset id, then updates the column. Caches key on the path. After the column update commits, the previous object may be deleted. A failed delete leaves an unreferenced object. The column is the source of truth. Clearing the column stores null and then deletes the object. A fetch that fails is treated as null by the client, which then shows the inherited cover or no cover. The read API does not check the bucket on each request.
+The returned ref is that path with a leading slash. The client loads it from the branding origin. A replacement uses a new asset id, then updates the column. Caches key on the path. After the column update commits, the previous object may be deleted. A failed delete leaves an unreferenced object. The column is the source of truth. Clearing the column stores null and then deletes the object. If a resolved logo or cover fails to load, the initial mobile client uses a product placeholder or omits the image. It does not reconstruct branding inheritance. The read API does not check the bucket on each request.
 
 Accepted files are JPEG, PNG, and WebP. SVG and GIF are not accepted. A logo is at most 512 KB, with each side from 128 to 1024 pixels, and a recommended square of 512. A cover is at most 1.5 MB, with a long side of at most 2400 pixels, and a recommended 16:9 frame of 1200 by 675. The server checks type, size, and pixel bounds. It does not reject a cover for being a few pixels off 16:9.
 
@@ -1554,4 +1554,4 @@ The objects are public-read because an open expedition shows its brand to people
 
 19.8 What this section does not change
 
-No migration. No upload route. No bucket. No change to scene selection, the journal, the trophy case, or the result snapshot. The implemented reads continue to return the raw columns described in section 19.1 until a later change adds the resolved object and the write validation.
+No migration. No upload route. No bucket. No mobile branding screens. No change to scene selection, the journal, the trophy case, or the result snapshot. Reads return the raw columns and the resolved branding object. Writes validate new colors and welcome text. They do not rewrite a legacy row that is only being read.
