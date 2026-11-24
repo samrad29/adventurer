@@ -91,6 +91,17 @@ def _prepare_database() -> None:
                 and conn.execute(
                     """
                     SELECT 1
+                    FROM pg_proc AS proc
+                    JOIN pg_namespace AS namespace
+                      ON namespace.oid = proc.pronamespace
+                    WHERE namespace.nspname = 'adventurer'
+                      AND proc.proname = 'protect_credit_origin'
+                    """
+                ).fetchone()
+                is not None
+                and conn.execute(
+                    """
+                    SELECT 1
                     FROM information_schema.columns
                     WHERE table_schema = 'adventurer'
                       AND table_name = 'routes'

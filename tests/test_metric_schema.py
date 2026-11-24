@@ -1925,11 +1925,15 @@ def test_credit_moves_between_journeys_lock_lower_id_first():
             WHERE credit.id = target.id
             RETURNING credit.assignment_id, credit.metric_code, target.old_assignment_id
         )
-        UPDATE adventurer.journey_credit_origins AS origin
-        SET assignment_id = moved.assignment_id
+        INSERT INTO adventurer.journey_credit_origins (
+            assignment_id, metric_code, credited_at
+        )
+        SELECT moved.assignment_id, moved.metric_code, origin.credited_at
         FROM moved
-        WHERE origin.assignment_id = moved.old_assignment_id
-          AND origin.metric_code = moved.metric_code
+        JOIN adventurer.journey_credit_origins AS origin
+          ON origin.assignment_id = moved.old_assignment_id
+         AND origin.metric_code = moved.metric_code
+        ON CONFLICT (assignment_id, metric_code) DO NOTHING
     """
     try:
         moved = _overlap_writes(

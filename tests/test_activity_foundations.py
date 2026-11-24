@@ -6,7 +6,7 @@ Restricted expedition policies and credit replay are not part of this phase.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timedelta
+from datetime import date, datetime
 from decimal import Decimal
 
 import pytest
@@ -37,7 +37,7 @@ DAY = date(2026, 6, 1)
 def test_migration_accepts_cycling_types_and_backfills_origins(app):
     with app.app_context():
         version = get_db().execute("SELECT version_num FROM alembic_version").fetchone()
-        assert version["version_num"] == "0011_activity_foundations"
+        assert version["version_num"] == "0012_deterministic_allocation"
         definition = get_db().execute(
             """
             SELECT pg_get_constraintdef(oid) AS definition
@@ -65,23 +65,15 @@ def test_migration_accepts_cycling_types_and_backfills_origins(app):
         assert origin["credited_at"] == credit["created_at"]
         assert credit["credited_amount"] == _feet("100")
         totals_before = _totals(journey_id)
-        get_db().execute(
-            """
-            DELETE FROM journey_credit_origins
-            WHERE assignment_id = ? AND metric_code = 'elevation'
-            """,
-            (origin["assignment_id"],),
-        )
-        get_db().execute(
-            """
-            INSERT INTO journey_credit_origins (assignment_id, metric_code, credited_at)
-            SELECT assignment_id, metric_code, created_at
-            FROM journey_credits
-            WHERE assignment_id = ? AND metric_code = 'elevation'
-            """,
-            (origin["assignment_id"],),
-        )
-        get_db().commit()
+        with pytest.raises(Exception, match="cannot be deleted"):
+            get_db().execute(
+                """
+                DELETE FROM journey_credit_origins
+                WHERE assignment_id = ? AND metric_code = 'elevation'
+                """,
+                (origin["assignment_id"],),
+            )
+        get_db().rollback()
         restored = _origin_row(saved["activity"]["id"], "elevation")
         assert restored["credited_at"] == credit["created_at"]
         assert _totals(journey_id) == totals_before
@@ -245,7 +237,7 @@ def test_deleting_one_credit_does_not_give_its_cap_to_another_activity(app):
         second = create_activity(user_id, _fields(elevation="400"))
         assert _credit_map(second)["elevation"] == _feet("400")
         update_activity(user_id, second["activity"]["id"], {"elevation_ft": "0"})
-        assert _assignment_count(second["activity"]["id"]) == 0
+        assert _assignment_count(second["activity"]["id"]) == 1
         assert _credit_map(get_saved(user_id, first["activity"]["id"]))["elevation"] == _feet(
             "800"
         )
@@ -335,11 +327,7 @@ def test_privacy_cutoff_uses_the_origin_and_a_restored_credit_keeps_it(app):
         later = create_activity(user_id, _fields(elevation="40"))
         early_origin = _origin_row(early["activity"]["id"], "elevation")["credited_at"]
         later_origin = _origin_row(later["activity"]["id"], "elevation")["credited_at"]
-        cutoff = early_origin + timedelta(seconds=0)
-        # Place the cutoff strictly between the two origins.
-        if later_origin <= early_origin:
-            later_origin = early_origin + timedelta(seconds=5)
-            _set_origin(later["activity"]["id"], "elevation", later_origin)
+        assert later_origin > early_origin
         midpoint = early_origin + (later_origin - early_origin) / 2
         _set_cutoff(user_id, slug, midpoint)
         visible = board_metrics(get_db(), journey_id, route_id, midpoint)
@@ -680,21 +668,6 @@ def _origin_row(activity_id: int, metric: str) -> dict | None:
     if row is None:
         return None
     return dict(row)
-
-
-def _set_origin(activity_id: int, metric: str, when: datetime) -> None:
-    get_db().execute(
-        """
-        UPDATE journey_credit_origins AS origin
-        SET credited_at = ?
-        FROM activity_journey_assignments AS assignment
-        WHERE assignment.id = origin.assignment_id
-          AND assignment.activity_id = ?
-          AND origin.metric_code = ?
-        """,
-        (when, activity_id, metric),
-    )
-    get_db().commit()
 
 
 def _set_cutoff(user_id: int, slug: str, when: datetime) -> None:

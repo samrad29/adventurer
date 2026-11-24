@@ -20,6 +20,7 @@ from decimal import Decimal
 
 from flask import current_app
 
+from .allocation import MeasuredAssignment, allocate, allocation_fingerprint, measurement_token, totals_for
 from .db import get_db
 from .journey_progress import CheckpointMark, assess_checkpoints, read_journey_progress
 from .metrics import FOOT_IN_METERS, MILE_IN_METERS, STORAGE_QUANTUM, MetricError, parse_measurement
@@ -143,37 +144,52 @@ def create_activity(
             saved = _with_arrivals(_saved(database, activity_id, None), [])
             saved["no_credit_reason"] = "no_active_journey"
             return saved, True
-        proposal = _proposal(journey, measurements, previous={})
+        assigned = _positive_required(journey, measurements)
+        proposal = _plan(
+            database,
+            journey,
+            operation="create",
+            activity_id=None,
+            assignment_id=None,
+            activity_type=changes["activity_type"],
+            measurements=measurements,
+            previous_credits={},
+            allocate_now=assigned,
+        )
+        if proposal["resume_required"]:
+            raise ActivityError(
+                "resume_required",
+                "Resume this journey before it can be completed.",
+                status=409,
+                journey_id=journey["id"],
+                journey_status=journey["status"],
+            )
         _require_confirmation(confirmation_token, user_id, journey, proposal)
         activity_id = _insert_activity(database, user_id, changes)
-        reached = []
-        assigned = _positive_required(journey, measurements)
         if assigned:
-            _insert_assignment_credits(
-                database, activity_id, user_id, journey, proposal["credits"]
+            _bind_new_assignment(
+                proposal["slots"],
+                _insert_assignment(database, activity_id, user_id, journey),
             )
-        if proposal["credits"] or proposal["will_complete"]:
+            _sync_shares(database, journey, proposal["slots"], proposal["shares"], "reduce")
+            _sync_shares(database, journey, proposal["slots"], proposal["shares"], "increase")
+        reached = []
+        if proposal["credits"] or proposal["will_complete"] or assigned:
             _touch_journey(
                 database,
                 journey["id"],
-                credit_changed=True,
+                credit_changed=bool(proposal["credits"]) or proposal["will_complete"],
                 complete=proposal["will_complete"],
+                inputs_changed=assigned and not proposal["credits"] and not proposal["will_complete"],
             )
+        if proposal["credits"] or proposal["will_complete"]:
             reached = _newly_reached(
                 database,
                 journey["route_id"],
-                _bases(journey, {}),
+                _totals_map(journey),
                 proposal["resulting"],
             )
             _write_create_feed(database, user_id, activity_id, journey, proposal, reached)
-        elif assigned:
-            _touch_journey(
-                database,
-                journey["id"],
-                credit_changed=False,
-                complete=False,
-                inputs_changed=True,
-            )
         saved = _with_arrivals(
             _saved(database, activity_id, journey["id"] if assigned else None),
             arrival_reveals(database, journey["id"], reached),
@@ -196,8 +212,9 @@ def preview_activity_update(user_id: int, activity_id: int, fields: dict) -> dic
     so its baseline is the journey total.
 
     A paused or abandoned journey that would reach every target sets
-    ``resume_required`` and does not issue a token. The token is bound to
-    the replacement credits, not to the activity's full measurements.
+    ``resume_required`` and does not issue a token. A completing save uses
+    the activity summit token, which binds the allocation the same walk
+    would commit.
     """
     _require_id(activity_id, "activity")
     changes = _changes(fields, creating=False)
@@ -238,80 +255,100 @@ def update_activity(
             measurements.get("distance"),
         )
         credit_journey = journey if _credits_can_change(loaded, journey, changes) else None
-        proposal = None
-        if credit_journey is not None:
-            if credit_journey["status"] == "completed":
-                _reject_completed_progress_edit(loaded, changes)
-            else:
-                proposal = _proposal(credit_journey, measurements, previous=loaded["credits"])
-                if proposal["resume_required"]:
-                    raise ActivityError(
-                        "resume_required",
-                        "Resume this journey before it can be completed.",
-                        status=409,
-                        journey_id=credit_journey["id"],
-                        journey_status=credit_journey["status"],
-                    )
-                _require_confirmation(confirmation_token, user_id, credit_journey, proposal)
-                _reduce_credits(database, loaded, proposal["credits"])
-        elif confirmation_token:
-            raise _confirmation(_preview_edit(database, user_id, loaded, changes))
+        if credit_journey is not None and credit_journey["status"] == "completed":
+            _reject_completed_progress_edit(loaded, changes)
+            _apply_changes(database, activity_id, loaded, changes)
+            saved = _with_arrivals(
+                _saved(database, activity_id, loaded["journey_id"]), []
+            )
+            saved["no_credit_reason"] = _no_credit_reason(
+                credit_journey, measurements, loaded["credits"]
+            )
+            return saved, True
+        measurement_changed = _measurement_inputs_changed(loaded, changes)
+        if credit_journey is None or not measurement_changed:
+            if confirmation_token:
+                raise _confirmation(_preview_edit(database, user_id, loaded, changes))
+            _apply_changes(database, activity_id, loaded, changes)
+            saved = _with_arrivals(
+                _saved(database, activity_id, loaded["journey_id"]), []
+            )
+            saved["no_credit_reason"] = _no_credit_reason(
+                credit_journey, measurements, loaded["credits"]
+            )
+            return saved, True
+        activity_type = changes.get("activity_type", loaded["activity_type"])
+        proposal = _plan(
+            database,
+            credit_journey,
+            operation="update",
+            activity_id=activity_id,
+            assignment_id=loaded["assignment_id"],
+            activity_type=activity_type,
+            measurements=measurements,
+            previous_credits=loaded["credits"],
+            allocate_now=True,
+        )
+        if proposal["resume_required"]:
+            raise ActivityError(
+                "resume_required",
+                "Resume this journey before it can be completed.",
+                status=409,
+                journey_id=credit_journey["id"],
+                journey_status=credit_journey["status"],
+            )
+        _require_confirmation(confirmation_token, user_id, credit_journey, proposal)
+        _sync_shares(database, credit_journey, proposal["slots"], proposal["shares"], "reduce")
         _apply_changes(database, activity_id, loaded, changes)
-        journey_id = loaded["journey_id"]
-        arrivals = []
-        reason = None
-        if proposal is not None:
-            assigned_before = loaded["assignment_id"] is not None
-            kept = _retain_assignment(
+        assigning = loaded["assignment_id"] is not None or _positive_required(
+            credit_journey, measurements
+        )
+        if assigning and loaded["assignment_id"] is None:
+            _bind_new_assignment(
+                proposal["slots"],
+                _insert_assignment(database, activity_id, user_id, credit_journey),
+            )
+        elif assigning:
+            _bind_existing_assignment(proposal["slots"], activity_id, loaded["assignment_id"])
+        if assigning:
+            _sync_shares(
+                database, credit_journey, proposal["slots"], proposal["shares"], "increase"
+            )
+        journey_id = credit_journey["id"] if assigning else None
+        progress_changed = (
+            proposal["allocation_changed"]
+            or measurement_changed
+            or (assigning and loaded["assignment_id"] is None)
+        )
+        if proposal["will_complete"] or progress_changed:
+            _touch_journey(
                 database,
-                activity_id,
+                credit_journey["id"],
+                credit_changed=proposal["allocation_changed"] or proposal["will_complete"],
+                complete=proposal["will_complete"],
+                inputs_changed=progress_changed and not proposal["allocation_changed"],
+            )
+        reached = _newly_reached(
+            database,
+            credit_journey["route_id"],
+            _totals_map(credit_journey),
+            proposal["resulting"],
+        )
+        if proposal["will_complete"]:
+            _write_summit_feed(
+                database,
                 user_id,
+                activity_id,
                 credit_journey,
-                loaded,
-                proposal,
+                proposal["resulting"],
             )
-            if kept:
-                journey_id = credit_journey["id"]
-            else:
-                journey_id = None
-            inputs_changed = _measurement_inputs_changed(loaded, changes) or (
-                kept and not assigned_before
-            )
-            if proposal["credit_changed"] or proposal["will_complete"]:
-                _touch_journey(
-                    database,
-                    credit_journey["id"],
-                    credit_changed=True,
-                    complete=proposal["will_complete"],
-                )
-                reached = _newly_reached(
-                    database,
-                    credit_journey["route_id"],
-                    _bases(credit_journey, {}),
-                    proposal["resulting"],
-                )
-                arrivals = arrival_reveals(database, credit_journey["id"], reached)
-            elif inputs_changed:
-                _touch_journey(
-                    database,
-                    credit_journey["id"],
-                    credit_changed=False,
-                    complete=False,
-                    inputs_changed=True,
-                )
-            if proposal["will_complete"]:
-                _write_summit_feed(
-                    database,
-                    user_id,
-                    activity_id,
-                    credit_journey,
-                    proposal["resulting"],
-                )
-            reason = _no_credit_reason(
-                credit_journey, measurements, proposal["credits"]
-            )
-        saved = _with_arrivals(_saved(database, activity_id, journey_id), arrivals)
-        saved["no_credit_reason"] = reason
+        saved = _with_arrivals(
+            _saved(database, activity_id, journey_id),
+            arrival_reveals(database, credit_journey["id"], reached),
+        )
+        saved["no_credit_reason"] = _no_credit_reason(
+            credit_journey, measurements, proposal["credits"]
+        )
         return saved, True
 
     return _commit(write)
@@ -351,22 +388,25 @@ def delete_activity(user_id: int, activity_id: int) -> dict:
                 "An activity credited to a completed journey cannot be deleted.",
                 status=409,
             )
-        if loaded["credits"] and journey is not None:
+        if loaded["assignment_id"] is not None and journey is not None:
+            requirements = _requirement_pairs(journey)
+            slots = [
+                slot
+                for slot in _load_slots(database, journey["id"])
+                if slot.activity_id != activity_id
+            ]
+            shares = allocate(slots, requirements)
+            _sync_shares(database, journey, slots, shares, "reduce")
             _touch_journey(
                 database,
                 journey["id"],
                 credit_changed=True,
                 complete=False,
-            )
-        elif loaded["assignment_id"] is not None and journey is not None:
-            _touch_journey(
-                database,
-                journey["id"],
-                credit_changed=False,
-                complete=False,
                 inputs_changed=True,
             )
         database.execute("DELETE FROM activities WHERE id = ?", (activity_id,))
+        if loaded["assignment_id"] is not None and journey is not None:
+            _sync_shares(database, journey, slots, shares, "increase")
         summary = None if journey is None else _saved_journey(database, journey["id"])
         return {"activity_id": activity_id, "journey": summary, "arrivals": []}, True
 
@@ -468,13 +508,7 @@ def _confirmation(preview: dict) -> ActivityError:
 def _require_confirmation(token, user_id: int, journey: dict, proposal: dict) -> None:
     if token is None and not proposal["will_complete"]:
         return
-    if proposal["will_complete"] and _token_matches(
-        token,
-        user_id,
-        journey["id"],
-        journey["progress_version"],
-        proposal["credits"],
-    ):
+    if proposal["will_complete"] and _token_matches(token, user_id, journey, proposal):
         return
     raise _confirmation(_preview_from_proposal(journey, proposal))
 
@@ -765,6 +799,7 @@ def _load_owned(database, user_id: int, activity_id: int) -> dict:
         ).fetchall():
             credits[credit["metric_code"]] = credit["credited_amount"]
     return {
+        "id": row["id"],
         "elevation_m": row["elevation_gain_m"],
         "distance_m": row["distance_m"],
         "started_at": row["started_at"],
@@ -789,7 +824,20 @@ def _preview_new(database, user_id: int, changes: dict) -> dict:
     if found is None:
         return _empty_preview(measurements)
     journey = _journey_state(database, found)
-    return _preview_from_proposal(journey, _proposal(journey, measurements, previous={}))
+    return _preview_from_proposal(
+        journey,
+        _plan(
+            database,
+            journey,
+            operation="create",
+            activity_id=None,
+            assignment_id=None,
+            activity_type=changes["activity_type"],
+            measurements=measurements,
+            previous_credits={},
+            allocate_now=_positive_required(journey, measurements),
+        ),
+    )
 
 
 def _preview_edit(database, user_id: int, loaded: dict, changes: dict) -> dict:
@@ -799,16 +847,27 @@ def _preview_edit(database, user_id: int, loaded: dict, changes: dict) -> dict:
         return _empty_preview(measurements)
     if journey["status"] == "completed":
         _reject_completed_progress_edit(loaded, changes)
-        proposal = _proposal(journey, measurements, previous=loaded["credits"])
+    allocate_now = (
+        journey["status"] != "completed"
+        and _measurement_inputs_changed(loaded, changes)
+    )
+    if loaded["journey_id"] is None and not allocate_now:
+        return _empty_preview(measurements)
+    proposal = _plan(
+        database,
+        journey,
+        operation="update",
+        activity_id=loaded["id"],
+        assignment_id=loaded["assignment_id"],
+        activity_type=changes.get("activity_type", loaded["activity_type"]),
+        measurements=measurements,
+        previous_credits=loaded["credits"],
+        allocate_now=allocate_now,
+    )
+    if journey["status"] == "completed":
         proposal["will_complete"] = False
         proposal["resume_required"] = False
-        return _preview_from_proposal(journey, proposal)
-    if loaded["journey_id"] is None and "elevation_m" not in changes and "distance_m" not in changes:
-        return _empty_preview(measurements)
-    return _preview_from_proposal(
-        journey,
-        _proposal(journey, measurements, previous=loaded["credits"] if loaded["journey_id"] else {}),
-    )
+    return _preview_from_proposal(journey, proposal)
 
 
 def _preview_journey(database, user_id: int, loaded: dict, changes: dict) -> dict | None:
@@ -838,58 +897,289 @@ def _preview_journey(database, user_id: int, loaded: dict, changes: dict) -> dic
     return _journey_state(database, locked)
 
 
-def _proposal(journey: dict, measurements: dict[str, Decimal | None], *, previous: dict[str, Decimal]) -> dict:
-    """Credit each required metric from the totals read under the journey lock."""
+def _plan(
+    database,
+    journey: dict,
+    *,
+    operation: str,
+    activity_id: int | None,
+    assignment_id: int | None,
+    activity_type: str,
+    measurements: dict[str, Decimal | None],
+    previous_credits: dict[str, Decimal],
+    allocate_now: bool,
+) -> dict:
+    """One walk over the assignments this save would leave on the journey."""
+    requirements = _requirement_pairs(journey)
+    slots = _load_slots(database, journey["id"])
+    if allocate_now:
+        include = assignment_id is not None or _positive_required(journey, measurements)
+        if include:
+            slots = _replace_slot(
+                slots,
+                activity_id,
+                activity_type,
+                measurements,
+            )
+        shares = allocate(slots, requirements)
+        resulting = totals_for(shares, requirements)
+        allocation_changed = _allocation_differs(
+            database, journey["id"], slots, shares, requirements
+        )
+    else:
+        shares = {activity_id: dict(previous_credits)} if activity_id is not None else {}
+        resulting = {
+            code: journey["totals"].get(code, Decimal("0")) for code, _target in requirements
+        }
+        allocation_changed = False
+    credits = {
+        metric: amount
+        for metric, amount in shares.get(activity_id, {}).items()
+        if amount > 0
+    }
     metrics = []
-    credits: dict[str, Decimal] = {}
-    resulting: dict[str, Decimal] = {}
-    before_met = []
-    after_met = []
-    for requirement in journey["requirements"]:
-        code = requirement["metric_code"]
-        target = requirement["target_amount"]
+    for code, target in requirements:
         stored = journey["totals"].get(code, Decimal("0"))
-        prior = previous.get(code, Decimal("0"))
-        base = stored - prior
-        if base < 0:
-            base = Decimal("0")
-        measurement = measurements.get(code)
-        credit = _portion(measurement, target, base)
-        after = base + credit
-        if after > target:
-            after = target
-        if credit > 0:
-            credits[code] = credit
-        resulting[code] = after
-        before_met.append(base >= target)
-        after_met.append(after >= target)
+        prior = previous_credits.get(code, Decimal("0"))
+        current = stored - prior
+        if current < 0:
+            current = Decimal("0")
+        credit = credits.get(code, Decimal("0"))
+        amount = resulting.get(code, Decimal("0"))
         metrics.append(
             {
                 "metric": code,
-                "current_m": base,
+                "current_m": current,
                 "existing_credit_m": prior,
                 "target_m": target,
-                "remaining_m": target - base if target > base else Decimal("0"),
-                "measurement_m": measurement,
+                "remaining_m": target - current if target > current else Decimal("0"),
+                "measurement_m": measurements.get(code),
                 "credit_m": credit,
-                "resulting_m": after,
-                "complete": after >= target,
+                "resulting_m": amount,
+                "complete": amount >= target,
             }
         )
-    required = bool(journey["requirements"])
-    finished_before = required and all(before_met)
-    finished_after = required and all(after_met)
+    finished_before = _targets_met(journey["requirements"], journey["totals"])
+    finished_after = _targets_met(requirements, resulting)
     status = journey["status"]
-    previous_positive = {code: amount for code, amount in previous.items() if amount > 0}
     return {
+        "operation": operation,
+        "activity_token": "-" if activity_id is None else str(activity_id),
+        "measurements_token": measurement_token(
+            measurements.get("elevation"), measurements.get("distance")
+        ),
+        "fingerprint": allocation_fingerprint(slots, shares),
+        "slots": slots,
+        "shares": shares,
         "metrics": metrics,
         "credits": credits,
         "resulting": resulting,
         "measurements": measurements,
+        "credit_changed": credits != {
+            code: amount for code, amount in previous_credits.items() if amount > 0
+        },
+        "allocation_changed": allocation_changed,
         "will_complete": status == "active" and finished_after and not finished_before,
         "resume_required": status in ("paused", "abandoned") and finished_after and not finished_before,
-        "credit_changed": credits != previous_positive,
     }
+
+
+def _requirement_pairs(journey: dict) -> list[tuple[str, Decimal]]:
+    return [
+        (item["metric_code"], item["target_amount"]) for item in journey["requirements"]
+    ]
+
+
+def _targets_met(requirements, totals: dict) -> bool:
+    if requirements and isinstance(requirements[0], tuple):
+        pairs = requirements
+    else:
+        pairs = [
+            (item["metric_code"], item["target_amount"]) for item in requirements
+        ]
+    return bool(pairs) and all(
+        totals.get(code, Decimal("0")) >= target for code, target in pairs
+    )
+
+
+def _totals_map(journey: dict) -> dict[str, Decimal]:
+    return {
+        item["metric_code"]: journey["totals"].get(item["metric_code"], Decimal("0"))
+        for item in journey["requirements"]
+    }
+
+
+def _load_slots(database, journey_id: int) -> list[MeasuredAssignment]:
+    rows = database.execute(
+        """
+        SELECT assignment.id AS assignment_id,
+               assignment.created_at,
+               activity.id AS activity_id,
+               activity.activity_type,
+               activity.elevation_gain_m,
+               activity.distance_m
+        FROM activity_journey_assignments AS assignment
+        JOIN activities AS activity ON activity.id = assignment.activity_id
+        WHERE assignment.journey_id = ?
+        ORDER BY assignment.created_at, activity.id
+        """,
+        (journey_id,),
+    ).fetchall()
+    return [
+        MeasuredAssignment(
+            activity_id=row["activity_id"],
+            assignment_id=row["assignment_id"],
+            created_at=row["created_at"],
+            sort_last=False,
+            activity_type=row["activity_type"],
+            elevation_m=row["elevation_gain_m"],
+            distance_m=row["distance_m"],
+        )
+        for row in rows
+    ]
+
+
+def _replace_slot(
+    slots: list[MeasuredAssignment],
+    activity_id: int | None,
+    activity_type: str,
+    measurements: dict[str, Decimal | None],
+) -> list[MeasuredAssignment]:
+    updated: list[MeasuredAssignment] = []
+    found = False
+    for slot in slots:
+        if activity_id is not None and slot.activity_id == activity_id:
+            updated.append(
+                MeasuredAssignment(
+                    activity_id=activity_id,
+                    assignment_id=slot.assignment_id,
+                    created_at=slot.created_at,
+                    sort_last=False,
+                    activity_type=activity_type,
+                    elevation_m=measurements.get("elevation"),
+                    distance_m=measurements.get("distance"),
+                )
+            )
+            found = True
+        else:
+            updated.append(slot)
+    if not found:
+        updated.append(
+            MeasuredAssignment(
+                activity_id=activity_id,
+                assignment_id=None,
+                created_at=datetime.min,
+                sort_last=True,
+                activity_type=activity_type,
+                elevation_m=measurements.get("elevation"),
+                distance_m=measurements.get("distance"),
+            )
+        )
+    return updated
+
+
+def _allocation_differs(database, journey_id: int, slots, shares, requirements) -> bool:
+    stored: dict[int, dict[str, Decimal]] = {}
+    for row in database.execute(
+        """
+        SELECT assignment_id, metric_code, credited_amount
+        FROM journey_credits
+        WHERE journey_id = ?
+        """,
+        (journey_id,),
+    ).fetchall():
+        stored.setdefault(row["assignment_id"], {})[row["metric_code"]] = row[
+            "credited_amount"
+        ]
+    known: set[int] = set()
+    for slot in slots:
+        expected = shares.get(slot.activity_id, {})
+        if slot.assignment_id is None:
+            if any(amount > 0 for amount in expected.values()):
+                return True
+            continue
+        known.add(slot.assignment_id)
+        for metric, _target in requirements:
+            current = stored.get(slot.assignment_id, {}).get(metric, Decimal("0"))
+            amount = expected.get(metric, Decimal("0"))
+            if current != amount:
+                return True
+    return bool(set(stored) - known)
+
+
+def _bind_new_assignment(slots, assignment_id: int) -> None:
+    for slot in slots:
+        if slot.assignment_id is None:
+            slot.assignment_id = assignment_id
+            return
+    raise RuntimeError("the new assignment was not in the allocation")
+
+
+def _bind_existing_assignment(slots, activity_id: int, assignment_id: int) -> None:
+    for slot in slots:
+        if slot.activity_id == activity_id:
+            slot.assignment_id = assignment_id
+            return
+
+
+def _sync_shares(database, journey: dict, slots, shares, phase: str) -> None:
+    for metric, _target in _requirement_pairs(journey):
+        desired: dict[int, Decimal] = {}
+        for slot in slots:
+            if slot.assignment_id is None:
+                continue
+            amount = shares.get(slot.activity_id, {}).get(metric, Decimal("0"))
+            if amount > 0:
+                desired[slot.assignment_id] = amount
+        existing = {
+            row["assignment_id"]: row["credited_amount"]
+            for row in database.execute(
+                """
+                SELECT assignment_id, credited_amount
+                FROM journey_credits
+                WHERE journey_id = ? AND metric_code = ?
+                """,
+                (journey["id"], metric),
+            ).fetchall()
+        }
+        if phase == "reduce":
+            for assignment_id, current in sorted(existing.items()):
+                updated = desired.get(assignment_id, Decimal("0"))
+                if updated >= current:
+                    continue
+                if updated <= 0:
+                    database.execute(
+                        """
+                        DELETE FROM journey_credits
+                        WHERE assignment_id = ? AND metric_code = ?
+                        """,
+                        (assignment_id, metric),
+                    )
+                else:
+                    database.execute(
+                        """
+                        UPDATE journey_credits
+                        SET credited_amount = ?
+                        WHERE assignment_id = ? AND metric_code = ?
+                        """,
+                        (updated, assignment_id, metric),
+                    )
+            continue
+        for assignment_id, updated in sorted(desired.items()):
+            current = existing.get(assignment_id, Decimal("0"))
+            if updated <= current:
+                continue
+            if current <= 0:
+                _insert_credit(database, assignment_id, journey, metric, updated)
+            else:
+                database.execute(
+                    """
+                    UPDATE journey_credits
+                    SET credited_amount = ?
+                    WHERE assignment_id = ? AND metric_code = ?
+                    """,
+                    (updated, assignment_id, metric),
+                )
 
 
 def _portion(measurement: Decimal | None, target: Decimal, base: Decimal) -> Decimal:
@@ -911,8 +1201,11 @@ def _preview_from_proposal(journey: dict, proposal: dict) -> dict:
         token = _issue_confirmation_token(
             journey["user_id"],
             journey["id"],
+            proposal["operation"],
+            proposal["activity_token"],
             journey["progress_version"],
-            proposal["credits"],
+            proposal["measurements_token"],
+            proposal["fingerprint"],
             expires,
         )
     measurements = proposal["measurements"]
@@ -1035,10 +1328,7 @@ def _retain_assignment(
                 database, activity_id, user_id, journey
             )
         return True
-    if loaded["assignment_id"] is not None:
-        _delete_assignment(database, loaded["assignment_id"])
-        loaded["assignment_id"] = None
-    return False
+    return loaded["assignment_id"] is not None
 
 
 def _reject_completed_progress_edit(loaded: dict, changes: dict) -> None:
@@ -1749,45 +2039,56 @@ def _canonical_credits(credits: dict[str, Decimal]) -> str:
 def _issue_confirmation_token(
     user_id: int,
     journey_id: int,
+    operation: str,
+    activity_token: str,
     progress_version: int,
-    credits: dict[str, Decimal],
+    measurements: str,
+    fingerprint: str,
     exp_unix: int,
 ) -> str:
     payload = (
-        f"v2|{user_id}|{journey_id}|{progress_version}|"
-        f"{_canonical_credits(credits)}|{exp_unix}"
+        f"v3|{user_id}|{journey_id}|{operation}|{activity_token}|"
+        f"{progress_version}|{measurements}|{fingerprint}|{exp_unix}"
     )
     signature = hmac.new(_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     return f"{payload}|{signature}"
 
 
-def _token_matches(
-    token,
-    user_id: int,
-    journey_id: int,
-    progress_version: int,
-    credits: dict[str, Decimal],
-) -> bool:
+def _token_matches(token, user_id: int, journey: dict, proposal: dict) -> bool:
     if not isinstance(token, str):
         return False
     payload, separator, signature = token.rpartition("|")
-    if not separator or payload.count("|") != 5:
+    if not separator or payload.count("|") != 8:
         return False
     expected = hmac.new(_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     if len(signature) != len(expected) or not hmac.compare_digest(expected, signature):
         return False
-    version, token_user, token_journey, token_progress, token_credit, token_exp = payload.split("|")
-    if version != "v2":
+    (
+        version,
+        token_user,
+        token_journey,
+        token_operation,
+        token_activity,
+        token_progress,
+        token_measurements,
+        token_allocation,
+        token_exp,
+    ) = payload.split("|")
+    if version != "v3":
         return False
     if token_exp.startswith("-") or not token_exp.isdigit():
         return False
     if int(token_exp) <= _now():
         return False
-    if token_user != str(user_id) or token_journey != str(journey_id):
-        return False
-    if token_progress != str(progress_version):
-        return False
-    return token_credit == _canonical_credits(credits)
+    return (
+        token_user == str(user_id)
+        and token_journey == str(journey["id"])
+        and token_operation == proposal["operation"]
+        and token_activity == proposal["activity_token"]
+        and token_progress == str(journey["progress_version"])
+        and token_measurements == proposal["measurements_token"]
+        and token_allocation == proposal["fingerprint"]
+    )
 
 
 def _secret() -> bytes:

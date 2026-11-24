@@ -249,7 +249,7 @@ def test_finishing_every_metric_requires_a_matching_token(app, monkeypatch):
         assert preview["will_complete"] is True
         assert "distance=" in preview["confirmation_token"]
         assert "elevation=" in preview["confirmation_token"]
-        assert preview["confirmation_token"].startswith("v2|")
+        assert preview["confirmation_token"].startswith("v3|")
         _assert_unchanged(user_id, journey_id, activities=0)
 
         with pytest.raises(ActivityError) as missing:
@@ -482,7 +482,7 @@ def test_edits_recalculate_each_metric_and_the_progress_version(app):
 
         cleared = update_activity(user_id, activity_id, {"elevation_ft": "0", "distance_mi": None})
         assert cleared["credits"] == []
-        assert _assignment_count(activity_id) == 0
+        assert _assignment_count(activity_id) == 1
         assert _totals(journey_id) == {}
         assert _journey_row(journey_id)["progress_version"] == held + 2
 
