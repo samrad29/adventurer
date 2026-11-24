@@ -19,6 +19,14 @@ from decimal import Decimal
 
 from flask import current_app
 
+from .activity_policy import (
+    PolicyError,
+    load_expedition_policy,
+    public_policy,
+    refresh_governor,
+    release_expedition,
+    store_expedition_policy,
+)
 from .allocation import next_serialized_mark
 from .branding import (
     BrandingError,
@@ -93,51 +101,74 @@ def create_private_expedition(
     description: str = "",
     route_slug: str,
     confirm_new_attempt: bool = False,
+    activity_policy=None,
+    confirmation_token: str | None = None,
 ) -> dict:
     cleaned_slug = _clean_slug(slug)
     cleaned_name = _clean_name(name)
     cleaned_description = _clean_description(description)
+    from .activity_policy import parse_policy
+
+    chosen_policy = parse_policy(activity_policy)
 
     def write(database):
         _lock_user(database, user_id)
         route = _published_route(database, route_slug)
         _lock_route_expeditions(database, route["id"])
-        journey = _activate(database, user_id, route["id"], confirm_new_attempt)
         row = database.execute(
             """
             INSERT INTO expeditions (
                 slug, name, description, route_id, visibility, owner_user_id,
-                kind, status
+                kind, status, activity_policy_sealed
             )
-            VALUES (?, ?, ?, ?, 'private', ?, 'private', 'active')
+            VALUES (?, ?, ?, ?, 'private', ?, 'private', 'active', false)
             RETURNING id
             """,
             (cleaned_slug, cleaned_name, cleaned_description, route["id"], user_id),
         ).fetchone()
-        participation = _save_participation(
+        expedition = _locked_expedition(database, row["id"])
+        store_expedition_policy(database, expedition["id"], chosen_policy)
+        journey, decision = _open_journey(
             database,
             user_id,
-            _locked_expedition(database, row["id"]),
-            journey["id"],
+            expedition,
+            confirm_new_attempt=confirm_new_attempt,
+            confirmation_token=confirmation_token,
+            operation="create",
+            proposed=chosen_policy,
         )
+        participation = _save_participation(database, user_id, expedition, journey["id"])
+        _finish_join_policy(database, user_id, journey, decision)
         return _joined(database, row["id"], participation, journey), True
 
     return _commit(write)
 
 
-def join_expedition(user_id: int, slug: str, *, confirm_new_attempt: bool = False) -> dict:
+def join_expedition(
+    user_id: int,
+    slug: str,
+    *,
+    confirm_new_attempt: bool = False,
+    confirmation_token: str | None = None,
+) -> dict:
     complete_due_expeditions()
 
     def write(database):
         _lock_user(database, user_id)
         expedition = _reload_for_join(database, user_id, slug)
-        journey = _activate(
-            database, user_id, expedition["route_id"], confirm_new_attempt
-        )
         _require_slot(database, user_id, expedition)
+        journey, decision = _open_journey(
+            database,
+            user_id,
+            expedition,
+            confirm_new_attempt=confirm_new_attempt,
+            confirmation_token=confirmation_token,
+            operation="join",
+        )
         participation = _save_participation(
             database, user_id, expedition, journey["id"]
         )
+        _finish_join_policy(database, user_id, journey, decision)
         return _joined(database, expedition["id"], participation, journey), True
 
     return _commit(write)
@@ -186,6 +217,19 @@ def leave_expedition(user_id: int, slug: str) -> dict:
                 finished is not None,
                 participation["id"],
             ),
+        )
+        governed = database.execute(
+            "SELECT governing_expedition_id FROM route_journeys WHERE id = ?",
+            (participation["journey_id"],),
+        ).fetchone()
+        was_governor = (
+            governed is not None and governed["governing_expedition_id"] == locked["id"]
+        )
+        refresh_governor(
+            database,
+            participation["journey_id"],
+            reason="left" if was_governor else None,
+            former_id=locked["id"] if was_governor else None,
         )
         return _participation(database, participation["id"]), True
 
@@ -237,7 +281,14 @@ def update_private_expedition(
     *,
     name: str | None = None,
     description: str | None = None,
+    activity_policy=_UNSET,
 ) -> dict:
+    if activity_policy is not _UNSET:
+        raise ExpeditionError(
+            "invalid_state",
+            "This expedition's activity rules are fixed.",
+            status=409,
+        )
     cleaned_name = None if name is None else _clean_name(name)
     cleaned_description = None if description is None else _clean_description(description)
 
@@ -351,6 +402,7 @@ def accept_invitation(
     invitation_id: int | None = None,
     token: str | None = None,
     confirm_new_attempt: bool = False,
+    confirmation_token: str | None = None,
 ) -> dict:
     complete_due_expeditions()
     located = _locate_invitation(invitation_id, token)
@@ -371,13 +423,19 @@ def accept_invitation(
             )
             return {"expired": True}, True
         _ensure_acceptable(database, expedition)
-        journey = _activate(
-            database, user_id, expedition["route_id"], confirm_new_attempt
-        )
         _require_slot(database, user_id, expedition)
+        journey, decision = _open_journey(
+            database,
+            user_id,
+            expedition,
+            confirm_new_attempt=confirm_new_attempt,
+            confirmation_token=confirmation_token,
+            operation="join",
+        )
         participation = _save_participation(
             database, user_id, expedition, journey["id"]
         )
+        _finish_join_policy(database, user_id, journey, decision)
         if invitation["invited_user_id"] is not None:
             database.execute(
                 """
@@ -764,6 +822,7 @@ def create_organization_expedition(
     welcome_override: str | None = None,
     accent_color: str | None = None,
     image_ref: str | None = None,
+    activity_policy=None,
 ) -> dict:
     complete_due_expeditions()
     if enrollment not in ("open", "invitation"):
@@ -796,11 +855,11 @@ def create_organization_expedition(
                 slug, name, description, route_id, visibility, owner_user_id,
                 kind, status, organization_id, enrollment, starts_at, ends_at,
                 enrollment_opens_at, enrollment_closes_at, welcome_override,
-                accent_color, image_ref
+                accent_color, image_ref, activity_policy_sealed
             )
             VALUES (
                 ?, ?, ?, ?, 'public', NULL, 'organization', 'active', ?, ?,
-                ?, ?, ?, ?, ?, ?, ?
+                ?, ?, ?, ?, ?, ?, ?, false
             )
             RETURNING id
             """,
@@ -820,6 +879,9 @@ def create_organization_expedition(
                 None,
             ),
         ).fetchone()
+        from .activity_policy import parse_policy
+
+        store_expedition_policy(database, row["id"], parse_policy(activity_policy))
         return _profile(database, user_id, _lock_expedition(database, row["id"])), True
 
     return _commit(write)
@@ -1329,6 +1391,7 @@ def _privacy_once(database, user_id: int, expedition_id: int) -> dict:
         """,
         (expedition_id, user_id),
     )
+    release_expedition(database, expedition_id, "left")
     if owner_release:
         remaining_people = database.execute(
             "SELECT COUNT(*) AS count FROM expedition_participations WHERE expedition_id = ?",
@@ -1407,6 +1470,7 @@ def _close_once(database, expedition_id: int, *, actor_id: int | None, terminal:
         (terminal, expedition_id),
     )
     _write_snapshot(database, expedition, final_rows)
+    release_expedition(database, expedition_id, "closed")
     return _closed_body(database, _expedition(database, expedition_id)), True
 
 
@@ -2059,16 +2123,134 @@ def _save_participation(database, user_id: int, expedition, journey_id: int) -> 
     return _participation(database, row["id"])
 
 
-def _activate(database, user_id: int, route_id: int, confirm_new_attempt: bool) -> dict:
+def _activate(
+    database,
+    user_id: int,
+    route_id: int,
+    confirm_new_attempt: bool,
+    *,
+    attach_completed: bool = False,
+    adopt=None,
+) -> dict:
     try:
         return activate_for_participation(
             database,
             user_id,
             route_id,
             confirm_new_attempt=confirm_new_attempt,
+            attach_completed=attach_completed,
+            adopt=adopt,
         )
     except JourneyError as exc:
         raise _from_journey(exc) from exc
+
+
+def _open_journey(
+    database,
+    user_id: int,
+    expedition,
+    *,
+    confirm_new_attempt: bool,
+    confirmation_token: str | None,
+    operation: str,
+    proposed=None,
+):
+    """Choose the journey, and require a policy confirmation before a narrowing write."""
+    from .activity_policy import (
+        assert_join,
+        classify,
+        conflicting_receivers,
+        load_expedition_policy,
+        load_journey_policy,
+    )
+
+    receiver = proposed if proposed is not None else load_expedition_policy(database, expedition["id"])
+    current = database.execute(
+        """
+        SELECT id, status
+        FROM route_journeys
+        WHERE user_id = ? AND route_id = ? AND is_current
+        """,
+        (user_id, expedition["route_id"]),
+    ).fetchone()
+    decision = {
+        "change": False,
+        "policy": receiver,
+        "complete": False,
+        "born_restricted": current is None and receiver.mode == "restricted",
+    }
+    attach = False
+    adopt = None
+    if current is not None:
+        relation = classify(load_journey_policy(database, current["id"]), receiver)
+        if current["status"] in ("active", "paused") and relation != "share":
+            try:
+                decision = assert_join(
+                    database,
+                    user_id=user_id,
+                    expedition_id=None if operation == "create" else expedition["id"],
+                    journey_id=current["id"],
+                    route_id=expedition["route_id"],
+                    prior_status=current["status"],
+                    confirmation_token=confirmation_token,
+                    operation=operation,
+                    proposed=receiver,
+                )
+            except PolicyError as exc:
+                raise _policy_error(exc) from exc
+            decision["born_restricted"] = False
+        elif current["status"] == "completed" and relation == "share" and not confirm_new_attempt:
+            attach = True
+        elif confirm_new_attempt and relation != "share":
+            skip = None if operation == "create" else expedition["id"]
+            blocked = conflicting_receivers(
+                database, user_id, expedition["route_id"], receiver, skip
+            )
+            if blocked:
+                raise _policy_error(
+                    PolicyError(
+                        "activity_policy_conflict",
+                        "Another expedition does not accept that activity list.",
+                        status=409,
+                        conflicting_expeditions=blocked,
+                    )
+                )
+            adopt = (receiver, None)
+    journey = _activate(
+        database,
+        user_id,
+        expedition["route_id"],
+        confirm_new_attempt,
+        attach_completed=attach,
+        adopt=adopt,
+    )
+    return journey, decision
+
+
+def _finish_join_policy(database, user_id: int, journey, decision) -> None:
+    from .activities import apply_eligibility
+    from .activity_policy import store_journey_policy
+
+    if decision.get("born_restricted"):
+        store_journey_policy(database, journey["id"], decision["policy"], None)
+        refresh_governor(database, journey["id"], reason=None, former_id=None)
+        return
+    if decision.get("change"):
+        store_journey_policy(database, journey["id"], decision["policy"], None)
+        refresh_governor(database, journey["id"], reason=None, former_id=None)
+        apply_eligibility(
+            database,
+            user_id,
+            journey["id"],
+            policy_changed=True,
+            complete=bool(decision.get("complete")),
+        )
+        return
+    refresh_governor(database, journey["id"], reason=None, former_id=None)
+
+
+def _policy_error(exc: PolicyError) -> ExpeditionError:
+    return ExpeditionError(exc.code, str(exc), status=exc.status, **exc.details)
 
 
 def _remember_privacy(database, expedition_id: int, user_id: int) -> None:
@@ -2525,6 +2707,7 @@ def _profile(database, user_id: int, expedition, organization_brand=_UNSET) -> d
         "participation_status": None if participation is None else participation["status"],
         "mode": "live" if expedition["status"] == "active" else "final",
         "branding": _resolved_brand(database, expedition, organization_brand),
+        "activity_policy": public_policy(load_expedition_policy(database, expedition["id"])),
     }
 
 
@@ -2953,6 +3136,8 @@ def _commit(write):
         _rollback_preserving(database, exc)
         if isinstance(exc, ExpeditionError):
             raise
+        if isinstance(exc, PolicyError):
+            raise _policy_error(exc) from exc
         if isinstance(exc, JourneyError):
             raise _from_journey(exc) from exc
         translated = translate_database_error(exc)

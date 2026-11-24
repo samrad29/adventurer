@@ -930,4 +930,9 @@ def test_every_supported_type_still_uses_the_one_walk(app):
               AND table_name = 'expeditions'
               AND column_name = 'activity_policy'
             """
-        ).fetchone() is None
+        ).fetchone() is not None
+        policy = get_db().execute(
+            "SELECT activity_policy FROM route_journeys WHERE id = ?",
+            (journey_id,),
+        ).fetchone()
+        assert policy["activity_policy"] == "unrestricted"

@@ -15,7 +15,8 @@ _JOURNEY = """
     journey.id, journey.user_id, journey.route_id, route.slug AS route_slug,
     journey.status, journey.attempt_number, journey.progress_version,
     journey.is_current, journey.started_at, journey.paused_at,
-    journey.completed_at, journey.abandoned_at, journey.created_at
+    journey.completed_at, journey.abandoned_at, journey.created_at,
+    journey.activity_policy, journey.governing_expedition_id
 """
 
 
@@ -159,6 +160,148 @@ def abandon_journey(user_id: int, route_id: int) -> dict:
     return _commit(write)
 
 
+def preview_activity_policy(user_id: int, journey_id: int, operation: str) -> dict:
+    """Read-only expansion preview. Nothing is written."""
+    if operation != "expand":
+        raise JourneyError("invalid", "Send operation expand.")
+    database = get_db()
+    try:
+        _require_user(database, user_id, lock=False)
+        journey = _owned(database, user_id, journey_id)
+        from .activity_policy import PolicyError, assert_join
+
+        try:
+            assert_join(
+                database,
+                user_id=user_id,
+                expedition_id=None,
+                journey_id=journey["id"],
+                route_id=journey["route_id"],
+                prior_status=journey["status"],
+                confirmation_token=None,
+                operation="expand",
+            )
+        except PolicyError as exc:
+            if exc.code != "confirmation_required":
+                raise _policy_as_journey(exc) from exc
+            return {
+                "policy_preview": exc.details["policy_preview"],
+                "confirmation_token": exc.details["confirmation_token"],
+            }
+        raise JourneyError("invalid_state", "This journey cannot change activity rules.")
+    except JourneyError:
+        database.rollback()
+        raise
+    finally:
+        database.rollback()
+
+
+def choose_activity_policy(user_id: int, journey_id: int, choice: str, confirmation_token: str | None) -> dict:
+    if choice not in ("keep", "expand"):
+        raise JourneyError("invalid", "Choose keep or expand.")
+
+    def write(database):
+        _require_user(database, user_id, lock=True)
+        journey = _owned_locked(database, user_id, journey_id)
+        from .activities import apply_eligibility
+        from .activity_policy import (
+            PolicyError,
+            UNRESTRICTED,
+            assert_join,
+            clear_choice,
+            store_journey_policy,
+        )
+
+        if choice == "keep":
+            pending = database.execute(
+                "SELECT journey_id FROM journey_policy_choices WHERE journey_id = ?",
+                (journey["id"],),
+            ).fetchone()
+            if pending is None:
+                raise JourneyError("invalid_state", "There is no activity-rule choice waiting.")
+            clear_choice(database, journey["id"])
+            return _load(database, journey["id"]), True
+        try:
+            decision = assert_join(
+                database,
+                user_id=user_id,
+                expedition_id=None,
+                journey_id=journey["id"],
+                route_id=journey["route_id"],
+                prior_status=journey["status"],
+                confirmation_token=confirmation_token,
+                operation="expand",
+            )
+        except PolicyError as exc:
+            raise _policy_as_journey(exc) from exc
+        if journey["status"] == "paused":
+            database.execute(
+                """
+                UPDATE route_journeys
+                SET status = 'active'
+                WHERE id = ? AND status = 'paused'
+                """,
+                (journey["id"],),
+            )
+        store_journey_policy(database, journey["id"], UNRESTRICTED, None)
+        clear_choice(database, journey["id"])
+        apply_eligibility(
+            database,
+            user_id,
+            journey["id"],
+            policy_changed=True,
+            complete=bool(decision.get("complete")),
+        )
+        return _load(database, journey["id"]), True
+
+    return _commit(write)
+
+
+def _policy_as_journey(exc) -> JourneyError:
+    error = JourneyError(exc.code, str(exc), **exc.details)
+    return error
+
+
+def _owned(database, user_id: int, journey_id: int) -> dict:
+    if not isinstance(journey_id, int) or isinstance(journey_id, bool) or journey_id <= 0:
+        raise JourneyError("not_found", "That journey does not exist.")
+    row = database.execute(
+        f"""
+        SELECT {_JOURNEY}
+        FROM route_journeys AS journey
+        JOIN routes AS route ON route.id = journey.route_id
+        WHERE journey.id = ? AND journey.user_id = ?
+        """,
+        (journey_id, user_id),
+    ).fetchone()
+    if row is None:
+        raise JourneyError("not_found", "That journey does not exist.")
+    return row
+
+
+def _owned_locked(database, user_id: int, journey_id: int) -> dict:
+    database.execute(
+        """
+        SELECT id FROM expeditions
+        WHERE route_id = (
+            SELECT route_id FROM route_journeys WHERE id = ? AND user_id = ?
+        ) AND status = 'active'
+        ORDER BY id
+        FOR UPDATE
+        """,
+        (journey_id, user_id),
+    )
+    database.execute(
+        """
+        SELECT id FROM route_journeys
+        WHERE id = ? AND user_id = ?
+        FOR UPDATE
+        """,
+        (journey_id, user_id),
+    )
+    return _owned(database, user_id, journey_id)
+
+
 def restart_journey(user_id: int, route_id: int) -> dict:
     def write(database):
         _require_user(database, user_id, lock=True)
@@ -169,7 +312,7 @@ def restart_journey(user_id: int, route_id: int) -> dict:
     return _commit(write)
 
 
-def _restart_locked(database, user_id: int, route_id: int) -> dict:
+def _restart_locked(database, user_id: int, route_id: int, adopt=None) -> dict:
     """Restart one route. The user and this route's active expeditions are locked."""
     route = _require_route(database, route_id)
     _lock_journeys(database, user_id, route["id"])
@@ -196,6 +339,15 @@ def _restart_locked(database, user_id: int, route_id: int) -> dict:
     attempt = _next_attempt(database, user_id, route["id"])
     created = _insert_attempt(database, user_id, route["id"], attempt)
     reset = _repoint_active_participations(database, user_id, route["id"], created["id"])
+    from .activity_policy import clear_choice, copy_journey_policy, refresh_governor, store_journey_policy
+
+    if adopt is None:
+        copy_journey_policy(database, current["id"], created["id"])
+    else:
+        policy, governor_id = adopt
+        store_journey_policy(database, created["id"], policy, governor_id)
+        clear_choice(database, current["id"])
+        refresh_governor(database, created["id"], reason=None, former_id=None)
     return {
         "journey": created,
         "paused_journey": None if paused is None else _load(database, paused["id"]),
@@ -209,6 +361,8 @@ def activate_for_participation(
     route_id: int,
     *,
     confirm_new_attempt: bool,
+    attach_completed: bool = False,
+    adopt=None,
 ) -> dict:
     """Choose the journey a participation should point at.
 
@@ -240,9 +394,15 @@ def activate_for_participation(
         )
         return _load(database, current["id"])
     if current["status"] in ("completed", "abandoned"):
+        if (
+            current["status"] == "completed"
+            and attach_completed
+            and not confirm_new_attempt
+        ):
+            return current
         if not confirm_new_attempt:
             raise _restart_required(database, user_id, route, current["status"])
-        restarted = _restart_locked(database, user_id, route["id"])
+        restarted = _restart_locked(database, user_id, route["id"], adopt=adopt)
         return restarted["journey"]
     raise JourneyError("invalid_state", "That journey transition is not allowed.")
 

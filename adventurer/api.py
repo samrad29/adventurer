@@ -70,6 +70,8 @@ from .journeys import (
     active_journey,
     get_journey,
     list_journeys,
+    choose_activity_policy,
+    preview_activity_policy,
     restart_journey,
     resume_journey,
     start_journey,
@@ -82,6 +84,7 @@ from .narrative import (
     journal_story,
     journal_timeline,
 )
+from .activity_policy import PolicyError
 from .services import AccountError, authenticate, create_adventurer, current_viewer, get_adventurer
 from .tokens import issue_token, revoke_all, revoke_token
 
@@ -94,6 +97,10 @@ _JOURNEY_STATUS = {
     "invalid_state": 409,
     "conflict": 409,
     "invalid": 422,
+    "confirmation_required": 409,
+    "stale_preview": 409,
+    "activity_policy_conflict": 409,
+    "resume_required": 409,
 }
 
 
@@ -110,6 +117,7 @@ def init_app(app) -> None:
     app.register_error_handler(JourneyError, _render_journey)
     app.register_error_handler(ActivityError, _render_service)
     app.register_error_handler(ExpeditionError, _render_service)
+    app.register_error_handler(PolicyError, _render_service)
     app.register_error_handler(NarrativeError, _render_service)
 
 
@@ -246,6 +254,27 @@ def journeys_abandon():
 @bp.post("/journeys/restart")
 def journeys_restart():
     return _ok(**restart_journey(_actor(), _route_id(_object())))
+
+
+@bp.post("/journeys/<int:journey_id>/activity-policy/preview")
+def journeys_policy_preview(journey_id: int):
+    body = _object()
+    operation = body.get("operation")
+    if not isinstance(operation, str):
+        raise ApiError("invalid", "Send operation expand.")
+    return _ok(**preview_activity_policy(_actor(), journey_id, operation))
+
+
+@bp.post("/journeys/<int:journey_id>/activity-policy")
+def journeys_policy_choice(journey_id: int):
+    body = _object()
+    choice = body.get("choice")
+    if not isinstance(choice, str):
+        raise ApiError("invalid", "Choose keep or expand.")
+    token = body.get("confirmation_token")
+    if token is not None and not isinstance(token, str):
+        raise ApiError("invalid", "Send confirmation_token as text.")
+    return _ok(journey=_with_metrics([choose_activity_policy(_actor(), journey_id, choice, token)])[0])
 
 
 @bp.get("/activities")
@@ -414,6 +443,8 @@ def expeditions_create():
         description=_text(body, "description", required=False),
         route_slug=_text(body, "route_slug"),
         confirm_new_attempt=_flag(body, "confirm_new_attempt"),
+        activity_policy=body.get("activity_policy"),
+        confirmation_token=_optional_token(body),
     )
     return _ok(**created), 201
 
@@ -426,14 +457,13 @@ def expeditions_branding(slug: str):
 @bp.patch("/expeditions/<slug>")
 def expeditions_update(slug: str):
     body = _object()
-    return _ok(
-        expedition=update_private_expedition(
-            _actor(),
-            slug,
-            name=body.get("name"),
-            description=body.get("description"),
-        )
-    )
+    changes = {
+        "name": body.get("name"),
+        "description": body.get("description"),
+    }
+    if "activity_policy" in body:
+        changes["activity_policy"] = body["activity_policy"]
+    return _ok(expedition=update_private_expedition(_actor(), slug, **changes))
 
 
 @bp.post("/expeditions/<slug>/archive")
@@ -444,7 +474,14 @@ def expeditions_archive(slug: str):
 @bp.post("/expeditions/<slug>/join")
 def expeditions_join(slug: str):
     body = _object()
-    return _ok(**join_expedition(_actor(), slug, confirm_new_attempt=_flag(body, "confirm_new_attempt")))
+    return _ok(
+        **join_expedition(
+            _actor(),
+            slug,
+            confirm_new_attempt=_flag(body, "confirm_new_attempt"),
+            confirmation_token=_optional_token(body),
+        )
+    )
 
 
 @bp.post("/expeditions/<slug>/leave")
@@ -525,6 +562,7 @@ def invitations_accept_token():
             _actor(),
             token=_text(body, "token"),
             confirm_new_attempt=_flag(body, "confirm_new_attempt"),
+            confirmation_token=_optional_token(body),
         )
     )
 
@@ -537,6 +575,7 @@ def invitations_accept(invitation_id: int):
             _actor(),
             invitation_id=invitation_id,
             confirm_new_attempt=_flag(body, "confirm_new_attempt"),
+            confirmation_token=_optional_token(body),
         )
     )
 
@@ -632,6 +671,7 @@ def organizations_create_expedition(slug: str):
         welcome_override=body.get("welcome_override"),
         accent_color=body.get("accent_color"),
         image_ref=body.get("image_ref"),
+        activity_policy=body.get("activity_policy"),
     )
     return _ok(expedition=created), 201
 
@@ -737,17 +777,49 @@ def _activity_fields(body: dict, *, creating: bool = True) -> dict:
     }
 
 
+def _optional_token(body: dict) -> str | None:
+    token = body.get("confirmation_token")
+    if token is None:
+        return None
+    if not isinstance(token, str) or not token.strip():
+        raise ApiError("invalid", "Send confirmation_token as text.")
+    return token
+
+
 def _with_metrics(journeys: list[dict]) -> list[dict]:
     if not journeys:
         return []
     database = get_db()
     try:
-        return [
-            {**dict(row), "metrics": progress_metrics(database, row["id"])}
-            for row in journeys
-        ]
+        return [_journey_body(database, row) for row in journeys]
     finally:
         database.rollback()
+
+
+def _journey_body(database, row) -> dict:
+    from .activity_policy import expansion_state, load_journey_policy, public_policy
+
+    body = {**dict(row), "metrics": progress_metrics(database, row["id"])}
+    governor_id = body.pop("governing_expedition_id", None)
+    policy = load_journey_policy(database, row["id"])
+    body["activity_policy"] = public_policy(policy)
+    slug = None
+    if governor_id is not None:
+        found = database.execute(
+            "SELECT slug FROM expeditions WHERE id = ?",
+            (governor_id,),
+        ).fetchone()
+        slug = None if found is None else found["slug"]
+    body["governing_expedition_slug"] = slug
+    state = expansion_state(database, row["id"])
+    if state["available"]:
+        body["eligibility_expansion"] = {"available": True}
+    else:
+        body["eligibility_expansion"] = {
+            "available": False,
+            "reason": state["reason"],
+        }
+    return body
 
 
 def _requirements_by_route(database, route_ids: list[int]) -> dict[int, list[dict]]:

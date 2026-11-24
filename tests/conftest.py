@@ -109,6 +109,16 @@ def _prepare_database() -> None:
                     """
                 ).fetchone()
                 is None
+                and conn.execute(
+                    """
+                    SELECT 1
+                    FROM information_schema.columns
+                    WHERE table_schema = 'adventurer'
+                      AND table_name = 'expeditions'
+                      AND column_name = 'activity_policy'
+                    """
+                ).fetchone()
+                is not None
                 and constraint is not None
                 and "expired" in constraint[0]
             )
@@ -154,6 +164,12 @@ def _wipe(application) -> None:
         database.execute("DELETE FROM routes WHERE slug <> 'everest'")
         database.execute(
             """
+            DELETE FROM expedition_activity_types
+            WHERE expedition_id = (SELECT id FROM expeditions WHERE slug = 'everest')
+            """
+        )
+        database.execute(
+            """
             UPDATE expeditions
             SET name = 'Global Everest Challenge',
                 description = 'The public Everest challenge. Everyone who joins shares one board.',
@@ -169,7 +185,9 @@ def _wipe(application) -> None:
                 enrollment_closes_at = NULL,
                 accent_color = NULL,
                 welcome_override = NULL,
-                image_ref = NULL
+                image_ref = NULL,
+                activity_policy = 'unrestricted',
+                activity_policy_sealed = true
             WHERE slug = 'everest'
             """
         )

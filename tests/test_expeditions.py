@@ -317,22 +317,20 @@ def test_private_create_activates_the_owner_journey_or_rolls_back(app):
         assert created["participation"]["journey_id"] == created["journey"]["id"]
         assert _count("expeditions", "slug = ?", ("sam-kili",)) == 1
         _log(user_id, "1000")
-        with pytest.raises(ExpeditionError) as caught:
-            create_private_expedition(
-                user_id,
-                slug="sam-again",
-                name="Sam Again",
-                route_slug="kili",
-            )
-        assert caught.value.code == "restart_required"
-        assert caught.value.status == 409
-        assert caught.value.details["route_slug"] == "kili"
-        assert _count("expeditions", "slug = ?", ("sam-again",)) == 0
-        assert _journeys(user_id)[-1]["status"] == "completed"
-        confirmed = create_private_expedition(
+        attached = create_private_expedition(
             user_id,
             slug="sam-again",
             name="Sam Again",
+            route_slug="kili",
+        )
+        assert attached["journey"]["status"] == "completed"
+        assert attached["journey"]["attempt_number"] == 1
+        assert attached["participation"]["journey_id"] == attached["journey"]["id"]
+        assert _journeys(user_id)[-1]["status"] == "completed"
+        confirmed = create_private_expedition(
+            user_id,
+            slug="sam-third",
+            name="Sam Third",
             route_slug="kili",
             confirm_new_attempt=True,
         )
@@ -374,16 +372,15 @@ def test_a_finished_route_requires_restart_confirmation(app):
         route_id = _route("kili", "500")
         start_journey(user_id, route_id)
         _log(user_id, "500")
-        with pytest.raises(ExpeditionError) as caught:
-            join_expedition(user_id, "everest") if False else create_private_expedition(
-                user_id, slug="after", name="After", route_slug="kili"
-            )
-        assert caught.value.code == "restart_required"
-        assert _count("expedition_participations", "user_id = ?", (user_id,)) == 0
+        attached = create_private_expedition(
+            user_id, slug="after", name="After", route_slug="kili"
+        )
+        assert attached["journey"]["status"] == "completed"
+        assert attached["journey"]["id"] == _journeys(user_id)[0]["id"]
         created = create_private_expedition(
             user_id,
-            slug="after",
-            name="After",
+            slug="after-again",
+            name="After Again",
             route_slug="kili",
             confirm_new_attempt=True,
         )
@@ -490,16 +487,18 @@ def test_accept_and_journey_activation_commit_together(app):
         start_journey(sam_id, route_id)
         _log(sam_id, "500")
         invite = create_username_invitation(owner_id, "owen-kili", "Sam")
-        with pytest.raises(ExpeditionError) as caught:
-            accept_invitation(sam_id, invitation_id=invite["id"])
-        assert caught.value.code == "restart_required"
+        accepted = accept_invitation(sam_id, invitation_id=invite["id"])
+        assert accepted["journey"]["status"] == "completed"
+        assert accepted["journey"]["attempt_number"] == 1
         assert get_db().execute(
             "SELECT status FROM expedition_invitations WHERE id = ?",
             (invite["id"],),
-        ).fetchone()["status"] == "pending"
+        ).fetchone()["status"] == "accepted"
         assert _journeys(sam_id)[0]["status"] == "completed"
+        create_private_expedition(owner_id, slug="owen-next", name="Owen Next", route_slug="kili")
+        restart_invite = create_username_invitation(owner_id, "owen-next", "Sam")
         accepted = accept_invitation(
-            sam_id, invitation_id=invite["id"], confirm_new_attempt=True
+            sam_id, invitation_id=restart_invite["id"], confirm_new_attempt=True
         )
         assert accepted["journey"]["attempt_number"] == 2
         assert get_db().execute(

@@ -58,7 +58,7 @@ def compose_home(user_id: int) -> dict:
         else:
             state = "ready"
             focus = None
-        actions = _actions(active, paused, finished, current)
+        actions = _policy_actions(database, user_id) + _actions(active, paused, finished, current)
         expeditions = _expeditions(
             database,
             user_id,
@@ -104,6 +104,41 @@ def plain_display(value: Decimal) -> str:
     if "." in text:
         text = text.rstrip("0").rstrip(".")
     return text or "0"
+
+
+def _policy_actions(database, user_id: int) -> list[dict]:
+    from .activity_policy import expansion_state
+
+    rows = database.execute(
+        """
+        SELECT choice.journey_id, choice.reason, route.slug AS route_slug,
+               former.slug AS former_slug
+        FROM journey_policy_choices AS choice
+        JOIN route_journeys AS journey ON journey.id = choice.journey_id
+        JOIN routes AS route ON route.id = journey.route_id
+        LEFT JOIN expeditions AS former ON former.id = choice.former_expedition_id
+        WHERE journey.user_id = ?
+        ORDER BY choice.journey_id
+        """,
+        (user_id,),
+    ).fetchall()
+    actions = []
+    for row in rows:
+        state = expansion_state(database, row["journey_id"])
+        action = {
+            "type": "resolve_activity_policy",
+            "journey_id": row["journey_id"],
+            "route_slug": row["route_slug"],
+            "reason": row["reason"],
+            "former_expedition_slug": row["former_slug"],
+            "choices": ["keep"],
+        }
+        if state["available"]:
+            action["choices"].append("expand")
+        elif state["blocked_by"]:
+            action["blocked_by"] = state["blocked_by"]
+        actions.append(action)
+    return actions
 
 
 def _actions(active, paused, finished, current) -> list[dict]:

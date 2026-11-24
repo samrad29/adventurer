@@ -20,12 +20,23 @@ from decimal import Decimal
 
 from flask import current_app
 
+from .activity_policy import (
+    accepts,
+    active_expedition_ids,
+    clear_choice,
+    issue_token,
+    load_journey_policy,
+    public_policy,
+    token_matches,
+    totals_text,
+)
 from .allocation import (
     MeasuredAssignment,
     allocate,
     allocation_fingerprint,
     measurement_token,
     next_serialized_mark,
+    policy_allocation_fingerprint,
     totals_for,
 )
 from .db import get_db
@@ -206,7 +217,7 @@ def create_activity(
             arrival_reveals(database, journey["id"], reached),
         )
         saved["no_credit_reason"] = _no_credit_reason(
-            journey, measurements, proposal["credits"]
+            journey, measurements, proposal["credits"], changes["activity_type"]
         )
         return saved, True
 
@@ -277,11 +288,19 @@ def update_activity(
             )
             return saved, True
         measurement_changed = _measurement_inputs_changed(loaded, changes)
+        activity_type = changes.get("activity_type", loaded["activity_type"])
+        eligibility_changed = _eligibility_changed(
+            credit_journey, loaded, activity_type
+        )
         stays_unassigned = loaded["assignment_id"] is None and (
             credit_journey is None
             or not _positive_required(credit_journey, measurements)
         )
-        if credit_journey is None or not measurement_changed or stays_unassigned:
+        if (
+            credit_journey is None
+            or stays_unassigned
+            or (not measurement_changed and not eligibility_changed)
+        ):
             if confirmation_token:
                 raise _confirmation(_preview_edit(database, user_id, loaded, changes))
             _apply_changes(database, activity_id, loaded, changes)
@@ -292,10 +311,12 @@ def update_activity(
                 _saved(database, activity_id, loaded["journey_id"]), []
             )
             saved["no_credit_reason"] = _no_credit_reason(
-                reason_journey, measurements, loaded["credits"]
+                reason_journey,
+                measurements,
+                loaded["credits"],
+                changes.get("activity_type", loaded["activity_type"]),
             )
             return saved, True
-        activity_type = changes.get("activity_type", loaded["activity_type"])
         proposal = _plan(
             database,
             credit_journey,
@@ -315,7 +336,12 @@ def update_activity(
                 journey_id=credit_journey["id"],
                 journey_status=credit_journey["status"],
             )
-        _require_confirmation(confirmation_token, user_id, credit_journey, proposal)
+        if eligibility_changed and proposal["will_complete"]:
+            _require_policy_completion(
+                confirmation_token, user_id, credit_journey, proposal
+            )
+        else:
+            _require_confirmation(confirmation_token, user_id, credit_journey, proposal)
         _sync_shares(database, credit_journey, proposal["slots"], proposal["shares"], "reduce")
         _apply_changes(database, activity_id, loaded, changes)
         assigning = loaded["assignment_id"] is not None or _positive_required(
@@ -336,6 +362,7 @@ def update_activity(
         progress_changed = (
             proposal["allocation_changed"]
             or measurement_changed
+            or eligibility_changed
             or (assigning and loaded["assignment_id"] is None)
         )
         if proposal["will_complete"] or progress_changed:
@@ -365,7 +392,7 @@ def update_activity(
             arrival_reveals(database, credit_journey["id"], reached),
         )
         saved["no_credit_reason"] = _no_credit_reason(
-            credit_journey, measurements, proposal["credits"]
+            credit_journey, measurements, proposal["credits"], activity_type
         )
         return saved, True
 
@@ -413,7 +440,7 @@ def delete_activity(user_id: int, activity_id: int) -> dict:
                 for slot in _load_slots(database, journey["id"])
                 if slot.activity_id != activity_id
             ]
-            shares = allocate(slots, requirements)
+            shares = allocate(slots, requirements, journey.get("policy"))
             _sync_shares(database, journey, slots, shares, "reduce")
             _touch_journey(
                 database,
@@ -528,7 +555,104 @@ def _require_confirmation(token, user_id: int, journey: dict, proposal: dict) ->
         return
     if proposal["will_complete"] and _token_matches(token, user_id, journey, proposal):
         return
-    raise _confirmation(_preview_from_proposal(journey, proposal))
+    raise _confirmation(_preview_from_proposal(user_id, journey, proposal))
+
+
+def _eligibility_changed(journey: dict | None, loaded: dict, activity_type: str) -> bool:
+    if journey is None or loaded.get("assignment_id") is None:
+        return False
+    if activity_type == loaded["activity_type"]:
+        return False
+    policy = journey.get("policy")
+    if policy is None:
+        return False
+    return accepts(policy, activity_type) != accepts(policy, loaded["activity_type"])
+
+
+def _policy_binding(user_id: int, journey: dict, proposal: dict) -> dict:
+    requirements = _requirement_pairs(journey)
+    return {
+        "user_id": user_id,
+        "journey_id": journey["id"],
+        "operation": "type",
+        "expedition_id": None,
+        "current": journey["policy"],
+        "proposed": journey["policy"],
+        "participation_ids": active_expedition_ids(
+            _binding_database(), user_id, journey["id"]
+        ),
+        "lifecycle": "complete",
+        "allocation": policy_allocation_fingerprint(
+            proposal["slots"], proposal["shares"], requirements
+        ),
+        "totals": totals_text(requirements, proposal["resulting"]),
+        "progress_version": journey["progress_version"],
+    }
+
+
+def _binding_database():
+    from flask import g
+
+    return g.db
+
+
+def _issue_policy_token(user_id: int, journey: dict, proposal: dict) -> tuple[str, int]:
+    token, expires = issue_token(**_policy_binding(user_id, journey, proposal))
+    return token, expires
+
+
+def _require_policy_completion(token, user_id: int, journey: dict, proposal: dict) -> None:
+    binding = _policy_binding(user_id, journey, proposal)
+    if token_matches(token, **binding):
+        return
+    replacement, _expires = issue_token(**binding)
+    code = "stale_preview" if token else "confirmation_required"
+    message = (
+        "That activity-rule preview is out of date."
+        if token
+        else "Confirm the activity-rule change before saving."
+    )
+    raise ActivityError(
+        code,
+        message,
+        status=409,
+        policy_preview=_policy_preview(journey, proposal, binding),
+        confirmation_token=replacement,
+    )
+
+
+def _policy_preview(journey: dict, proposal: dict, binding: dict) -> dict:
+    requirements = _requirement_pairs(journey)
+    allocations = []
+    for slot in proposal["slots"]:
+        if slot.activity_id is None:
+            continue
+        metrics = proposal["shares"].get(slot.activity_id, {})
+        for metric, _target in requirements:
+            allocations.append(
+                {
+                    "activity_id": slot.activity_id,
+                    "metric": metric,
+                    "credited_m": str(metrics.get(metric, Decimal("0"))),
+                }
+            )
+    return {
+        "operation": "type",
+        "current_policy": public_policy(journey["policy"]),
+        "proposed_policy": public_policy(journey["policy"]),
+        "lifecycle": binding["lifecycle"],
+        "will_complete": True,
+        "will_resume": False,
+        "allocations": allocations,
+        "metrics": [
+            {
+                "metric": item["metric"],
+                "current_credited_m": str(item["current_m"]),
+                "proposed_credited_m": str(item["resulting_m"]),
+            }
+            for item in proposal["metrics"]
+        ],
+    }
 
 
 def _require_user(database, user_id: int, *, lock: bool) -> None:
@@ -708,6 +832,7 @@ def _journey_state(database, locked: dict) -> dict:
         "requirements": [dict(row) for row in requirements],
         "totals": totals,
         "participations": [],
+        "policy": load_journey_policy(database, locked["id"]),
     }
 
 
@@ -887,6 +1012,7 @@ def _preview_new(database, user_id: int, changes: dict) -> dict:
         return _empty_preview(measurements)
     journey = _journey_state(database, found)
     return _preview_from_proposal(
+        user_id,
         journey,
         _plan(
             database,
@@ -909,9 +1035,14 @@ def _preview_edit(database, user_id: int, loaded: dict, changes: dict) -> dict:
         return _empty_preview(measurements)
     if journey["status"] == "completed":
         _reject_completed_progress_edit(loaded, changes)
+    activity_type = changes.get("activity_type", loaded["activity_type"])
+    eligibility_changed = _eligibility_changed(journey, loaded, activity_type)
     allocate_now = (
         journey["status"] != "completed"
-        and _measurement_inputs_changed(loaded, changes)
+        and (
+            _measurement_inputs_changed(loaded, changes)
+            or eligibility_changed
+        )
     )
     if loaded["journey_id"] is None:
         will_assign = allocate_now and _positive_required(journey, measurements)
@@ -926,7 +1057,7 @@ def _preview_edit(database, user_id: int, loaded: dict, changes: dict) -> dict:
         operation="update",
         activity_id=loaded["id"],
         assignment_id=loaded["assignment_id"],
-        activity_type=changes.get("activity_type", loaded["activity_type"]),
+        activity_type=activity_type,
         measurements=measurements,
         previous_credits=loaded["credits"],
         allocate_now=allocate_now,
@@ -934,7 +1065,8 @@ def _preview_edit(database, user_id: int, loaded: dict, changes: dict) -> dict:
     if journey["status"] == "completed":
         proposal["will_complete"] = False
         proposal["resume_required"] = False
-    return _preview_from_proposal(journey, proposal)
+    proposal["policy_completion"] = eligibility_changed and proposal["will_complete"]
+    return _preview_from_proposal(user_id, journey, proposal)
 
 
 def _preview_journey(database, user_id: int, loaded: dict, changes: dict) -> dict | None:
@@ -988,7 +1120,7 @@ def _plan(
                 activity_type,
                 measurements,
             )
-        shares = allocate(slots, requirements)
+        shares = allocate(slots, requirements, journey.get("policy"))
         resulting = totals_for(shares, requirements)
         allocation_changed = _allocation_differs(
             database, journey["id"], slots, shares, requirements
@@ -1048,6 +1180,7 @@ def _plan(
         "allocation_changed": allocation_changed,
         "will_complete": status == "active" and finished_after and not finished_before,
         "resume_required": status in ("paused", "abandoned") and finished_after and not finished_before,
+        "activity_type": activity_type,
     }
 
 
@@ -1174,6 +1307,91 @@ def _allocation_differs(database, journey_id: int, slots, shares, requirements) 
     return bool(set(stored) - known)
 
 
+def propose_policy_allocation(database, journey_id: int, policy) -> dict:
+    """Read the walk this journey would take under ``policy``. No locks and no writes."""
+    locked = database.execute(
+        """
+        SELECT id, user_id, route_id, status, progress_version
+        FROM route_journeys
+        WHERE id = ?
+        """,
+        (journey_id,),
+    ).fetchone()
+    journey = _journey_state(database, dict(locked))
+    journey["policy"] = policy
+    slots = _load_slots(database, journey_id)
+    requirements = _requirement_pairs(journey)
+    shares = allocate(slots, requirements, policy)
+    resulting = totals_for(shares, requirements)
+    already = _targets_met(journey["requirements"], journey["totals"])
+    finished = _targets_met(requirements, resulting)
+    return {
+        "journey": journey,
+        "slots": slots,
+        "shares": shares,
+        "requirements": requirements,
+        "resulting": resulting,
+        "would_finish": finished and not already,
+        "already_complete": journey["status"] == "completed",
+    }
+
+
+def apply_eligibility(
+    database,
+    user_id: int,
+    journey_id: int,
+    *,
+    policy_changed: bool,
+    complete: bool,
+) -> dict:
+    """Recalculate a locked journey under the policy already stored on it."""
+    locked = database.execute(
+        """
+        SELECT id, user_id, route_id, status, progress_version
+        FROM route_journeys
+        WHERE id = ?
+        """,
+        (journey_id,),
+    ).fetchone()
+    journey = _journey_state(database, dict(locked))
+    journey["participations"] = _lock_participations(
+        database, user_id, journey_id, journey["route_id"]
+    )
+    _lock_activity_ids(database, _assigned_activity_ids(database, journey_id))
+    slots = _load_slots(database, journey_id)
+    requirements = _requirement_pairs(journey)
+    shares = allocate(slots, requirements, journey["policy"])
+    changed = _allocation_differs(database, journey_id, slots, shares, requirements)
+    _sync_shares(database, journey, slots, shares, "reduce")
+    _sync_shares(database, journey, slots, shares, "increase")
+    resulting = totals_for(shares, requirements)
+    finish = (
+        complete
+        and journey["status"] == "active"
+        and _targets_met(requirements, resulting)
+        and not _targets_met(journey["requirements"], journey["totals"])
+    )
+    if policy_changed or changed or finish:
+        _touch_journey(
+            database,
+            journey_id,
+            credit_changed=changed or finish,
+            complete=finish,
+            inputs_changed=policy_changed and not changed and not finish,
+        )
+    arrivals = []
+    if changed or finish:
+        from .narrative import arrival_reveals
+
+        reached = _newly_reached(
+            database, journey["route_id"], _totals_map(journey), resulting
+        )
+        arrivals = arrival_reveals(database, journey_id, reached)
+    if finish:
+        _write_summit_feed(database, user_id, None, journey, resulting)
+    return {"arrivals": arrivals, "completed": finish, "resulting": resulting}
+
+
 def _bind_new_assignment(slots, assignment_id: int) -> None:
     for slot in slots:
         if slot.assignment_id is None:
@@ -1249,10 +1467,12 @@ def _sync_shares(database, journey: dict, slots, shares, phase: str) -> None:
                 )
 
 
-def _preview_from_proposal(journey: dict, proposal: dict) -> dict:
+def _preview_from_proposal(user_id: int, journey: dict, proposal: dict) -> dict:
     token = None
     expires = None
-    if proposal["will_complete"] and not proposal["resume_required"]:
+    if proposal.get("policy_completion"):
+        token, expires = _issue_policy_token(user_id, journey, proposal)
+    elif proposal["will_complete"] and not proposal["resume_required"]:
         expires = _now() + TOKEN_TTL_SECONDS
         token = _issue_confirmation_token(
             journey["user_id"],
@@ -1274,7 +1494,7 @@ def _preview_from_proposal(journey: dict, proposal: dict) -> dict:
         "credits_journey": bool(proposal["credits"]),
         "saved_without_credit": not proposal["credits"],
         "no_credit_reason": _no_credit_reason(
-            journey, measurements, proposal["credits"]
+            journey, measurements, proposal["credits"], proposal.get("activity_type")
         ),
         "resume_required": proposal["resume_required"],
         "confirmation_token": token,
@@ -1339,13 +1559,21 @@ def _positive_required(journey: dict, measurements: dict[str, Decimal | None]) -
     return False
 
 
-def _no_credit_reason(journey: dict | None, measurements: dict, credits: dict) -> str | None:
+def _no_credit_reason(
+    journey: dict | None,
+    measurements: dict,
+    credits: dict,
+    activity_type: str | None = None,
+) -> str | None:
     if credits:
         return None
     if journey is None:
         return "no_active_journey"
     if not _positive_required(journey, measurements):
         return "no_positive_measurement"
+    policy = journey.get("policy")
+    if policy is not None and activity_type is not None and not accepts(policy, activity_type):
+        return "activity_type_not_eligible"
     return "metric_already_complete"
 
 
@@ -1471,6 +1699,7 @@ def _touch_journey(
     inputs_changed: bool = False,
 ) -> None:
     if complete:
+        clear_choice(database, journey_id)
         cursor = database.execute(
             """
             UPDATE route_journeys

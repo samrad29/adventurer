@@ -37,7 +37,7 @@ DAY = date(2026, 6, 1)
 def test_migration_accepts_cycling_types_and_backfills_origins(app):
     with app.app_context():
         version = get_db().execute("SELECT version_num FROM alembic_version").fetchone()
-        assert version["version_num"] == "0012_deterministic_allocation"
+        assert version["version_num"] == "0013_activity_policy"
         definition = get_db().execute(
             """
             SELECT pg_get_constraintdef(oid) AS definition
@@ -55,7 +55,7 @@ def test_migration_accepts_cycling_types_and_backfills_origins(app):
               AND table_name = 'expeditions'
               AND column_name = 'activity_policy'
             """
-        ).fetchone() is None
+        ).fetchone() is not None
         user_id = _user("Origin Backfill")
         route_id = _route("found-backfill", {"elevation": _feet("1000")})
         journey_id = start_journey(user_id, route_id)["id"]

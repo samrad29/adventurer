@@ -106,20 +106,29 @@ def ordered_assignments(assignments: list[MeasuredAssignment]) -> list[MeasuredA
     )
 
 
-def _eligible(activity_type: str) -> bool:
-    return activity_type in SUPPORTED_TYPES
+def _eligible(activity_type: str, policy=None) -> bool:
+    if activity_type not in SUPPORTED_TYPES:
+        return False
+    if policy is None or policy.mode == "unrestricted":
+        return True
+    return activity_type in policy.types
 
 
 def allocate(
     assignments: list[MeasuredAssignment],
     requirements: list[tuple[str, Decimal]],
+    policy=None,
 ) -> dict[int | None, dict[str, Decimal]]:
-    """Positive credits keyed by activity id. A not-yet-saved activity uses None."""
+    """Positive credits keyed by activity id. A not-yet-saved activity uses None.
+
+    ``policy`` is the journey's effective activity policy. Omitted means every
+    supported type is eligible.
+    """
     shares: dict[int | None, dict[str, Decimal]] = {}
     for metric, target in requirements:
         remaining = target
         for assignment in ordered_assignments(assignments):
-            if not _eligible(assignment.activity_type) or remaining <= 0:
+            if not _eligible(assignment.activity_type, policy) or remaining <= 0:
                 continue
             measurement = assignment.measurement(metric)
             if measurement is None or measurement <= 0:
@@ -156,6 +165,22 @@ def allocation_fingerprint(
             amount = metrics[metric]
             if amount > 0:
                 parts.append(f"{key}:{metric}={canonical_meters(amount)}")
+    return ",".join(parts)
+
+
+def policy_allocation_fingerprint(
+    assignments: list[MeasuredAssignment],
+    shares: dict[int | None, dict[str, Decimal]],
+    requirements: list[tuple[str, Decimal]],
+) -> str:
+    """Every associated activity and required metric, including an explicit zero."""
+    parts: list[str] = []
+    for assignment in ordered_assignments(assignments):
+        key = "new" if assignment.activity_id is None else str(assignment.activity_id)
+        metrics = shares.get(assignment.activity_id, {})
+        for metric, _target in requirements:
+            amount = metrics.get(metric, Decimal("0"))
+            parts.append(f"{key}:{metric}={canonical_meters(amount)}")
     return ",".join(parts)
 
 
@@ -215,7 +240,13 @@ def preflight_report(database) -> list[dict]:
                 (journey["id"],),
             ).fetchall()
         ]
-        shares = allocate(assignments, requirements)
+        from .activity_policy import load_journey_policy
+
+        shares = allocate(
+            assignments,
+            requirements,
+            load_journey_policy(database, journey["id"]),
+        )
         expected_totals = totals_for(shares, requirements)
         stored_credits: dict[int, dict[str, Decimal]] = {}
         for row in database.execute(
