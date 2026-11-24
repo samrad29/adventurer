@@ -214,6 +214,12 @@ There is one published hero per route and one published scene per checkpoint. Dr
 
 A media record's identity is its role, checkpoint slug, discovery slug, and position. The same identity updates the existing row and keeps its id. Two records with that identity are an error. Position is part of the identity, so changing position does not move the old row. To replace a photograph, retire the old position and add the new position. A retired row and a new row still need different positions in the package.
 
+Journal photographs on one checkpoint share a position namespace. Discovery photographs share a position namespace for that discovery. Draft and published rows occupy the position. Retired rows do not. `route_hero` and `checkpoint_scene` are outside these namespaces; a route still has one published hero, and a checkpoint still has one published scene.
+
+Validation builds the position map that would exist after the import. Omitted rows stay in that map with their current status and position. Named rows take the package status. A new identity is an insert. If the map would contain two non-retired journal rows for one checkpoint and position, or two non-retired discovery rows for one discovery and position, the package is rejected before any write. The message names the route, the checkpoint, the discovery when the photograph belongs to one, the role, and the position. Retire the omitted row by naming it, or choose a position that is free. A dry run reports the same error and writes nothing. The importer does not retire, delete, move, or overwrite the omitted row to clear the position.
+
+A retired row still owns its identity. Setting that same role, checkpoint, discovery, and position back to `draft` or `published` updates the row. That reuses the position the index allows. Different checkpoints do not share journal positions. Different discoveries do not share discovery positions. A journal image, a checkpoint scene, and a discovery image may all use position 0.
+
 Every path must be an existing file under `/static/photos/`, for every status. The rules are the same ones the journal uses: one site-relative path, safe segments, and a file that resolves inside that directory. Do not add a remote URL, a path outside that directory, or a new download.
 
 After import, the home scene reads published `route_hero` and `checkpoint_scene` rows from `route_media`. The filename is not a selector. A published journal or discovery image is not the home scene, even when it points at the same file. Retiring the published scene and hero removes that photograph from the scene. The file can remain on disk. `adventurer/photo_credits.json` is archival attribution for a later reviewed import. The importer does not publish a photograph because that file has an entry.
@@ -244,7 +250,7 @@ The same identity is updated in place. Ids stay so arrival acknowledgments, whic
 
 Swapping two chapter positions, or two discovery positions, is done inside the import transaction by parking the rows on unused positions and then writing the final positions. Positions start at zero, so the park positions are above the current maximum.
 
-Absence is not deletion. A chapter, checkpoint file, discovery, or media record that the package does not name is left as it is, including its status and position. A partial package cannot wipe the route. Because an omitted row keeps its position, a new chapter or discovery cannot take that position until the omitted row is named and moved or the new row chooses a free position.
+Absence is not deletion. A chapter, checkpoint file, discovery, or media record that the package does not name is left as it is, including its status and position. A partial package cannot wipe the route. Because an omitted row keeps its position, a new chapter or discovery cannot take that position until the omitted row is named and moved or the new row chooses a free position. A non-retired journal or discovery photograph works the same way. Naming that row and setting `status` to `retired` releases its position in the index. Leaving it out of the package does not.
 
 A checkpoint file that is present is the statement for that checkpoint's story and its chapter assignment. Naming the file and setting `chapter` to null unassigns that checkpoint. Naming the file and leaving a discovery out does not delete that discovery.
 
@@ -272,7 +278,7 @@ Checklist before publishing a photograph:
 - The rights category, license, author, and URLs are filled in for that category.
 - A person has checked the actual license, not only the JSON.
 - `status` stays `draft` until that check is done.
-- The home scene selector is unchanged. Publishing a hero or a scene row does not switch the home photograph. That cutover is a later step.
+- A published `route_hero` or `checkpoint_scene` is eligible for the home scene. A journal or discovery image is not the home scene.
 
 ## What a later author copies
 

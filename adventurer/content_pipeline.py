@@ -1015,6 +1015,7 @@ def _catalog_issues(package: Package, catalog: Catalog) -> list[ContentIssue]:
                 )
     issues.extend(_span_issues(package, catalog))
     issues.extend(_hero_conflicts(package, catalog))
+    issues.extend(_media_position_issues(package, catalog))
     return issues
 
 
@@ -1113,6 +1114,129 @@ def _hero_conflicts(package: Package, catalog: Catalog) -> list[ContentIssue]:
                     "only one checkpoint scene may be published",
                 )
             )
+    return issues
+
+
+def _media_position_issues(package: Package, catalog: Catalog) -> list[ContentIssue]:
+    """Reject a journal or discovery position the import would occupy twice.
+
+    The projection is the post-import state: omitted rows stay as they are,
+    a named row takes the package status, and a new identity is an insert.
+    Retired rows do not occupy the partial unique indexes. This does not
+    retire, delete, move, or overwrite a row the package left out.
+    """
+    packaged = {item.identity(): item for item in package.media}
+    rows_by_identity: dict[tuple, list[dict]] = defaultdict(list)
+    for row in catalog.media:
+        key = (
+            row["role"],
+            row["checkpoint_slug"] or "",
+            row["discovery_slug"] or "",
+            int(row["position"]),
+        )
+        rows_by_identity[key].append(row)
+    for rows in rows_by_identity.values():
+        rows.sort(key=lambda row: row["id"])
+    checkpoint_ids = {slug: row["id"] for slug, row in catalog.checkpoints.items()}
+    checkpoint_slugs = {row["id"]: slug for slug, row in catalog.checkpoints.items()}
+    discovery_ids = {
+        (checkpoint_id, slug): row["id"]
+        for (checkpoint_id, slug), row in catalog.discoveries.items()
+    }
+    discovery_names = {
+        row["id"]: (checkpoint_slugs.get(checkpoint_id, ""), slug)
+        for (checkpoint_id, slug), row in catalog.discoveries.items()
+    }
+    occupants: dict[tuple, list[tuple]] = defaultdict(list)
+
+    def _add(slot: tuple, source: str, status: str, role: str, checkpoint: str, discovery: str, position: int) -> None:
+        if status == "retired":
+            return
+        occupants[slot].append((source, status, role, checkpoint, discovery, position))
+
+    for key, rows in rows_by_identity.items():
+        item = packaged.get(key)
+        for index, row in enumerate(rows):
+            role = row["role"]
+            if role not in {"journal", "discovery"}:
+                continue
+            status = item.status if item is not None and index == 0 else row["status"]
+            position = int(row["position"])
+            checkpoint = row["checkpoint_slug"] or checkpoint_slugs.get(row["checkpoint_id"], "")
+            discovery = row["discovery_slug"] or ""
+            if role == "discovery" and not discovery and row["discovery_id"] is not None:
+                discovery = discovery_names.get(row["discovery_id"], ("", ""))[1]
+            source = "named" if item is not None and index == 0 else "omitted"
+            if role == "journal" and row["checkpoint_id"] is not None:
+                _add(("journal", row["checkpoint_id"], position), source, status, role, checkpoint, "", position)
+            if role == "discovery" and row["discovery_id"] is not None:
+                _add(
+                    ("discovery", row["discovery_id"], position),
+                    source,
+                    status,
+                    role,
+                    checkpoint,
+                    discovery,
+                    position,
+                )
+    for item in package.media:
+        if item.identity() in rows_by_identity or item.status == "retired":
+            continue
+        if item.role not in {"journal", "discovery"} or item.checkpoint is None:
+            continue
+        checkpoint_id = checkpoint_ids.get(item.checkpoint)
+        if checkpoint_id is None:
+            continue
+        if item.role == "journal":
+            _add(
+                ("journal", checkpoint_id, item.position),
+                "incoming",
+                item.status,
+                item.role,
+                item.checkpoint,
+                "",
+                item.position,
+            )
+            continue
+        if item.discovery is None:
+            continue
+        discovery_id = discovery_ids.get((checkpoint_id, item.discovery))
+        if discovery_id is None:
+            continue
+        _add(
+            ("discovery", discovery_id, item.position),
+            "incoming",
+            item.status,
+            item.role,
+            item.checkpoint,
+            item.discovery,
+            item.position,
+        )
+    issues: list[ContentIssue] = []
+    for slot, holders in occupants.items():
+        if len(holders) < 2 or not any(holder[0] in {"named", "incoming"} for holder in holders):
+            continue
+        omitted = next((holder for holder in holders if holder[0] == "omitted"), None)
+        subject = next((holder for holder in holders if holder[0] == "incoming"), None)
+        if subject is None:
+            subject = next(holder for holder in holders if holder[0] == "named")
+        _source, status, role, checkpoint, discovery, position = omitted or holders[0]
+        who = (
+            f"an omitted {status} {role}"
+            if omitted is not None
+            else f"another non-retired {role}"
+        )
+        place = [f"route {package.route_slug}", f"checkpoint {checkpoint or subject[3]}", f"role {role}"]
+        if role == "discovery":
+            place.insert(2, f"discovery {discovery or subject[4]}")
+        issues.append(
+            ContentIssue(
+                "media.json",
+                _media_identity(subject[2], subject[3], subject[4], subject[5]),
+                "position",
+                f"position {position} is still used by {who} for {', '.join(place)}",
+            )
+        )
     return issues
 
 
