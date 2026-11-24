@@ -72,6 +72,8 @@ Import validates the whole package, then writes one route in one transaction. If
 
 `format_version` must be the integer `1`. `route_slug` must match the directory name and the slug of an existing route. The importer looks the route up. It does not insert a route.
 
+`docs/architecture.md` section 20 proposes an optional `recommended_activity_types` array on this file. The current importer rejects unknown manifest fields, so a package that includes the array fails validation. Do not add it until the importer accepts it. When that lands, the array is editorial display order only. Omitting it means the route has no recommendation. It does not restrict which activities credit a journey, and the importer still does not write journey progress.
+
 ## chapters.json
 
 ```json

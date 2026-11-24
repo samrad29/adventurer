@@ -188,6 +188,10 @@ Action object
     continue_journey, then resume_journey by route_slug, then start_new_attempt by route_slug, then choose_route.
     Invitation actions stay on their invitation, accept_invitation before decline_invitation. Invitations are ordered by id.
 
+  Activity eligibility is not in the implemented home payload. `docs/architecture.md` section 20 is the approved rule and is not built. When it is, the active, paused, or focused journey includes `activity_policy` and, when a choice is waiting, `pending_policy_choice`. The scene still uses that journey's capped personal totals. A pending choice does not change the totals, the checkpoint, or the scene. Home remains one repeatable-read, read-only transaction and does not apply the choice.
+
+  The proposed action is `resolve_activity_policy`, placed ahead of `continue_journey` only while that choice is pending on the current journey. It carries the journey, the route slug, whether the governor was left or closed, the former expedition slug, and the choices the server will accept. `keep` retains the current list. `open` is included only when no other active expedition would reject an unrestricted journey. Otherwise `blocked_by` names those expeditions and `open` is omitted. Opening and a join that changes policy both go through the policy preview in `docs/api-v1.md`. The client does not estimate the resulting checkpoint.
+
 Progress fields, wherever a progress body is carried
 
   metrics: one object per required metric, in metric-code order. Each object is metric, unit, target, credited, remaining, and complete. Amounts are decimal strings in the display unit. unit is ft or mi. complete is true only when that metric's capped credit has reached its target. A metric the route does not require is omitted, not sent as zero.

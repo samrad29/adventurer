@@ -167,7 +167,7 @@ Another person's activity or journey returns 403 `forbidden`, which is the servi
 
 `next_actions` lists every eligible journey action in this order: `continue_journey`, `resume_journey` by route slug, `start_new_attempt` by route slug, `choose_route`. Invitation `accept_invitation` and `decline_invitation` stay on `incoming_invitations` and are not copied into `next_actions`. A share link has no decline action.
 
-The home scene uses every required metric and the checkpoint thresholds, then the fallback: the reached checkpoint's file, then the nearest lower checkpoint by position, then `photos/<route>/hero` or `photos/<route>`, then null. It never uses an unmet checkpoint's file. Expedition cards use `displayed_metrics` and the board rule, including `display_credits_after`. That filtered total is not fed into the scene. Until a curated file exists, `image` is null rather than a borrowed checkpoint.
+The home scene uses the caller's capped personal totals and the published `route_media` rule in `docs/architecture.md` section 18.4. It does not read a filename, `photo_credits.json`, or expedition branding. An unmet checkpoint's photograph is never used. Until a published photograph is readable, `image` is null. Expedition cards use `displayed_metrics` and the board rule, including `display_credits_after`. That filtered total is not fed into the scene. The implemented home payload does not include activity eligibility or a pending policy choice. Those fields are proposed in the multi-sport section below and are not returned yet.
 
 ```json
 {
@@ -545,10 +545,50 @@ Colors are stored and returned in uppercase. Three-digit hex, eight-digit hex, a
 
 A read of a legacy bad token inherits the parent color and does not update the row. Logo and cover bytes are not accepted on these routes. The path layout is section 19.7 and the bucket is not created. Organization creation stays platform-admin only. Joining an expedition does not make the participant an organization manager.
 
+## Multi-sport and expedition eligibility
+
+This section is proposed. None of these fields or routes is implemented. `docs/architecture.md` section 20 is the domain rule. The server computes eligibility, credit, and checkpoint reach. The client displays the preview and submits the token. It does not recalculate them.
+
+Supported `activity_type` values gain `cycle` and `indoor_cycle` beside `run`, `hike`, `walk`, `stair_climb`, `other`, and `unspecified`. Distance for the two cycling types uses the cycling maximum in section 20.1. Elevation is still optional and is never invented. A cycling activity over the limit is 400 with the same shape as today's over-limit activity error.
+
+`GET /api/v1/routes` and `GET /api/v1/routes/<slug>` add `recommended_activity_types`, an array of type codes in editorial order. An empty array means the route makes no recommendation. It is not a credit filter.
+
+`POST /api/v1/organizations/<slug>/expeditions` and private expedition creation accept an optional `activity_policy`. Omitted means unrestricted, which is also the migration default.
+
+```json
+{"activity_policy": {"mode": "unrestricted"}}
+```
+
+```json
+{"activity_policy": {"mode": "restricted", "activity_types": ["run", "hike"]}}
+```
+
+```json
+{"activity_policy": {"preset": "on_foot"}}
+```
+
+`preset` is `on_foot`, `cycling`, or `all`. The server expands it and stores the mode and, when restricted, the type list. The response returns the stored policy, not a live preset. Unknown types, an empty list, both `preset` and `activity_types`, and a restricted global expedition are 400. A later `PATCH` of the policy is 409 `This expedition's activity rules are fixed.` Global Everest's policy is `{"mode": "unrestricted"}` on every read.
+
+Expedition profile and join responses include `activity_policy` before the caller joins. A journey payload includes `activity_policy` and `governing_expedition_slug`. `governing_expedition_slug` is null when the journey is unrestricted or when a retained list has no governor. `activity_types` is present only when `mode` is `restricted`.
+
+`POST /api/v1/expeditions/<slug>/join` returns 200 as today when the join does not change the journey policy. When it would, the body is 409 `confirmation_required` and includes `policy_preview` plus `confirmation_token`. The follow-up sends `confirmation_token`. `confirm_new_attempt` remains the completed or abandoned path and does not double as the policy token.
+
+`policy_preview` contains `current_policy`, `proposed_policy`, `metrics` with `current_credited` and `proposed_credited` decimal strings for each required metric, `excluded_activities` as a count plus per-metric measurement totals, `checkpoint` with `current_slug` and `resulting_slug`, `compatible_expeditions`, `conflicting_expeditions`, `will_resume`, and `will_complete`.
+
+An incompatible join is 409 `activity_policy_conflict`. The body names `journey_policy`, `rejected_activity_types`, and `conflicting_expeditions`. No participation row changes.
+
+`POST /api/v1/journeys/<id>/activity-policy/preview` previews opening a retained policy or keeping it. `POST /api/v1/journeys/<id>/activity-policy` submits `choice` of `keep` or `open`. `open` requires the preview token. `keep` does not change credits and does not need a token. A missing pending choice is 409 `There is no activity-rule choice waiting.` Opening while another active expedition would reject an unrestricted journey is 409 `activity_policy_conflict`.
+
+Activity preview and the saved activity add `no_credit_reason` when the activity is stored and credits nothing: `no_active_journey`, `activity_type_not_eligible`, `no_positive_measurement`, or `metric_already_complete`. An ineligible activity still includes the `journey` id when an assignment was kept. `saved_without_credit` stays true in that case.
+
+Home `next_actions` gains `resolve_activity_policy` ahead of `continue_journey` when the current journey has a pending choice. The action carries `journey_id`, `route_slug`, `reason` (`left` or `closed`), `former_expedition_slug`, and `choices`. `choices` contains `keep` and, when opening is allowed, `open`. When opening is blocked, `blocked_by` lists the expedition slugs and `open` is omitted. Home does not apply the choice.
+
+Restart of an unfinished or finished attempt copies the journey's effective policy onto the new attempt. The response includes that policy. `confirm_new_attempt` from `activity_policy_conflict` adopts the expedition being joined. If another active expedition on the route cannot accept that policy, the restart is 409 `activity_policy_conflict` and writes nothing.
+
 ## What the Expo client needs first
 
 1. Call register or login and store the bearer token. Do not send it as a query parameter or a cookie.
 2. Send `Authorization: Bearer` on later requests. Native clients do not need CSRF. A browser client that uses the cookie must send `X-CSRF-Token`.
 3. Treat 409 `restart_required` and `confirmation_required` as instructions to show a confirmation step, then call restart or resubmit with the new token. Do not retry a stale summit token.
 4. Use `GET /api/v1/home` for the first screen. The implemented payload reports elevation in feet. The target payload in the metric section reports one object per required metric, in feet or miles, and does not add those objects together. Activity elevation is feet. The target distance field is miles.
-5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API. Achievement and trophy-case routes are not in this contract. The domain is `docs/architecture.md` section 17. Chapter, journal, acknowledgment, activity arrival, and home pending-arrival routes are implemented. Scene selection from published `route_media` is implemented. Launch content is not seeded.
+5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API. Achievement and trophy-case routes are not in this contract. The domain is `docs/architecture.md` section 17. Chapter, journal, acknowledgment, activity arrival, and home pending-arrival routes are implemented. Scene selection from published `route_media` is implemented. Launch content is not seeded. Cycling activity types, expedition activity policies, policy previews, and `resolve_activity_policy` are `docs/architecture.md` section 20 and are not implemented.

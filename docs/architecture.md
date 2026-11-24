@@ -10,6 +10,8 @@ Section 18 adds the curated narrative experience. Migration 0010, the chapter an
 
 Section 19 adds organization and expedition branding. The columns it uses already exist. Resolution, color validation, and branding edits are implemented. Asset upload and mobile rendering are not. It does not change journeys, activity credits, expedition standings, snapshots, lock order, privacy removal, membership, or authentication.
 
+Section 20 adds cycling and lets an expedition govern which activity types credit the personal journey. It is approved and not implemented. Sections 5 and 16 remain the running progress rules until that work lands. It does not add a second credit ledger, a second completion, or a separate expedition total.
+
 
 1. Executive summary
 
@@ -349,13 +351,13 @@ Under those locks the service recomputes each metric on its own.
   progress_version increments on every commit that changes any credited total: a new credit, an edit that changes a credited amount, a delete that removes one, or any other write that changes those totals. A metadata edit that changes no credit does not increment it. The first completing commit increments it as well. A replay then no longer matches, so it writes nothing.
   If there is no active journey, the activity is stored and no assignment is written. No token is required.
   An activity after the journey is already completed is stored with no credit and no token.
-  An activity whose supplied amounts are all null or zero writes no assignment. Zero is a real measurement. It is not, by itself, a credit.
+  An activity whose supplied amounts are all null or zero writes no assignment. Zero is a real measurement. It is not, by itself, a credit. Section 20, once implemented, also keeps an assignment when an active journey receives an ineligible activity or an eligible activity with no remaining credit. The service does not do that today. It deletes the assignment when no positive credit remains.
 
 The credit transaction writes feed rows only for expeditions that are still active and whose active participation points at this journey, and only for a newly created activity, plus the summit case below. One activity_logged row carries the credited amounts, not the activity's full measurements. Each checkpoint that this create newly satisfies gets its own checkpoint_reached row. Completing the journey writes summit_reached. An edit does not write activity_logged or checkpoint_reached. An edit that completes the active journey writes summit_reached only. A delete writes no feed row. An expedition that closed before this transaction took its lock gets no feed row. The personal credit is still written when the journey itself is active.
 
 Edits and deletes of credited amounts are allowed while the credited journey is active, paused, or abandoned. Changing elevation, distance, or both recalculates each metric's credit from the new full value and the other credits already on that journey. If an edit on the active journey would complete every required metric, it uses the same confirmation token. If an edit on a paused or abandoned journey would complete the route, the response is 409 resume_required and nothing is written. Completion happens on the active journey, through a create or an edit and the confirmation path. Deleting the activity deletes its assignment and every credit row in that transaction. That keeps the one-activity-one-journey rule, and progress_version increments when a credited total changes. The delete does not ask for a token and cannot be the write that completes the journey.
 
-Once the journey is completed, no assignment and no credit may be inserted, updated, or deleted for it. The completed-journey activity trigger watches both elevation_gain_m and distance_m. It rejects an update of either column, and rejects delete of the activity, when that change would alter a credit on the completed journey. Note, date, activity type, and duration remain editable. A measurement the route did not credit remains editable. Account deletion is the only delete bypass, and it is the bypass in section 5.10.
+Once the journey is completed, no assignment and no credit may be inserted, updated, or deleted for it. The completed-journey activity trigger watches both elevation_gain_m and distance_m. It rejects an update of either column, and rejects delete of the activity, when that change would alter a credit on the completed journey. Note, date, activity type, and duration remain editable. A measurement the route did not credit remains editable. Account deletion is the only delete bypass, and it is the bypass in section 5.10. Section 20 keeps that freeze and, once implemented, also rejects an activity-type edit on a completed journey when the new type would change which measurements are eligible.
 
 5.5 Leave
 
@@ -906,7 +908,7 @@ Completion compares storage amounts. Display rounding cannot finish a route or u
 
 One journey tracks every metric its route requires. The total for a metric is the sum of journey_credits.credited_amount for that journey and metric, capped at the requirement target. Credits from before an expedition's starts_at still count. display_credits_after limits an expedition board and does not limit the personal journey.
 
-An activity with an active journey and at least one positive supplied amount for a required metric gets one activity_journey_assignments row. Each such metric gets a child credit row on that assignment. A metric left null, a metric stored as zero, and a metric whose remaining target is already zero get no child row. The other metrics are still written. All of those rows share the assignment's journey. The unique activity_id and the child foreign key are what stop a second journey, not a check in the service. An activity with no active journey, or with nothing positive to credit, writes no assignment and stays in personal history. An activity never writes a credit for a route it is not on.
+An activity with an active journey and at least one positive supplied amount for a required metric gets one activity_journey_assignments row. Each such metric gets a child credit row on that assignment. A metric left null, a metric stored as zero, and a metric whose remaining target is already zero get no child row. The other metrics are still written. All of those rows share the assignment's journey. The unique activity_id and the child foreign key are what stop a second journey, not a check in the service. An activity with no active journey, or with nothing positive to credit, writes no assignment and stays in personal history. An activity never writes a credit for a route it is not on. Section 20 keeps one assignment per activity and changes the zero-credit case: an activity logged against the active journey keeps that assignment when its type is ineligible or the route has no room left. That change is not implemented. Until it is, a zero-credit save still removes the assignment, and a later policy cannot see the activity.
 
 Paused and abandoned journeys keep the credits they already have. New activities do not credit them, because they are not the active journey. An edit of an activity that already credits a paused or abandoned journey recalculates those rows. If the recalculation would complete that journey, the response is 409 resume_required and the edit is not written.
 
@@ -1572,3 +1574,271 @@ The objects are public-read because an open expedition shows its brand to people
 19.8 What this section does not change
 
 No migration. No upload route. No bucket. No mobile branding screens. No change to scene selection, the journal, the trophy case, or the result snapshot. Reads return the raw columns and the resolved branding object. Writes validate new colors and welcome text. They do not rewrite a legacy row that is only being read.
+
+## 20. Multi-sport activities and expedition-governed journeys
+
+This section is approved and not implemented. No migration, service, test, or client in the repository follows it yet. Sections 5 and 16 describe the behavior that is running. Where this section changes an assignment, an activity type, or a join, the earlier section says so and remains the contract until this one is built.
+
+The product stays one journey. Personal metric totals, the current checkpoint, the immersive scene, narrative unlocking, personal completion, and every expedition standing that shares the journey all read the same credited progress. An expedition does not keep its own credit rows, its own checkpoint, or its own completion. A policy change rewrites which of the journey's associated activities contribute to that one total. It does not copy the total into a second ledger.
+
+### 20.1 Activity types
+
+The implemented types remain `run`, `hike`, `walk`, `stair_climb`, `other`, and `unspecified`. This section adds `cycle` and `indoor_cycle`.
+
+Distance and elevation stay the canonical measurements. A mile is 1609.344 meters and a foot is 0.3048 meters, stored as `numeric(16, 6)` meters. There is no sport-specific conversion, no equivalent elevation, and no fabricated elevation. An indoor ride with no measured elevation stores elevation as null. Null is not zero and is not credited.
+
+The service limit of 75 miles stays for `run`, `hike`, `walk`, `stair_climb`, `other`, and `unspecified`. `cycle` and `indoor_cycle` need a higher distance limit because a single ride can pass 75 miles. The proposed service limit is 200 statute miles for those two types only. That number is unresolved and must be confirmed before implementation. The elevation limit stays 10,000 feet for every type. The database checks that a stored distance or elevation is non-negative. The type-specific maximums stay in the service, as the 75-mile maximum does today. A new migration extends the `activity_type` check. Migrations `0001` through `0010` are not edited.
+
+`other` and `unspecified` keep their current meaning. On an unrestricted policy they credit exactly as they do today. On an explicit restricted policy they credit only when that policy names them. They are not treated as walking, running, or cycling.
+
+### 20.2 Route recommendations
+
+A route may recommend activity types. The recommendation is editorial. It does not filter credit, does not change eligibility, and does not create a route-level rule. On an unrestricted personal journey the participant may log any supported type, whether or not the route recommends it.
+
+Examples, stored as recommendations and not as restrictions:
+
+- Everest: `run`, `walk`, `hike`, `stair_climb`.
+- West Highland Way: `walk`, `hike`, `run`.
+- A future Golden Circle route: `cycle`, `run`, `walk`.
+
+The proposed package field is an optional `recommended_activity_types` array on `manifest.json`, ordered for display. The current importer rejects unknown manifest fields, so the field is not valid package content until the importer is updated in a later phase. Absence means the route has no recommendation. It does not mean the route is restricted. Import still does not change journey progress.
+
+The proposed table is `route_activity_recommendations (route_id, activity_type, position)` with a primary key of `(route_id, activity_type)` and a unique `(route_id, position)`. The route catalog returns the list in position order. It is not consulted when an activity is credited.
+
+### 20.3 Expedition eligibility
+
+A private expedition owner, or an organization owner or admin, sets the permitted activity types when the expedition is created. The choice is one of:
+
+- Unrestricted: every supported activity type, including types added after the expedition exists.
+- An explicit list of one or more supported types.
+- A preset, which is only a way to submit one of those two policies.
+
+The proposed presets expand at creation and are stored as the policy itself:
+
+- `on_foot` stores the explicit list `run`, `hike`, `walk`, `stair_climb`. It does not include `other`, `unspecified`, `cycle`, or `indoor_cycle`.
+- `cycling` stores the explicit list `cycle`, `indoor_cycle`.
+- `all` stores unrestricted, not a list of today's types.
+
+Preset membership is a proposed mapping. Confirm it before implementation. A preset is not a scoring model and is not re-expanded later. The stored policy is the authority. An optional label may remember which preset was used. Changing a preset's definition in a later release does not change expeditions already created.
+
+Global Everest stays unrestricted. A global expedition cannot be created with a restricted policy. Existing expeditions migrate as unrestricted. Their credited totals and result snapshots are not rewritten.
+
+The policy is immutable after creation. Organizers cannot change it, including when a new activity type is added to the product. A trigger rejects updates and deletes of the policy rows. Closing, archiving, and privacy removal do not change the policy.
+
+An empty list is rejected at creation. An expedition that accepts no activity type cannot be created.
+
+The expedition profile and any join surface return the policy before the participant joins. The client displays it. The client does not decide eligibility.
+
+### 20.4 Unrestricted and explicit policies
+
+Unrestricted and "every type we have today" are different policies.
+
+Unrestricted is a marker, not a list. When `cycle` is added, an unrestricted expedition already accepts it. When a later type is added, an unrestricted expedition accepts that too.
+
+An explicit list accepts only the names it stores. A list that happens to name every type supported on the day it was created is still restricted. A type added the next year is not on that list. The expedition cannot be edited to add it. A new expedition is required.
+
+A journey stores the same distinction. An unrestricted journey does not store a list of types. A restricted journey stores its own list. The list remains after the expedition that supplied it is left or closed. The journey does not need that expedition to stay active in order to keep the rules.
+
+### 20.5 Effective journey policy
+
+A personal journey with no restriction accepts every supported type. A journey that adopts a governing expedition's restricted policy accepts only that list. The effective policy decides which associated activities generate `journey_credits`. Expedition standings keep reading those same credits, with the participation and privacy rules in sections 5 and 16. There is no second calculation.
+
+The journey row holds the policy. A nullable `governing_expedition_id` records which active expedition currently supplies it. The id is null when the journey is unrestricted. It is also null when the participant has kept a restricted policy after the governor left and no successor qualifies under section 20.8. The type list on the journey, not the expedition row, is what a later credit uses.
+
+### 20.6 Compatibility and the governing expedition
+
+A journey has at most one governing expedition. Other expeditions may share that journey only when they are compatible with the journey's effective policy. A receiving expedition is compatible when it accepts every activity type the journey's effective policy permits.
+
+- An unrestricted journey can share, without a policy change, only with unrestricted expeditions. A running-only expedition does not accept every type an unrestricted journey permits.
+- A restricted journey can share with an unrestricted expedition, including Global Everest, because the unrestricted expedition accepts every type the journey permits.
+- A restricted journey can share with another restricted expedition when the other expedition's list contains every type on the journey's list. An equal list and a broader list can share. A narrower or disjoint list cannot share without a policy change.
+- Policies are not intersected or unioned to force a fit.
+
+Examples:
+
+- A running-governed journey also contributes to Global Everest.
+- Two expeditions that both allow only `run` may share the journey.
+- A running-governed journey cannot also contribute to a cycling-only expedition.
+
+When several active expeditions on the journey are compatible, the governor is chosen deterministically:
+
+1. Candidates are active participations on this journey whose expeditions are still active and whose restricted list equals the journey's effective list.
+2. Unrestricted expeditions are never the governor of a restricted journey. They share it without supplying the restriction.
+3. An unrestricted journey has no governor.
+4. If several candidates have the same list, the lowest expedition id wins.
+
+That tie-break is the rule, not a display preference. It does not change the policy, so it does not recalculate credits.
+
+Sharing is not the same action as adopting a stricter list. A join that does not change the journey's permitted types is a share. The new expedition must accept every type the current policy permits. Credits do not change. If its list equals the journey's list and its id is lower than the current governor's, it becomes the governor. That pointer change does not increment `progress_version`.
+
+A join whose list is a strict subset of the types the journey currently permits is a policy change, including an unrestricted journey joining any restricted expedition. The target becomes the governor and the journey stores that list. Before the change is applied, every other active participation on the same journey must accept every type in the new list. Narrowing cannot by itself make a previously sharing expedition fail that test, because a receiver that accepted the old list still accepts every type in the subset. A receiver that accepted a different type was not sharing the journey.
+
+Joining a broader expedition, including Global Everest, does not widen the journey. The existing governor stays. Credits do not change. No policy confirmation is required. A list that is neither a subset nor a superset, such as `{run, hike}` against `{run, cycle}`, is incompatible. It does not change the policy.
+
+An incompatible join does not withdraw any participation and does not alter another expedition's rows. The response is `409 activity_policy_conflict`. It names the journey policy, the types the target expedition does not accept, and every active participation that would not accept the policy the join would require. The participant can leave the conflicting expeditions through the existing leave path and then join, or they can abandon the join. This architecture does not add a combined leave-and-join. Doing both in one silent step would change participation records the participant had not asked to change.
+
+The one-active-organization-expedition constraint is unchanged. A second active organization expedition is still `409 already_in_organization_expedition`, before activity compatibility is considered.
+
+### 20.7 Joining while a journey is unfinished
+
+An unfinished journey may adopt a stricter policy. The activities stay as logged. Credits are recalculated from the eligible associated measurements, as in section 20.10.
+
+Example. The journey is unrestricted. Running and hiking have 6,000 feet of elevation. Cycling has 4,000 feet. The journey total is 10,000 feet. The participant joins a running-only expedition. The recalculated total is 6,000 feet. The cycling activity remains associated and credits nothing under the new policy.
+
+The server returns a preview before any row changes. The preview includes the current policy, the proposed policy, each current metric total, each proposed metric total, the count and measurement totals of associated activities that would credit nothing under the proposed policy, the current checkpoint, the resulting checkpoint, and the compatible and conflicting participations. Amounts are decimal strings. The client does not compute them.
+
+When the proposed policy differs from the current policy, the join is not committed until the participant submits the preview token. A join that does not change the policy uses the existing join path and does not require this token.
+
+The token is a new version, not the activity summit token. It binds the user, the journey, `progress_version`, the current policy fingerprint, the proposed policy fingerprint, the canonical proposed credit totals, and an expiry of ten minutes. It is signed with `SECRET_KEY`. On confirm, the transaction locks the rows in section 20.16, reloads them, and recomputes the preview. If `progress_version`, the policy, the participation set, or the proposed totals differ, the response is `409 stale_preview` and nothing is written. The client requests a new preview.
+
+If the recomputed totals meet every route target, the same confirm transaction also completes the journey. The preview says `will_complete: true` and the token covers the completion. The server does not apply the policy, leave the journey active at a full total, and wait for a second confirmation. It also does not complete the journey without the token. That is the resolution of the conflict between "the join and the recalculation are atomic" and "do not silently complete." A partial write is not allowed.
+
+The confirm transaction writes the policy, the governor, the recalculated credits, the participation, and, only when the token says the route is complete, the completion. `progress_version` increments once when any credited total changes. Narrative arrivals for checkpoints newly reached are returned from that same commit, using the section 18 contract. Checkpoints that fall below their threshold are locked again in that same commit.
+
+A paused journey on the expedition's route follows the existing activation rule: the confirm resumes it and pauses a different active route. The preview says that the journey will be resumed. An abandoned current journey still returns `409 restart_required` through the existing restart path in section 20.12. It is not recalculated in place.
+
+### 20.8 Leaving, closure, and succession
+
+When the governing expedition is left or closed, the journey does not open itself and does not change its totals. An automatic close still finishes on the close transaction. It does not wait for the participant. The final snapshot is written from the credits as they stand in that transaction, under the policy still in force. A later personal choice does not rewrite the snapshot and does not grant a completion the participant had not reached at close.
+
+If another active expedition on the same journey has the same restricted list, it becomes the governor under the tie-break in section 20.6. The policy does not change, so there is no pending choice and no recalculation.
+
+If no such successor exists, the journey keeps the current list and the current credits. `governing_expedition_id` becomes null. A durable pending choice is stored for that journey. The participant may later:
+
+1. Keep the current rules. The list stays. Previously excluded activities stay excluded. The pending row is cleared. The journey no longer needs the former expedition.
+2. Open the journey to every supported type. The list is removed, the policy becomes unrestricted, and credits are recalculated from every associated activity with a positive measurement. Previously excluded activities can credit. This uses the same preview, token, stale check, and completion rule as section 20.7.
+
+Until the participant chooses, home shows the pending choice and the journey behaves under the retained policy. No story unlocks and no journey completes in the background.
+
+Opening is refused with `409 activity_policy_conflict` when another active participation would not accept every type an unrestricted journey permits. The response names those expeditions. The participant keeps the current rules, or leaves the blocking expeditions and then opens. The open is not applied by withdrawing them automatically.
+
+A non-governing leave does not create a choice. If the participant leaves the governor and a same-list successor exists, succession handles it. If they leave a broader compatible expedition, the governor and the policy stay.
+
+The pending choice is one row per journey: the reason (`left` or `closed`), the former expedition id, and `pending`. Choosing keep or open deletes it. Restart does not copy it onto the new attempt. The old attempt keeps the row until that attempt is chosen or the account is deleted. Home reads the row for the current journey only when that journey is the one that still holds the policy. A completed journey never gains a pending choice, because its policy cannot change.
+
+### 20.9 Assignments that credit nothing
+
+One activity has at most one assignment, and that assignment has at most one journey. The activity row remains the measurement record.
+
+Three cases stay distinct:
+
+- Logged against this journey, currently ineligible or capped at zero. The assignment remains. There is no child credit row, because `credited_amount` must be positive. The association is the assignment, not a zero-amount credit.
+- Recorded with no active journey. No assignment. A later policy change does not collect it.
+- Assigned to a different attempt. Only that attempt's recalculation sees it. Restart does not move assignments.
+
+An activity created while a journey is active is logged against that journey even when its type is ineligible or every required metric is already full, provided it has at least one positive supplied measurement for a metric the route requires. The preview and the saved activity say why it credited nothing: `activity_type_not_eligible` or `metric_already_complete`. It remains in personal history. A later expansion of the same journey can credit it. An activity with no positive measurement still writes no assignment.
+
+The implemented service deletes the assignment when no positive credit remains. That delete is the behavior section 20 removes. Until the new rule is implemented, a zero-credit activity cannot be recovered by a policy change.
+
+Policy recalculation reads assignments for this journey only. It does not scan the user's other activities.
+
+### 20.10 Recalculation
+
+Ordinary saves keep the implemented incremental rule while the policy is stable. The edited activity is credited against the other credits already on the journey. It does not take credit back from them. A date-only edit does not change credits and does not increment `progress_version`.
+
+A full replay runs only when the eligible set changes. That is a policy change, a type edit that moves an associated activity into or out of the eligible set, or a delete of an associated activity that had been eligible. A measurement edit of an activity that stays eligible uses the incremental rule.
+
+This split is deliberate. Replaying every edit would reshuffle the cap and would change today's rule that a later activity cannot steal credit from an earlier one. Replaying unrestricted journeys during migration would change historical totals. Migration therefore does not replay. Existing credit rows stay where they are.
+
+When a replay does run, it reads original measurements on the journey's assignments, not the previous capped credits. For each required metric, independently:
+
+1. Eligible activities are those whose type the new policy accepts and whose measurement for that metric is positive.
+2. Order is `activity_journey_assignments.created_at` ascending, then `activities.id` ascending. `happened_on` is not the order. A date edit does not reshuffle. The assignment timestamp is the moment the activity was associated with this attempt, and the id breaks a tie.
+3. Walking that order, each activity receives `min(measurement, remaining target)`. A null or zero measurement adds nothing. An ineligible associated activity keeps its assignment and receives no credit row.
+4. The same inputs and the same policy produce the same credits.
+
+Credit rows for the journey's assignments are replaced in that transaction. `progress_version` increments if any stored total changes, and also if the policy changes even when the totals happen to match, because an ineligible activity's preview is now wrong. A preview token bound to the old version fails.
+
+The replay does not append `activity_logged`, `checkpoint_reached`, or `summit_reached`. Existing feed rows stay. After a replay they can name a checkpoint or an amount the live total no longer matches. The live board and the personal totals are the authority. Feed is not a second ledger and is not rewritten. That divergence is accepted.
+
+### 20.11 Narrative and scene
+
+Checkpoint reach uses the journey's capped personal totals after the policy in force. `display_credits_after` still does not affect the scene or the journal.
+
+If a stricter policy drops a total below a checkpoint threshold, that checkpoint locks. Its story and its pending arrival disappear. Home selects the scene for the new highest reached checkpoint, using the published-media rule in section 18.4. The acknowledgment row stays. Reaching the checkpoint again does not replay an arrival this attempt already acknowledged.
+
+If a wider policy newly reaches checkpoints, the confirm response returns those arrivals through the existing narrative contract. There is no permanent unlock flag and no expedition-specific story.
+
+### 20.12 Completed journeys, summit, and restart
+
+A completed journey and its credits stay immutable. It does not adopt a different policy. Joining an expedition that is compatible with the completed journey's stored policy points at that journey and does not recalculate. Joining one that is not compatible returns `409 restart_required`. `confirm_new_attempt` is the explicit new attempt. The completed journey is not rewritten.
+
+An expansion of an unfinished journey that satisfies every route target uses the confirm token in section 20.7. The journey stays active until that token commits. A policy change never completes a journey by itself, and it never completes an expedition that has already closed. A person who reaches the route only after the expedition closed is not added to the snapshot.
+
+Restart copies the effective policy onto the new attempt so the new journey is not silently unrestricted. Credits and assignments do not move. The old attempt keeps both. If the governor is still active and is repointed with the other active expeditions on that route, it governs the new attempt. A pending choice is not copied. The new attempt starts with no pending choice and with the policy that was in force, which preserves "do not expand automatically."
+
+`confirm_new_attempt` from an incompatible join is the exception. The new attempt adopts the expedition being joined, not the old policy. Every active expedition that would be repointed must be compatible with that new policy. If one is not, the confirm returns `409 activity_policy_conflict` and writes nothing. The participant leaves the conflicting expedition first. Global Everest remains compatible with any restricted new attempt. An ordinary restart, not prompted by an incompatible join, copies the old policy instead.
+
+Paused and abandoned journeys keep their stored policy. An edit that would finish one is still `409 resume_required` and writes nothing, including when the edit is a type change. Completion still requires an active journey and the summit token when the save itself would finish the route. A policy confirm that would finish the route uses the section 20.7 token rather than the activity token.
+
+### 20.13 Activity writes
+
+While the policy is stable, the implemented create, edit, and delete rules apply, with the assignment retention in section 20.9.
+
+- A new eligible activity credits as today and keeps its assignment.
+- A new ineligible activity with a positive required measurement keeps its assignment, writes no credit, and returns `activity_type_not_eligible`. The journey totals do not change. `progress_version` does not increment. The activity is still saved.
+- A measurement edit of an eligible activity uses the incremental rule. It can require summit confirmation, can return `resume_required`, and can increment `progress_version`.
+- A type edit that changes eligibility is a progress-affecting edit. It replays under section 20.10. It uses the same stale-preview and summit rules as a policy change when the replay would complete the route, and `resume_required` when the journey is paused or abandoned and the replay would finish it. A type edit that stays inside the eligible set, or stays outside it, and does not change measurements, does not replay and does not increment `progress_version`.
+- Deleting an associated activity removes its assignment and its credits. If it had eligible credit, the journey is replayed so the cap is redistributed in assignment order among the activities that remain. If it had no credit, the delete does not replay and does not increment `progress_version`.
+- A completed journey rejects measurement edits that would change a credit, rejects deletes of credited activities, and rejects a type edit that would change eligibility. Note, date, duration, and a type edit between two types that would not change the frozen credits stay allowed. Nothing on a completed journey is recalculated.
+- Account deletion remains the only bypass of the completed-journey freeze.
+
+### 20.14 Standings, privacy, and snapshots
+
+Live standings sum the journey's credit rows, filtered by `display_credits_after` when that cutoff is set. They do not sum a private expedition copy of the credits.
+
+`display_credits_after` compares an attribution time that is not the rewrite clock. The proposed table `journey_credit_origins (assignment_id, metric_code, first_credited_at)` is written the first time that assignment and metric receive a positive credit, and it is not deleted when a replay removes the credit row. A replay that inserts a credit copies the existing origin. A credit that has never existed gets `first_credited_at` equal to the transaction that first credits it. The board and the close snapshot include a credit only when its origin is null-cutoff or `first_credited_at >= display_credits_after`. Replacing a credit row does not make a pre-cutoff credit visible. An activity that was ineligible through the cutoff and becomes eligible later is new credit. Its origin is the expansion time, so a cutoff already in the past does not hide it, and a cutoff in the future is unaffected.
+
+The time at which a displayed total was reached uses those same origin timestamps, in origin order, not the insert time of a rewritten row. A real eligibility change can move that time because different activities contribute. A rewrite that preserves origins does not move it by itself.
+
+Privacy removal still deletes the participation, its feed rows, and its result rows. It does not delete activities, assignments, credits, or origins. Withdrawal still recomputes `retained_read_access` and `final_standings_eligible` from the journey state at leave and does not change them if the personal journey later opens and completes. Several expeditions can share one journey. Each applies its own cutoff to the same credits. A snapshot written at close stays immutable except for the subject's own privacy or account-deletion delete.
+
+### 20.15 Schema
+
+One new migration after `0010`. Do not edit `0001` through `0010`.
+
+- Extend `activities.activity_type` to include `cycle` and `indoor_cycle`.
+- `expeditions.activity_policy text not null default 'unrestricted'` with a check of `unrestricted` or `restricted`.
+- `expedition_activity_types (expedition_id, activity_type)` present only when the expedition is restricted, with at least one row in that case and none when it is unrestricted. A trigger rejects later changes.
+- `route_journeys.activity_policy text not null default 'unrestricted'`, same check.
+- `route_journeys.governing_expedition_id` nullable, references `expeditions`. Expeditions are not deleted on close, so the column is cleared by the leave and succession rules rather than by a cascade.
+- `journey_activity_types (journey_id, activity_type)` with the same empty-list rule as the expedition table.
+- `journey_policy_choices` one pending row per journey, as in section 20.8.
+- `journey_credit_origins` as in section 20.14.
+- `route_activity_recommendations` as in section 20.2.
+
+Backfill sets every existing expedition and journey to unrestricted, inserts no type rows, and does not update `journey_credits`, `journey_metric_totals`, feed rows, or result snapshots. Origins for credits that already exist are backfilled from `journey_credits.created_at` so the current cutoff behavior is unchanged. The board reads origins only after that backfill. Until the migration runs, `created_at` on the credit row remains the cutoff clock, which is why a replay must not be deployed before the origin table.
+
+Checks on the database reject an empty restricted policy and a type list on an unrestricted row. The service rejects unknown types, presets it does not define, and policy edits after creation. Both are required. The check constraint names the allowed activity types, including the two new ones, so a list cannot store a type the product does not support.
+
+### 20.16 Transactions
+
+The lock order is unchanged: users by id, expeditions by id, journeys by id, participations by id, activities by id, then credit and policy writes. A policy confirm locks every expedition that shares the journey and every activity assigned to the journey, in that order, before it deletes or inserts credit rows. It does not lock `journey_metric_totals`. The existing credit trigger still maintains that table. `SET CONSTRAINTS ALL` stays forbidden.
+
+Concurrency the tests must cover:
+
+- An activity save and a policy confirm both want the journey, then the activity. One waits. The loser reloads and either applies the new policy or returns `stale_preview`.
+- An edit and a join confirm serialize on the journey lock. A confirm that started from an older `progress_version` writes nothing.
+- Close locks the expedition before the journey, writes the snapshot from the credits it sees, and does not wait on a pending choice. A confirm that has not committed cannot change that snapshot.
+- Restart and a policy confirm cannot both repoint the same participations. The second waits on the journey and then sees the new attempt.
+- Two joins of different expeditions lock expeditions in id order before either changes the policy.
+- Privacy removal locks the expedition, then the journey, and does not rewrite credits. A replay that commits first preserves origins, so the cutoff still excludes the old credit.
+- A summit or policy token from before the other transaction commits fails the version check.
+
+No new advisory lock is added. The credit trigger's `pg_advisory_xact_lock(journey_id)` stays the only journey credit lock.
+
+### 20.17 Tests
+
+No tests are added in this phase. The implementation phase needs PostgreSQL tests on `TEST_DATABASE_URL` for: the new types and the cycling distance limit, unrestricted versus an explicit full list, preset expansion, immutable expedition policy, Global Everest staying unrestricted, recommendation import that does not change credits, zero-credit assignment retention, replay order and cap distribution, incremental edits that do not reshuffle, migration backfill that does not change totals, join preview and stale token, atomic confirm that completes only when the token says so, incompatible join that leaves other participations untouched, succession, pending keep and open, open blocked by another restricted expedition, close that snapshots before the choice, privacy origins across a replay, completed-journey rejection of an eligibility-changing type edit, restart copying policy, and `confirm_new_attempt` refusing to repoint an incompatible expedition.
+
+### 20.18 Implementation sequence
+
+After this document is reviewed, the order is the migration and origin backfill, then activity types and limits with unrestricted behavior unchanged, then expedition policy on create, then assignment retention, then replay, then join preview and confirm, then leave, close, and succession, then home and the proposed API fields, then route recommendations in the importer. Tests from section 20.17 land with the service they cover. No step rewrites a result snapshot or replays an unrestricted journey that has not changed policy.
+
+### 20.19 Unresolved before implementation
+
+- The cycling distance maximum. This section proposes 200 statute miles and does not treat that number as decided.
+- Preset membership. This section proposes `on_foot` as run, hike, walk, and stair climbing, and `cycling` as cycle and indoor cycle, with `other` and `unspecified` only by explicit name.
+- Whether a later product wants one request that leaves the conflicting expeditions and joins. This section requires separate leave and join so no participation changes silently.
+- Feed rows that disagree with the live total after a replay. This section leaves them in place. A product decision to annotate them would be a feed-contract change and is not part of this design.
+- Credit order uses assignment time and activity id, not `happened_on`, so a date edit stays a metadata edit. A calendar-order replay would make date edits progress-affecting and is not this design.
