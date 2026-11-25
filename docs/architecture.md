@@ -1149,6 +1149,8 @@ Keep the existing user, expedition, journey, participation, and activity lock or
 
 A nonmatch, inactive or retired definition, out-of-window or exhausted edition, and an already-issued deduplication key are typed skip outcomes. Check these before mutation or handle a known conflict inside a savepoint so no skipped candidate leaves a consumed number or an aborted transaction. Other eligible candidates may still issue. Unexpected errors, invalid active configuration, and broken persistence invariants propagate and roll back the completion, credits, feed, Trail Identity assignment, ledger entry, editions, awards, and reveals together. Send `newly_earned_achievements` only after commit and include only rows inserted by that transaction. A lost response is recovered from pending reveals. Retrying an old completion never runs a newly configured definition against it.
 
+Migration `0019_managed_award_event_time` resolves the managed award's event time from the completion ledger before the edition eligibility check. Eligibility windows use that qualifying completion time. Availability windows use the time of issuance.
+
 17.14 Personal trophy case and reveals
 
 Derive the collection from the owner's earned rows. Unlimited route awards with a durable route key form one collection per route, including renamed or removed routes. Use the most recently issued member's captured route title as the collection label. Each member detail uses its own snapshot. A route award without a durable grouping key remains an individual award. Limited editions are individual entries in a separate section, even when they refer to the same route. Other scopes are individual entries. A collection creates no award, rank, progress total, or additional stored membership.

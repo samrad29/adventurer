@@ -23,7 +23,7 @@ export function memoryTokenStore(initial: string | null = null): TokenStore {
   };
 }
 
-/** Keychain on iOS, encrypted SharedPreferences on Android. Not a login flow. */
+/** Keychain on iOS and encrypted SharedPreferences on Android. */
 export function secureTokenStore(key = ACCESS_TOKEN_KEY): TokenStore {
   const options = {
     keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,

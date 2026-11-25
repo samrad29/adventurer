@@ -15,7 +15,7 @@ Login, registration, and repeated bad bearer presentations share a process-local
 
 `GET /api/v1/session` returns `you` and, for a cookie caller, `csrf`. A bearer caller receives `csrf: null` and does not receive a new cookie session.
 
-Registration still honors `INVITE_CODE` when that setting is non-empty. It creates no journey and no expedition participation.
+Registration accepts `name`, `password`, and optional `invite`. The `invite` value is required when `INVITE_CODE` is configured. Login accepts `name` and `password`. Both return `you`, `token`, and `csrf`. The native app uses the token for subsequent requests. Registration creates no journey and no expedition participation.
 
 Account deletion (`POST /api/v1/account/deletion`) is not implemented. The deletion batches described in the domain architecture do not have a service yet. A deleting account is rejected as unauthenticated once `deletion_state` is set.
 

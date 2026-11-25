@@ -282,6 +282,7 @@ def test_upgrade_backfills_numbers_without_dispatching(app):
         attempt = _finish(user)["journey"]
         sql = Path(__file__).resolve().parents[1] / "migrations" / "sql"
         try:
+            database.execute("DROP TRIGGER earned_achievement_event_time ON adventurer.earned_achievements")
             database.raw.execute((sql / "0018_achievement_engine_down.sql").read_text(encoding="utf-8"))
             database.raw.execute((sql / "0018_achievement_engine.sql").read_text(encoding="utf-8"))
             assert database.execute(
@@ -291,3 +292,39 @@ def test_upgrade_backfills_numbers_without_dispatching(app):
             assert not database.execute("SELECT 1 FROM achievement_reveals").fetchone()
         finally:
             database.rollback()
+
+
+def test_edition_eligibility_uses_the_authoritative_completion_time(app):
+    with app.app_context():
+        database = get_db()
+        route = _route("event-time", "100")
+        user = create_adventurer("EventClimber", "trailhead")["id"]
+        start_journey(user, route)
+        journey = _finish(user)["journey"]
+        event = f"route_completed:{journey['id']}"
+        definition = _definition(route, "timestamp", "once_per_account_per_edition")
+        closed = _edition(database, definition, "prior", 1)
+        current = _edition(database, definition, "current", 1)
+        database.execute(
+            "UPDATE achievement_editions SET eligible_until = now() - interval '1 day' WHERE id = ?", (closed,),
+        )
+        database.execute(
+            "UPDATE achievement_editions SET eligible_from = now() - interval '1 day' WHERE id = ?", (current,),
+        )
+        database.commit()
+        insert = """
+            INSERT INTO earned_achievements (
+                user_id, definition_id, edition_id, route_id, source,
+                event_key, completion_event_key, event_at
+            ) VALUES (?, ?, ?, ?, 'route_completion', ?, ?, now() - interval '2 days')
+            RETURNING event_at
+        """
+        with pytest.raises(psycopg.errors.CheckViolation, match="outside its issuance window"):
+            database.execute(insert, (user, definition, closed, route, event, event))
+        database.rollback()
+        earned = database.execute(insert, (user, definition, current, route, event, event)).fetchone()
+        expected = database.execute(
+            "SELECT completed_at FROM route_completions WHERE event_key = ?", (event,),
+        ).fetchone()
+        assert earned["event_at"] == expected["completed_at"]
+        database.commit()

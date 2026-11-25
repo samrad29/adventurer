@@ -132,7 +132,7 @@ def _prepare_database() -> None:
                 is not None
                 and constraint is not None
                 and conn.execute(
-                    "SELECT to_regclass('adventurer.achievement_reveals')"
+                    "SELECT to_regprocedure('adventurer.resolve_managed_award_event_time()')"
                 ).fetchone()[0]
                 is not None
                 and "expired" in constraint[0]

@@ -1,179 +1,31 @@
+export type TrailNameReveal = {
+  name: string;
+  route_slug: string;
+  checkpoint_slug: string;
+};
+
 export type Viewer = {
   id: number;
   name: string;
-};
-
-export type SessionResponse = {
-  csrf: string;
-  you: Viewer | null;
-};
-
-export type RouteSummary = {
-  slug: string;
-  name: string;
-  region: string;
-  summary: string;
-  summit_ft: number;
-};
-
-export type RouteCheckpoint = {
-  slug: string;
-  name: string;
-  elevation_ft: number;
-  place: string;
-};
-
-export type RouteDetail = RouteSummary & {
-  checkpoints: RouteCheckpoint[];
-  expeditions: {
-    slug: string;
+  trail_name_display: "both" | "trail_only" | "hidden";
+  trail_identity: {
     name: string;
-    description: string;
-  }[];
+    assigned_at: string;
+    reroll_available: boolean;
+    reveal_acknowledged_at: string | null;
+  } | null;
+  trail_name_reveal: TrailNameReveal | null;
 };
 
-export type PublicExpedition = {
-  slug: string;
-  name: string;
-  description: string;
-  visibility: "public";
-  status: "active";
-  route: {
-    slug: string;
-    name: string;
-    region: string;
-    summit_ft: number;
-  };
-};
+export type Credentials = { name: string; password: string };
+export type Registration = Credentials & { invite?: string };
+export type AuthResponse = { token: string; csrf: string; you: Viewer };
+export type SessionResponse = { csrf: null; you: Viewer };
 
-export type Expedition = {
-  slug: string;
-  name: string;
-  description: string;
-  visibility: string;
-  status: string;
-  starts_at: string | null;
-  ends_at: string | null;
-  route: {
-    slug: string;
-    name: string;
-    region: string;
-    summit_ft: number;
-  };
-  participation_status: string | null;
-  is_owner: boolean;
-  can_join: boolean;
-  can_log: boolean;
-  can_manage: boolean;
-  checkpoints?: {
-    slug: string;
-    name: string;
-    elevation_ft: number;
-  }[];
-  progress?: Progress;
-  you?: Viewer | null;
-};
-
-export type ProgressStop = {
-  slug: string;
-  name: string;
-  elevation_ft: number;
-  place: string;
-  summary: string;
-  unlocked: boolean;
-  unlocks: unknown[];
-};
-
-export type Progress = {
-  slug: string;
-  name: string;
-  local_names: string[];
-  region: string;
-  route: string;
-  summit_ft: number;
-  summary: string;
-  total_ft: number;
-  percent: number;
-  summited: boolean;
-  remaining_ft: number;
-  current: ProgressStop | null;
-  next: ProgressStop | null;
-  to_next_ft: number | null;
-  stops: ProgressStop[];
-};
-
-export type ChallengeSummary = {
-  slug: string;
-  name: string;
-  region: string;
-  summit_ft: number;
-};
-
-export type ChallengeResponse = {
-  progress: Progress;
-  you: Viewer | null;
-};
-
-export type LeaderboardEntry = {
-  id: number;
-  name: string;
-  total_ft: number;
-  last_on: string | null;
-  camp: string;
-  percent: number;
-};
-
-export type LeaderboardResponse = {
-  leaderboard: LeaderboardEntry[];
-};
-
-export type ActivityInput = {
-  elevation_ft: string;
-  distance_km?: string;
-  happened_on?: string;
-  note?: string;
-};
-
-export type ActivityCredit = {
-  expedition_slug: string;
-  expedition_name: string;
-  elevation_ft: number;
-};
-
-export type Activity = {
-  id: number;
-  activity_date: string;
-  happened_on: string;
-  elevation_ft: number;
-  distance_km: number | null;
-  note: string;
-  created_at: string;
-  source: string;
-  activity_type: string;
-  verification_status: string;
-  credits: ActivityCredit[];
-};
-
-export type Invitation = {
-  id: number;
-  status: string;
-  expires_at: string;
-  username: string | null;
-  kind: "link" | "username";
-};
-
-export type ShareLink = {
-  id: number;
-  expires_at: string;
-  token: string;
-  kind: "link";
-};
-
-export type OkResponse = {
-  ok: true;
-};
-
-export type LogCreated = {
-  progress: Progress;
-  opened: string[];
+// The subset of the home contract used by the foundation screen.
+export type HomeResponse = {
+  you: Viewer;
+  state: "active" | "resume" | "completed" | "abandoned" | "ready";
+  journey: { id: number; status: "active"; route: { slug: string; name: string } } | null;
+  trophy_case: { earned_count: number; pending_reveal_count: number };
 };

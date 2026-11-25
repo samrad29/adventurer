@@ -1,15 +1,23 @@
-import { Stack } from "expo-router";
-import { Text, View } from "react-native";
+import { Redirect } from "expo-router";
+import { ActivityIndicator, Button, Text, View } from "react-native";
 
-import { apiBaseUrl } from "@/config/env";
+import { useAuth } from "@/auth/auth-context";
 
-export default function FoundationScreen() {
+export default function Entry() {
+  const { state, restore, logout } = useAuth();
+  if (state.status === "signedIn") return <Redirect href="/home" />;
+  if (state.status === "guest") return <Redirect href="/login" />;
   return (
     <View style={{ flex: 1, justifyContent: "center", padding: 24, gap: 12 }}>
-      <Stack.Screen options={{ title: "The Adventurer" }} />
-      <Text>Mobile foundation</Text>
-      <Text>Product screens are not part of this build.</Text>
-      <Text selectable>API base URL: {apiBaseUrl()}</Text>
+      {state.status === "loading" ? (
+        <ActivityIndicator accessibilityLabel="Checking session" />
+      ) : (
+        <>
+          <Text accessibilityRole="alert">{state.message}</Text>
+          <Button title="Retry" onPress={() => void restore()} />
+          <Button title="Sign out on this device" onPress={() => void logout()} />
+        </>
+      )}
     </View>
   );
 }
