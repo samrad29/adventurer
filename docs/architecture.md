@@ -1392,7 +1392,7 @@ Expedition membership does not grant a story the personal journey has not reache
 18.6 What stays outside
 
   No branching, no per-user story text, and no generated prose.
-  The per-account trail name drawn in challenges.py is not a table in 0010. The shared checkpoint name is the name. Retiring that draw is a product decision. It is not part of this schema.
+  Trail Identity belongs to the account under section 21. Journal entries, arrival titles, and checkpoint labels use the shared editorial names. The account's reveal accompanies that content as a separate field.
   No user photographs, comments, or social posts. Section 13 stays deferred.
   Achievements stay section 17. Reading a story does not issue an award.
   Forecasts stay section 16.6. A story does not move the pace dot.
@@ -1412,10 +1412,9 @@ Steps 1, 2, 4, and 5 are done. The authoring pipeline in docs/content-authoring.
 
 These are not settled by the rest of this document.
 
-  1. The per-account trail name in challenges.py. Section 18.6 leaves it out of 0010. Retiring the draw, or keeping it as a label beside the shared checkpoint name, needs a product decision.
-  2. A retired story or media row is hidden from every caller, including an attempt that already acknowledged it. The alternative is to keep serving it to attempts that have a view row. Section 18.4 already blocks publishing an undocumented or noncommercial photograph. Retirement is how a published asset is pulled later.
-  3. Route photography bytes stay in adventurer/static/photos until a later move to object storage or a CDN. The column is only a path. Organization logo and cover storage is section 19 and uses a different bucket from these route files.
-  4. Published chapter titles and their checkpoint slugs are public on the route catalog. Bodies are not. If a title would spoil a later place, the catalog rule needs to change before implementation.
+  1. A retired story or media row is hidden from every caller, including an attempt that already acknowledged it. The alternative is to keep serving it to attempts that have a view row. Section 18.4 already blocks publishing an undocumented or noncommercial photograph. Retirement is how a published asset is pulled later.
+  2. Route photography bytes stay in adventurer/static/photos until a later move to object storage or a CDN. The column is only a path. Organization logo and cover storage is section 19 and uses a different bucket from these route files.
+  3. Published chapter titles and their checkpoint slugs are public on the route catalog. Bodies are not. If a title would spoil a later place, the catalog rule needs to change before implementation.
   5. A view row survives an edit or delete that drops the checkpoint below its thresholds. The content is hidden until the same attempt reaches it again, and the automatic reveal does not play twice. Deleting the view on relock would show the reveal again.
   6. Discovery bodies are prose. A recipe does not get an ingredients table in 0010. Add columns later if the layout needs them.
 
@@ -2012,3 +2011,68 @@ These consequences are accepted and are not open product choices:
 - The allocator writes no feed row. A new credited activity appends `activity_logged`, `checkpoint_reached`, and, when it completes the journey, `summit_reached`. A measurement correction or eligibility change appends `summit_reached` only when that confirmed save completes the journey. A deletion or a metadata edit appends nothing.
 - A missing, expired, or stale activity summit token is `409 confirmation_required`. A missing policy confirmation is `409 confirmation_required`. A policy confirmation that does not match is `409 stale_preview`.
 - An activity that lost its assignment under the running service is not put back. A later explicit measurement edit may assign it to the journey that is active then.
+
+
+21. Trail Identity
+
+This is a proposed account and presentation contract. The server draws a trail name when the account first newly reaches an editorially configured qualifying checkpoint. The name belongs to the account across routes and attempts. The account may reroll once and may edit its display preference independently of that reroll.
+
+This supersedes the per-account draw and temporary board-label behavior described in the legacy `challenges.py` prose. Curated route and checkpoint names remain canonical in geography, stories, journal links, scenes, progress, feed checkpoint fields, and final results. Trail names are presentation labels. Account usernames and their normalized keys continue to identify logins, invitations, and membership or ownership operations.
+
+21.1 Storage and editorial configuration
+
+Use a new migration for the following schema. Apply the existing server-only table conventions, including RLS and client-role revocations on new tables and sequences.
+
+- `trail_name_pool` stores a stable ID, a curated display string, a unique normalized name key, and active or retired status. Normalize by trimming, collapsing whitespace, and casefolding for comparisons. Treat the name and key as immutable once published. Keep retired rows for existing references. Load the pool from separately reviewed, versioned editorial data through a validated import. Draw uniformly from active distinct entries on the server. A pool that serves enabled checkpoints or existing rerolls must have at least two distinct active names. Validate replacements atomically. Draws can assign the same name to multiple accounts.
+- `trail_identity_checkpoints` references existing route checkpoint IDs, with one row per configured checkpoint. A later editorial route package adds an optional `trail_identity_checkpoint_slugs` list of unique checkpoint slugs on that route. Import replaces only that route's configuration. An omitted or empty list represents no qualifying checkpoints. Validate all slugs before applying the package. Configuration applies prospectively and importing it writes neither progress nor identities.
+- `user_profiles.trail_name_display` stores `both`, `trail_only`, or `hidden`, defaults to `both`, and may be set before assignment. Keep the existing profile display name separately.
+- `user_trail_identities` has one row per user, enforced by a primary key on `user_id`. Store the original and current pool IDs, current name text captured at draw time, assignment time, the qualifying route and checkpoint slugs captured at assignment, an optional reveal acknowledgment timestamp, and paired nullable reroll timestamp and request key. Before reroll, current and original IDs match. After reroll, they differ. Enforce the paired reroll fields and the one-way transition in the database. Original assignment and qualifying provenance are immutable. The row is owned by the user and is deleted with the account. Provenance uses stored slugs and has no dependency on the original attempt or participation.
+- At close, `expedition_result_entries` adds nullable captured trail-name text and capture visibility for the two name components. Keep its existing captured profile name and ranking inputs. New `expedition_updates` rows capture the permitted actor name components and mark that capture as present. Keep the name text in the history rows themselves so it survives pool retirement and rerolls. Distinguish legacy rows from new rows with a capture that contains no visible components.
+
+21.2 Unlock and transaction
+
+Reuse the before-and-after checkpoint assessment from sections 16, 18.3, and 20. Compare the committed candidate progress in storage meters against all checkpoint requirements on the affected journey. A qualifying event is a checkpoint newly reached by a successful progress write, including a measurement correction or a confirmed eligibility change that newly reaches one. Evaluate configured checkpoints independently of story publication and expedition display cutoffs. When one write newly reaches several qualifying checkpoints, use the first by checkpoint position. A write that is rejected, a preview, a read, a journal acknowledgment, an editorial import, and a historical repair never assign an identity. Existing reached checkpoints are not backfilled by this release. A later genuine qualifying crossing can assign an identity to an account that still has none.
+
+Use the existing transaction and user-first lock order. Under the same user row lock used by progress, read whether the account already has an identity, complete validated credit and lifecycle writes, and insert the single account row before any feed rows whose captured actor should show the new name. The identity and triggering progress commit together. A rollback leaves neither change. The user lock and primary key serialize simultaneous qualifying actions across attempts and routes. An existing row wins even if the original attempt was restarted or the checkpoint relocked. There is no new journey or totals lock, and identity assignment adds no credit, progress version change, award, or feed event of its own.
+
+Read eligible pool entries from one committed pool version. If an inconsistent pool prevents a qualifying first assignment, fail that transaction with `503 trail_name_pool_unavailable` so a retry after correction can still perform the crossing. Never use a client-supplied name or a deterministic hash of the account.
+
+21.3 Reveal and reroll
+
+On the first successful assignment, return an owner-only pending reveal with the captured qualifying checkpoint slugs and the owner's current trail identity. An existing published checkpoint arrival may carry the reveal alongside its editorial content. A missing or unpublished story does not prevent assignment or the account reveal. Home and the owner profile surface the pending reveal until it is acknowledged, including after a lost response, restart, or relock. A reveal recovered outside an accessible story contains identity and provenance only. The standard journal access rules still govern story bodies and discoveries.
+
+The reveal acknowledgment is account-wide and returns its original timestamp on retry. Existing `journey_story_views` continue to acknowledge editorial arrivals per attempt. Neither acknowledgment writes the other, and reroll does not reopen the initial reveal. The owner can read their assigned name even in hidden mode.
+
+Reroll requires an assigned identity, explicit confirmation, and a client-generated request key stable across retries. Under the user lock, check for a previously committed reroll before selecting. The same key returns the name already drawn without changing the reroll timestamp or drawing again. A different key after the first committed reroll fails. A new draw excludes the current normalized name even if it has been retired. Store the new name, pool ID, timestamp, and request key in one transaction. If the transaction fails or no different active name is available, the reroll remains unused. Preference edits, pool retirement, and journey or expedition changes cannot restore the reroll.
+
+21.4 Proposed HTTP and presentation contracts
+
+These extensions use the existing cookie or bearer authentication and CSRF rules. The acting account comes from authentication. Profile writes recheck under the user lock that the account is active. Owner-only responses expose `trail_identity` as null until assignment and then as an object with `name`, `assigned_at`, `reroll_available`, and `reveal_acknowledged_at`. They expose `trail_name_display` even before assignment. A pending `trail_name_reveal` contains `name`, `route_slug`, and `checkpoint_slug`, and is null once acknowledged. Reroll request keys and pool IDs stay internal.
+
+| Surface | Proposed addition |
+| --- | --- |
+| `GET /api/v1/session` and `GET /api/v1/home` | Owner identity, preference, and pending reveal in `you`. Home stays one read-only snapshot and supports the reveal without an active journey. |
+| `PATCH /api/v1/profile/trail-identity` | Set `trail_name_display` to one of the three values. Return the owner identity and preference. Repeating the same setting is a no-op. |
+| `POST /api/v1/profile/trail-identity/reroll` | Accept `confirm: true` and `request_key`. Return the owner identity and preference. |
+| `POST /api/v1/profile/trail-identity/reveal-acknowledgment` | Return the account acknowledgment timestamp, writing it only once. |
+| Committed progress writes and the owning journey's journal detail | A write that assigns the name adds `trail_name_reveal` to the successful response. Journal detail may expose the pending reveal only at the qualifying checkpoint under existing owner, reach, and publication checks. Identity recovery lives on home and session. |
+| Expedition roster, live and final leaderboard, and updates | Existing authorized rows expose preference-filtered `profile_name` and `trail_name` and a safe `display_name` label. Name fields do not grant board, roster, or feed access. |
+
+Return `400 invalid` for an unknown preference, missing reroll confirmation, or missing or invalid request key. Return `409 trail_identity_locked` for reroll or reveal acknowledgment before assignment, `409 trail_reroll_used` for a distinct request after reroll, and `503 trail_name_pool_unavailable` when a required draw cannot run. An exact reroll retry returns success even when the pool later changes.
+
+For an assigned account, `both` exposes both components, `trail_only` exposes only the trail name, and `hidden` hides the trail name while retaining ordinary profile-name presentation. Before assignment, show the ordinary profile name. Serialize suppressed components as null, and derive `display_name` from the visible components or the neutral label “Adventurer” when none is visible. Apply this projection to existing name fields and alternate representations on these surfaces. Never fall back to username, initials from a suppressed name, or a raw snapshot field. Access-controlled administrative account identification continues to follow its own contract. Display preferences govern presentation and give duplicate names no effect on identity, credits, ranking, or sorting.
+
+21.5 History, authorization, and deletion
+
+Live roster and board reads use the current name and preference. Final results and newly captured feed rows read their name text from the historical capture, and apply the subject's current preference as an additional visibility limit. A preference change can hide previously visible text. It can reveal a captured component again only if the component was visible when captured. Reroll never substitutes new text into old rows. Existing final results have only the historical profile component. Existing feed rows retain their current profile lookup under the current visibility limit and acquire no retroactive trail name. Preserve event times, checkpoint names, result ordering, metrics, and final ranks. Keep raw historical labels and ranking inputs out of outward payloads.
+
+The profile owner may manage or see the private identity and reveal state. Other viewers see only permitted presentation fields on surfaces they are already authorized to read. Anonymous catalogs and public expedition profiles gain no participant trail identity, and there is no lookup or login by trail name. Section 5.9 remains the authority for expedition privacy removal. It deletes the same feed, result, and participation rows, including their name snapshots, while retaining the personal trail identity. Rejoining does not restore historical visibility or access. Ordinary leave, restart, relock, and expedition archival retain the account identity. Section 5.10 removes the identity, preference, reveal and reroll metadata, and the account's feed and result snapshots during account deletion. It leaves the shared pool and other accounts' assignments intact.
+
+21.6 Regression coverage
+
+- Test editorial validation, scope of replacement, minimum pool size, duplicate normalized names within the pool, and permitted duplicate assignments across accounts.
+- Test first qualifying reach on elevation, distance, and combined thresholds, including multiple crossed checkpoints, confirmed corrections or eligibility changes, and a configured checkpoint without a published story. Test that a preview, rejected write, read, import, and historical repair create no identity.
+- Test rollback of progress, identity, and any feed capture together, concurrent first reaches for one account, and a retry after commit. Test stable provenance and reveal recovery after relock or restart, plus independent account and story acknowledgments.
+- Test reroll excludes the prior name, serializes concurrent requests, returns the committed result on the same key, rejects another key, and keeps the chance available after rollback or a failed draw.
+- Test each preference before and after assignment and reroll across owner and authorized shared responses. Cover cookie CSRF, bearer authentication, forbidden journal access, blocked private-board access, null suppressed fields, and protection against raw-name fallback.
+- Test historical name capture, live presentation after reroll, redaction after preference changes, legacy rows, and stable ranks, checkpoint names, and event ordering. Test leave, archive, privacy removal, rejoin, and account deletion with another user holding the same trail name.
