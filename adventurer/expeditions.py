@@ -2283,6 +2283,8 @@ def _finish_join_policy(database, user_id: int, journey, decision) -> dict:
         result = {"arrivals": applied["arrivals"]}
         if applied["trail_name_reveal"] is not None:
             result["trail_name_reveal"] = applied["trail_name_reveal"]
+        if "newly_earned_achievements" in applied:
+            result["newly_earned_achievements"] = applied["newly_earned_achievements"]
         return result
     refresh_governor(database, journey["id"], reason=None, former_id=None)
     return {"arrivals": []}

@@ -132,7 +132,7 @@ def _prepare_database() -> None:
                 is not None
                 and constraint is not None
                 and conn.execute(
-                    "SELECT to_regclass('adventurer.user_trail_identities')"
+                    "SELECT to_regclass('adventurer.achievement_reveals')"
                 ).fetchone()[0]
                 is not None
                 and "expired" in constraint[0]
@@ -152,7 +152,9 @@ def _wipe(application) -> None:
         database.execute(
             "UPDATE users SET deletion_state = 'deleting' WHERE deletion_state IS NULL"
         )
-        database.execute("TRUNCATE achievement_editions, achievement_definitions, earned_achievements")
+        database.execute("TRUNCATE achievement_editions, achievement_definitions, earned_achievements, achievement_reveals")
+        database.execute("DELETE FROM user_trail_identities")
+        database.execute("DELETE FROM route_completions")
         database.execute("TRUNCATE trail_identity_checkpoints, user_trail_identities, trail_name_pool")
         database.execute("DELETE FROM expedition_updates")
         database.execute("DELETE FROM expedition_result_entries")

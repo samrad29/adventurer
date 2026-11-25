@@ -25,6 +25,7 @@ from .narrative import pending_arrivals
 from .scene import select_scene
 from .services import read_adventurer
 from .trail_identity import owner_identity
+from .trophy_case import home_summary
 
 
 def compose_home(user_id: int) -> dict:
@@ -67,6 +68,7 @@ def compose_home(user_id: int) -> dict:
         )
         invitations = _invitations(database, user_id)
         identity = owner_identity(database, user_id)
+        trophy_case = home_summary(database, user_id)
     except JourneyError:
         database.rollback()
         raise
@@ -81,6 +83,7 @@ def compose_home(user_id: int) -> dict:
         "paused_journeys": paused_bodies,
         "expeditions": expeditions,
         "incoming_invitations": invitations,
+        "trophy_case": trophy_case,
     }
 
 

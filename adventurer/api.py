@@ -89,6 +89,7 @@ from .route_recommendations import recommendations_for_routes
 from .services import AccountError, authenticate, create_adventurer, current_viewer, get_adventurer
 from .tokens import issue_token, revoke_all, revoke_token
 from .trail_identity import TrailIdentityError, change_identity, owner_identity
+from . import trophy_case
 
 bp = Blueprint("api", __name__, url_prefix="/api/v1")
 
@@ -119,6 +120,7 @@ def init_app(app) -> None:
     app.register_error_handler(JourneyError, _render_journey)
     app.register_error_handler(ActivityError, _render_service)
     app.register_error_handler(TrailIdentityError, _render_service)
+    app.register_error_handler(trophy_case.TrophyCaseError, _render_service)
     app.register_error_handler(ExpeditionError, _render_service)
     app.register_error_handler(PolicyError, _render_service)
     app.register_error_handler(NarrativeError, _render_service)
@@ -284,7 +286,46 @@ def journeys_policy_choice(journey_id: int):
     chosen = _with_metrics([choose_activity_policy(_actor(), journey_id, choice, token)])[0]
     arrivals = chosen.pop("arrivals", [])
     reveal = chosen.pop("trail_name_reveal", None)
-    return _ok(journey=chosen, arrivals=arrivals, **_trail_reveal(reveal))
+    additions = _trail_reveal(reveal)
+    if "newly_earned_achievements" in chosen:
+        additions["newly_earned_achievements"] = chosen.pop("newly_earned_achievements")
+    return _ok(journey=chosen, arrivals=arrivals, **additions)
+
+
+@bp.get("/trophy-case")
+def trophy_case_list():
+    actor = _actor()
+    try:
+        limit = int(request.args.get("limit", "20"))
+        raw_key = request.args.get("collection_key")
+        key = int(raw_key) if raw_key is not None else None
+        pending = request.args.get("pending_only", "false")
+        if not 1 <= limit <= 100 or (key is not None and not 1 <= key < 2**63):
+            raise ValueError
+        if pending not in ("true", "false"):
+            raise ValueError
+    except ValueError:
+        raise ApiError("invalid", "Invalid trophy case filters.", status=400) from None
+    return _ok(**trophy_case.list_awards(
+        actor, limit=limit, cursor=request.args.get("cursor"),
+        collection_key=key, pending_only=pending == "true",
+    ))
+
+
+@bp.get("/trophy-case/<int:award_id>")
+def trophy_case_detail(award_id):
+    actor = _actor()
+    if not 0 < award_id < 2**63:
+        raise ApiError("not_found", "That award does not exist.", status=404)
+    return _ok(award=trophy_case.award_detail(actor, award_id))
+
+
+@bp.post("/trophy-case/<int:award_id>/reveal-acknowledgment")
+def trophy_case_acknowledgment(award_id):
+    actor = _actor()
+    if not 0 < award_id < 2**63:
+        raise ApiError("not_found", "That award does not exist.", status=404)
+    return _ok(**trophy_case.acknowledge_reveal(actor, award_id))
 
 
 def _trail_reveal(reveal):

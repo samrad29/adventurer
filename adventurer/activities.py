@@ -43,6 +43,7 @@ from .db import get_db
 from .journey_progress import CheckpointMark, assess_checkpoints, read_journey_progress
 from .metrics import FOOT_IN_METERS, MILE_IN_METERS, STORAGE_QUANTUM, MetricError, parse_measurement
 from .narrative import arrival_reveals
+from .achievement_engine import finalize_route_completion
 from .trail_identity import assign_at_checkpoint, display_names, social_names
 
 MANUAL_EVENT_REASON = "Manual entry. Manual entries are not independently verified."
@@ -222,6 +223,8 @@ def create_activity(
         )
         if reveal is not None:
             saved["trail_name_reveal"] = reveal
+        if proposal["will_complete"]:
+            saved["newly_earned_achievements"] = finalize_route_completion(database, journey["id"])
         saved["no_credit_reason"] = _no_credit_reason(
             journey, measurements, proposal["credits"], changes["activity_type"]
         )
@@ -410,6 +413,8 @@ def update_activity(
         )
         if reveal is not None:
             saved["trail_name_reveal"] = reveal
+        if proposal["will_complete"]:
+            saved["newly_earned_achievements"] = finalize_route_completion(database, credit_journey["id"])
         saved["no_credit_reason"] = _no_credit_reason(
             credit_journey, measurements, proposal["credits"], activity_type
         )
@@ -1460,8 +1465,11 @@ def apply_eligibility(
         arrivals = arrival_reveals(database, journey_id, reached)
     if finish:
         _write_summit_feed(database, user_id, None, journey, resulting)
-    return {"arrivals": arrivals, "completed": finish, "resulting": resulting,
-            "trail_name_reveal": reveal}
+    applied = {"arrivals": arrivals, "completed": finish, "resulting": resulting,
+               "trail_name_reveal": reveal}
+    if finish:
+        applied["newly_earned_achievements"] = finalize_route_completion(database, journey_id)
+    return applied
 
 
 def _bind_new_assignment(slots, assignment_id: int) -> None:

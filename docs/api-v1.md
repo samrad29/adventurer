@@ -19,7 +19,17 @@ Registration still honors `INVITE_CODE` when that setting is non-empty. It creat
 
 Account deletion (`POST /api/v1/account/deletion`) is not implemented. The deletion batches described in the domain architecture do not have a service yet. A deleting account is rejected as unauthenticated once `deletion_state` is set.
 
-The achievement database and internal issuance foundation are implemented in architecture section 17. Achievement issuance and trophy case endpoints remain deferred.
+## Achievements and trophy case
+
+Confirmed journey completions return `newly_earned_achievements` at the top level, including an empty list when no award qualifies. Home returns `trophy_case` with `earned_count`, `pending_reveal_count`, and up to three recent `pending_awards`.
+
+| Method | Path | Response |
+| --- | --- | --- |
+| GET | `/api/v1/trophy-case` | `awards`, `route_collections`, and `next_cursor`. Accepts `limit`, `cursor`, `collection_key`, and `pending_only=true`. |
+| GET | `/api/v1/trophy-case/<award_id>` | `award` with historical presentation, safe captured context, and reveal state. |
+| POST | `/api/v1/trophy-case/<award_id>/reveal-acknowledgment` | `acknowledged_at`, stable on retry. |
+
+These routes are private to the authenticated owner. Another user's award and an unknown award both return `404 not_found`. Collection summaries distinguish successful `completion_count` from `award_count`. Award summaries include historical presentation metadata and the qualifying completion number and time when available. Limited editions have separate entries. See architecture sections 17.12–17.15.
 
 ## Trail Identity
 
@@ -609,4 +619,4 @@ Restart of an unfinished or finished attempt copies the journey's effective poli
 2. Send `Authorization: Bearer` on later requests. Native clients do not need CSRF. A browser client that uses the cookie must send `X-CSRF-Token`.
 3. Treat 409 `restart_required` and `confirmation_required` as instructions to show a confirmation step, then call restart or resubmit with the new token. Do not retry a stale summit token.
 4. Use `GET /api/v1/home` for the first screen. The implemented payload reports elevation in feet. The target payload in the metric section reports one object per required metric, in feet or miles, and does not add those objects together. Activity elevation is feet. The target distance field is miles.
-5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API. Achievement and trophy-case routes are not in this contract. The domain is `docs/architecture.md` section 17. Chapter, journal, acknowledgment, activity arrival, and home pending-arrival routes are implemented. Scene selection from published `route_media` is implemented. Launch content is not seeded. Cycling activity types, zero-credit assignments, credit origins, expedition activity policies, policy previews, and `resolve_activity_policy` are implemented. Editorial route recommendations are implemented.
+5. Account deletion, anonymous public expedition profiles, and push or email delivery are not available yet. The HTML activity and expedition pages still call the legacy platform module and are not this API. Automatic route-completion issuance and private trophy case routes follow `docs/architecture.md` section 17. Chapter, journal, acknowledgment, activity arrival, and home pending-arrival routes are implemented. Scene selection from published `route_media` is implemented. Launch content is not seeded. Cycling activity types, zero-credit assignments, credit origins, expedition activity policies, policy previews, and `resolve_activity_policy` are implemented. Editorial route recommendations are implemented.

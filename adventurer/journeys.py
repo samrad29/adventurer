@@ -246,6 +246,8 @@ def choose_activity_policy(user_id: int, journey_id: int, choice: str, confirmat
         presented = present_journey(database, journey["id"], applied["arrivals"])
         if applied["trail_name_reveal"] is not None:
             presented["trail_name_reveal"] = applied["trail_name_reveal"]
+        if "newly_earned_achievements" in applied:
+            presented["newly_earned_achievements"] = applied["newly_earned_achievements"]
         return presented, True
 
     return _commit(write)
