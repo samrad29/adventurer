@@ -996,7 +996,7 @@ A definition carries:
   A stable identifier.
   A name and a description.
   A scope, from 17.2.
-  Eligibility criteria that a later implementation can evaluate one source at a time. This is not a general-purpose rules engine. The sources are the ones in 17.5. A definition does not embed a programmable rule language. A later source adds its own check.
+  A named evaluator, versioned criteria, and an explicit issuance rule for automatically issued definitions. Section 17.12 specifies the proposed engine and validation.
   Availability: active, inactive, or retired. Active definitions may be issued. Inactive definitions are withheld. Retired definitions accept no further issuance, including no further editions. All three leave awards already issued in place.
   Optional collectible presentation, from 17.3.
   An optional default for future editions, from 17.4. That default is not a scope, and it is not the rules of an edition already issued.
@@ -1051,11 +1051,11 @@ Five steps stay separate. None of them is inferred from the others, and they do 
 Issuance is durable, idempotent, transactional, and traceable.
 
   The earned row remains after the expedition ends, after the person leaves, after they lose access to that expedition's active experience, after an organization membership changes, and after the expedition is archived. It does not depend on an active participation row.
-  The same user, the same definition, the same edition when the award belongs to an edition, and the same qualifying event produce one award, unless that definition explicitly allows repeats. A repeatable definition says so. A later edition is a different cohort, so an award from an earlier edition does not fill it.
+  The running foundation deduplicates by user, definition, optional edition, source, event key, and repeat key. Automatic issuance uses the explicit rules in section 17.12. A later edition is a different cohort, so an award from an earlier edition does not fill it.
   The earned row, the historical context it keeps, and any edition identity, sequence number, and edition size commit together.
   The row records its source: the qualifying event, or an authorized grant.
 
-The foundation accepts route completion, expedition completion, a global personal milestone, a community award, and an authorized administrative grant as source identifiers. Each future issuer must check eligibility or authorization before calling `issue_achievement` in its own transaction. The caller supplies a stable source event or grant key. A repeatable definition can distinguish intentional repeats with a separate stable repeat key. Retries return the original award, including after an edition fills or the definition retires.
+The foundation accepts route completion, expedition completion, a global personal milestone, a community award, and an authorized administrative grant as source identifiers. A trusted caller checks eligibility or authorization and supplies a stable source event or grant key to `issue_achievement`. Foundation callers can distinguish intentional repeats with a stable repeat key when the definition allows them. Retries return the original award, including after an edition fills or the definition retires. Section 17.12 defines the automatic route-completion caller.
 
 PostgreSQL captures the award presentation and edition identity at issuance. An earned row keeps durable definition and edition identities. Optional live route, expedition, activity, and organization references clear when the referenced record disappears. The service snapshots route, expedition, and organization names and slugs, plus activity type and date when applicable. These snapshots carry no standings, credits, or personal notes.
 
@@ -1115,11 +1115,68 @@ This sequence does not reorder or block the journey, activity, and expedition wo
 
   1. Architecture foundation. This section.
   2. Database schema and transactional issuance foundation. This includes edition counters and numbering guarantees, because numbering and insertion share the issuance transaction. Definitions are unseeded.
-  3. A basic personal trophy case.
+  3. Implement the synchronous engine and route-completion evaluator, then the private trophy case, home summary, and recoverable reveal contracts in sections 17.12–17.15.
   4. Route-specific collectible presentation and shareable achievement cards.
   5. Limited-edition presentation, including more than one edition of the same achievement, then physical reward claim and fulfillment.
 
-Step 2 is implemented. The future account deletion batch can call `delete_earned_achievements` before deleting the user. PostgreSQL requires both the deleting state and the transaction flag for this operation. The account deletion endpoint, source-specific issuers, and trophy case API remain deferred.
+Step 2 is implemented. The future account deletion batch can call `delete_earned_achievements` before deleting the user. PostgreSQL requires both the deleting state and the transaction flag for this operation. Sections 17.12–17.15 specify proposed behavior for step 3. Editorial achievement imports, additional evaluators, launch definitions, rendering, merchandise, and mobile UI remain deferred.
+
+17.12 Engine and configuration
+
+The engine handles typed domain events synchronously in the producer's transaction. The completion service emits a single `route_completed` event after a successful transition to completed. The engine owns evaluator dispatch, definition selection, and issuance. A registry associates an event type with named, versioned evaluators. Each evaluator validates its own criteria and returns eligible or ineligible for the immutable event. Evaluators receive no write connection. The engine handles persistence. A future evaluator registers against an existing event without changing the core progress service. A future event type may need a producer in its own domain. There is no rules language, external bus, or worker.
+
+The first evaluator is `route_completion` version 1. It accepts only `route_completed` events and route-scoped definitions with source `route_completion`. Criteria require a stable curated route reference and may include `completion_number`, a positive integer that matches exactly. Omission accepts any successful completion number. A future editorial package can express the route reference as a slug that authoring resolves to a route ID. Runtime eligibility compares IDs. Unknown fields, unresolved routes, unsupported evaluator versions, and invalid combinations are rejected before activation. Enabling, editing, retiring, or importing definitions never emits a completion event.
+
+Add evaluator key and version, a validated route binding, and an issuance rule to managed definitions. Keep existing definition, edition, and earned records separate. Preserve foundation rows and their original deduplication identities. A definition with foundation awards stays on that contract until an explicit migration reconciles those awards with a managed rule. Managed definitions freeze evaluator and cohort identity once used. Validated criteria and presentation edits apply prospectively. Future editorial imports resolve stable definition and edition slugs, validate the full candidate configuration, and use the same validation as the definition write path. This step adds no importer or launch definitions.
+
+| Issuance rule | Cohort | Durable uniqueness for a managed award |
+| --- | --- | --- |
+| `once_per_account` | Unlimited | User and definition |
+| `once_per_event` | Unlimited | User, definition, and stable source event |
+| `once_per_account_per_edition` | Limited | User, definition, and edition |
+
+Persist the rule and its canonical deduplication key on the earned row. Enforce uniqueness of that key within the user and definition in PostgreSQL for managed rows. Keep a separate event identity even when it is outside the uniqueness key. Limited definitions evaluate each eligible edition and allocate only available editions within their configured windows. Overlapping eligible editions are distinct cohorts. A closed, exhausted, or already-earned cohort does not fall back to an unlimited award. The edition sequence and size remain the historical values from section 17.4.
+
+17.13 Route completion event and transaction
+
+Add an account-owned `route_completions` ledger. Each record stores a unique event key of the form `route_completed:<journey_id>`, an optional live journey reference, the original route ID as a durable grouping key, optional live route reference, captured route slug and title, completion time, and a positive completion number. Enforce one event per completed attempt and uniqueness of the number per account and route. Completion numbers count successful finishes for that route. Abandoned attempts and restarts consume no number. The attempt number and the edition sequence number are independent values. Use a new migration and the existing server-only RLS and client-role revocation conventions.
+
+Initialize the ledger from already completed journeys in `completed_at, journey_id` order within each account and route. This migration records numbering history only. It dispatches no events and creates no earned awards or reveals. Live completion assigns the next number under the existing user lock from the durable ledger. A repeated call resolves the existing event first and returns its number. Retain the ledger if a contextual reference disappears. Account deletion removes it. Add an optional completion reference and immutable route and completion-number snapshot to earned awards issued by this evaluator. Foundation awards without that provenance keep their original snapshots.
+
+Use one completion finalizer from activity create, activity edit including confirmed type changes, and policy allocation including confirmed expansion, join, invitation acceptance, and private expedition creation when they finish an active journey. Future completion writers must use that finalizer. It runs only on an actual unfinished-to-completed transition. A preview, rejected confirmation, completed-journey attachment, retry of an existing completion, narrative acknowledgment, repair, and migration never dispatch a new event.
+
+Keep the existing user, expedition, journey, participation, and activity lock order. After validation, credit writes, status change, Trail Identity, and existing feed writes, the finalizer records the event and calls the engine. The engine processes candidates in stable definition and edition ID order. It takes any needed definition and edition locks at that point and rechecks availability, window, deduplication, and capacity under those locks. It never takes a journey totals lock. Record an earned row and its independent pending reveal in the same transaction as the completion and any edition allocation.
+
+A nonmatch, inactive or retired definition, out-of-window or exhausted edition, and an already-issued deduplication key are typed skip outcomes. Check these before mutation or handle a known conflict inside a savepoint so no skipped candidate leaves a consumed number or an aborted transaction. Other eligible candidates may still issue. Unexpected errors, invalid active configuration, and broken persistence invariants propagate and roll back the completion, credits, feed, Trail Identity assignment, ledger entry, editions, awards, and reveals together. Send `newly_earned_achievements` only after commit and include only rows inserted by that transaction. A lost response is recovered from pending reveals. Retrying an old completion never runs a newly configured definition against it.
+
+17.14 Personal trophy case and reveals
+
+Derive the collection from the owner's earned rows. Unlimited route awards with a durable route key form one collection per route, including renamed or removed routes. Use the most recently issued member's captured route title as the collection label. Each member detail uses its own snapshot. A route award without a durable grouping key remains an individual award. Limited editions are individual entries in a separate section, even when they refer to the same route. Other scopes are individual entries. A collection creates no award, rank, progress total, or additional stored membership.
+
+Add `achievement_reveals` keyed by earned achievement ID. The earned row owns it and account deletion removes both. A null `acknowledged_at` means pending. Only automatic issuance creates this pending row in this step. Acknowledgment sets the timestamp once and returns that timestamp on every retry. It updates neither the immutable award nor Section 18 story views or Section 21 Trail Identity reveals.
+
+These proposed JSON extensions use existing cookie and bearer authentication and CSRF. Private reads bind ownership to the authenticated account and return the same `404 not_found` for another account's award and an unknown ID. Lists use `limit` (default 20, maximum 100) and an opaque `cursor` ordered by `issued_at DESC, id DESC`. Bind the cursor to the owner and active filters. Grouping and counts are derived from the full owner ledger before paging, so a collection keeps the same total on every page. Within each page, attach collection keys to its members and return group summaries for the collections represented there. Group order follows the most recent member using the same stable ordering.
+
+| Surface | Response |
+| --- | --- |
+| `GET /api/v1/trophy-case` | `awards` page, `route_collections` summaries with stable key, captured title, and award count, and `next_cursor`. Each item identifies its section and optional collection key. Accept an optional collection key to page its members. |
+| `GET /api/v1/trophy-case/<award_id>` | One earned award plus its safe captured context and reveal acknowledgment state. |
+| `POST /api/v1/trophy-case/<award_id>/reveal-acknowledgment` | `acknowledged_at` for the owner's reveal. Missing award or reveal uses the same private miss. |
+| `GET /api/v1/home` | `trophy_case` with `earned_count`, `pending_reveal_count`, and up to three newest pending award summaries. The existing read-only home snapshot covers these reads. |
+| Successful progress mutation that completes a journey | Top-level `newly_earned_achievements` with award summaries in issuance order. An empty list represents a completion with zero awards. |
+
+An award summary contains the earned ID, definition slug, captured name, description and scope, `issued_at`, `reveal_pending`, optional route completion number, and optional edition object with captured slug, size, and sequence number. Detail adds captured presentation and allowlisted route, expedition, activity, or organization context as available. The list may filter to pending reveals using the same cursor order so home truncation never makes an unacknowledged award unreachable.
+
+The trophy case is private and separate from rosters, feeds, and standings. It does not return the owner's login or snapshot either of their names into awards. If home presents the owner identity beside achievements, it uses Section 21 owner fields and ordinary shared name presentation remains governed by Section 21. Honor Section 5.9 removal and Section 5.10 deletion. Snapshots preserve the permitted award context without reconstructing a removed feed item, result, board total, rank, or participation. An award or reveal grants no access to its source.
+
+17.15 Regression coverage for the engine and trophy case
+
+- Validate evaluator keys and versions, typed route bindings, criteria values, and issuance-rule compatibility. Exercise nonmatches, an exact completion-number match, and reading historical awards after edits or retirement.
+- Cover every completion producer and the no-event paths, including stale confirmation, completed-journey attachment, preexisting historical finishes, and adding a definition after a finish. Verify numbering across abandoned attempts, restarts, multiple routes, and seeded ledger history.
+- Test duplicate callbacks and concurrent completions, all three managed deduplication rules, multiple editions of one definition, last-slot contention, exhausted or closed editions, and stable retries. Assert expected skips permit completion and keep evaluating other candidates.
+- Inject an unexpected failure after award insertion or edition allocation. Assert rollback of credits, status, completion numbering, existing feed writes, Trail Identity, earned rows, reveals, and edition numbers. Verify a successful retry uses the same completion number and available edition slot.
+- Verify private list and detail authorization, cookie CSRF and bearer access, stable cursors, grouping under route rename or deletion, separate edition entries, counts in a read-only home snapshot, and no retroactive issuance. Test lost responses and idempotent acknowledgment independent of narrative and Trail Identity state.
+- Test leave, expedition privacy removal, and account deletion. Confirm retained awards display only permitted snapshots, deleted accounts lose their ledger and reveals, another user's awards remain, and consumed edition numbers stay consumed.
 
 
 18. Narrative experience
