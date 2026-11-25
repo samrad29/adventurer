@@ -19,6 +19,8 @@ Registration still honors `INVITE_CODE` when that setting is non-empty. It creat
 
 Account deletion (`POST /api/v1/account/deletion`) is not implemented. The deletion batches described in the domain architecture do not have a service yet. A deleting account is rejected as unauthenticated once `deletion_state` is set.
 
+The achievement database and internal issuance foundation are implemented in architecture section 17. Achievement issuance and trophy case endpoints remain deferred.
+
 ## Response and errors
 
 Success is a JSON object. Resource bodies from the services are returned directly. `Decimal` values are decimal strings. Timestamps are ISO-8601. Home progress fields that the home contract names in feet are JSON numbers.

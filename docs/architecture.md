@@ -977,7 +977,7 @@ No migration in this revision. The sequence below is the order that avoids a sec
 
 17. Achievements, Collectibles & Trophy Cases
 
-This section is the award contract. It adds no tables, services, endpoints, or issuance. Journey progress, activity credits, expedition standings, and leaderboard rank stay what sections 3, 5, and 16 already define. An achievement is not a second progress total and not a standing. Current journey, activity, and expedition work continues without waiting on this domain.
+This section is the award contract. Migration `0016_achievement_foundation` and the internal issuance service implement the database foundation. Journey progress, activity credits, expedition standings, and leaderboard rank retain the contracts in sections 3, 5, and 16.
 
 17.1 Definitions, editions, and earned awards
 
@@ -1055,7 +1055,9 @@ Issuance is durable, idempotent, transactional, and traceable.
   The earned row, the historical context it keeps, and any edition identity, sequence number, and edition size commit together.
   The row records its source: the qualifying event, or an authorized grant.
 
-Issuance sources this domain can accept later are route completion, expedition completion, a global personal milestone, a community award, and an authorized administrative grant. None of those issuers is implemented here.
+The foundation accepts route completion, expedition completion, a global personal milestone, a community award, and an authorized administrative grant as source identifiers. Each future issuer must check eligibility or authorization before calling `issue_achievement` in its own transaction. The caller supplies a stable source event or grant key. A repeatable definition can distinguish intentional repeats with a separate stable repeat key. Retries return the original award, including after an edition fills or the definition retires.
+
+PostgreSQL captures the award presentation and edition identity at issuance. An earned row keeps durable definition and edition identities. Optional live route, expedition, activity, and organization references clear when the referenced record disappears. The service snapshots route, expedition, and organization names and slugs, plus activity type and date when applicable. These snapshots carry no standings, credits, or personal notes.
 
 Expedition completion may be the reason an award is issued. The earned row still belongs to the user. Issuance does not change journey progress, activity credits, participation, live standings, or final_rank. It does not write expedition_updates. It does not take the journey credit lock and it does not lock journey_metric_totals. When a later completion transaction also issues an award, it writes that award after the credit writes section 5 already requires. An edition allocation locks only its own edition, and only after any user, expedition, journey, participation, and activity locks that transaction already holds.
 
@@ -1112,12 +1114,12 @@ A later request to erase one earned record is its own audited delete. It does no
 This sequence does not reorder or block the journey, activity, and expedition work already underway.
 
   1. Architecture foundation. This section.
-  2. Database schema and a transactional issuance foundation. Definitions are not seeded in that step unless a later product decision names them.
+  2. Database schema and transactional issuance foundation. This includes edition counters and numbering guarantees, because numbering and insertion share the issuance transaction. Definitions are unseeded.
   3. A basic personal trophy case.
   4. Route-specific collectible presentation and shareable achievement cards.
-  5. Limited-edition numbering, including more than one edition of the same achievement, then physical reward claim and fulfillment. The numbering step does not require an edition-management product.
+  5. Limited-edition presentation, including more than one edition of the same achievement, then physical reward claim and fulfillment.
 
-No migration, service, API, or interface is part of the current change.
+Step 2 is implemented. The future account deletion batch can call `delete_earned_achievements` before deleting the user. PostgreSQL requires both the deleting state and the transaction flag for this operation. The account deletion endpoint, source-specific issuers, and trophy case API remain deferred.
 
 
 18. Narrative experience
