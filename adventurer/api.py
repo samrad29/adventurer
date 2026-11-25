@@ -88,6 +88,7 @@ from .activity_policy import PolicyError
 from .route_recommendations import recommendations_for_routes
 from .services import AccountError, authenticate, create_adventurer, current_viewer, get_adventurer
 from .tokens import issue_token, revoke_all, revoke_token
+from .trail_identity import TrailIdentityError, change_identity, owner_identity
 
 bp = Blueprint("api", __name__, url_prefix="/api/v1")
 
@@ -117,6 +118,7 @@ def init_app(app) -> None:
     app.register_error_handler(ApiError, _render_api)
     app.register_error_handler(JourneyError, _render_journey)
     app.register_error_handler(ActivityError, _render_service)
+    app.register_error_handler(TrailIdentityError, _render_service)
     app.register_error_handler(ExpeditionError, _render_service)
     app.register_error_handler(PolicyError, _render_service)
     app.register_error_handler(NarrativeError, _render_service)
@@ -281,7 +283,39 @@ def journeys_policy_choice(journey_id: int):
         raise ApiError("invalid", "Send confirmation_token as text.")
     chosen = _with_metrics([choose_activity_policy(_actor(), journey_id, choice, token)])[0]
     arrivals = chosen.pop("arrivals", [])
-    return _ok(journey=chosen, arrivals=arrivals)
+    reveal = chosen.pop("trail_name_reveal", None)
+    return _ok(journey=chosen, arrivals=arrivals, **_trail_reveal(reveal))
+
+
+def _trail_reveal(reveal):
+    return {} if reveal is None else {"trail_name_reveal": reveal}
+
+
+@bp.patch("/profile/trail-identity")
+def profile_trail_identity():
+    actor = _actor()
+    value = _object().get("trail_name_display")
+    if value not in ("both", "trail_only", "hidden"):
+        raise ApiError("invalid", "Choose a trail name display preference.", status=400)
+    return _ok(**change_identity(get_db(), actor, preference=value))
+
+
+@bp.post("/profile/trail-identity/reroll")
+def profile_trail_identity_reroll():
+    actor = _actor()
+    body = _object()
+    key = body.get("request_key")
+    if body.get("confirm") is not True or not isinstance(key, str) or not (
+        1 <= len(key) <= 128 and key.isascii() and all(33 <= ord(char) <= 126 for char in key)
+    ):
+        raise ApiError("invalid", "Confirm the reroll and send a request key.", status=400)
+    return _ok(**change_identity(get_db(), actor, request_key=key))
+
+
+@bp.post("/profile/trail-identity/reveal-acknowledgment")
+def profile_trail_identity_acknowledgment():
+    result = change_identity(get_db(), _actor(), acknowledge=True)
+    return _ok(acknowledged_at=result["trail_identity"]["reveal_acknowledged_at"])
 
 
 @bp.get("/activities")
@@ -902,7 +936,7 @@ def _user_id(username: str) -> int:
 def _you(viewer) -> dict | None:
     if viewer is None:
         return None
-    return {"id": viewer["id"], "name": viewer["name"]}
+    return {"id": viewer["id"], "name": viewer["name"], **owner_identity(get_db(), viewer["id"])}
 
 
 def _start_cookie(user_id: int) -> None:

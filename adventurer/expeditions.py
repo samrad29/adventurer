@@ -38,6 +38,7 @@ from .branding import (
 from .db import get_db
 from .journey_progress import CheckpointMark, assess_checkpoints
 from .journeys import JourneyError, activate_for_participation, present_journey
+from .trail_identity import display_names, social_names
 
 INVITE_DAYS = 30
 MISSED = "That expedition does not exist."
@@ -1077,7 +1078,8 @@ def get_roster(user_id: int, slug: str) -> list[dict]:
             """,
             (expedition["id"],),
         ).fetchall()
-        return [dict(row) for row in rows]
+        names = social_names(database, [row["user_id"] for row in rows])
+        return [{**row, **display_names(names.get(row["user_id"]))} for row in rows]
     except ExpeditionError:
         database.rollback()
         raise
@@ -1112,7 +1114,8 @@ def get_updates(user_id: int, slug: str) -> list[dict]:
         rows = database.execute(
             """
             SELECT feed.id, feed.user_id, profile.display_name, feed.kind,
-                   feed.activity_id, feed.checkpoint_name, feed.created_at
+                   feed.activity_id, feed.checkpoint_name, feed.created_at,
+                   feed.name_capture_present, feed.profile_name_snapshot, feed.trail_name_snapshot
             FROM expedition_updates AS feed
             JOIN user_profiles AS profile ON profile.user_id = feed.user_id
             WHERE feed.expedition_id = ?
@@ -1544,14 +1547,17 @@ def _write_snapshot(database, expedition, candidates) -> None:
         )
     ordered = _order_standings(ranked, multi=len(requirements) > 1)
     _assign_final_ranks(ordered, multi=len(requirements) > 1)
+    names = social_names(database, [row["user_id"] for row in ordered])
     for row in ordered:
+        captured_names = display_names(names.get(row["user_id"]))
         inserted = database.execute(
             """
             INSERT INTO expedition_result_entries (
                 expedition_id, participation_id, user_id, journey_id,
-                display_name, final_rank, checkpoint_name, captured_at
+                display_name, final_rank, checkpoint_name, captured_at,
+                trail_name_snapshot, profile_name_visible
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             RETURNING id
             """,
             (
@@ -1563,6 +1569,8 @@ def _write_snapshot(database, expedition, candidates) -> None:
                 row["final_rank"],
                 row["checkpoint_name"],
                 captured,
+                captured_names["trail_name"],
+                captured_names["profile_name"] is not None,
             ),
         ).fetchone()
         for metric in row["metrics"]:
@@ -1663,10 +1671,11 @@ def _live_entries(database, expedition) -> list[dict]:
         )
     ordered = _order_standings(prepared, multi=multi)
     _assign_live_ranks(ordered, multi=multi)
+    names = social_names(database, [row["user_id"] for row in ordered])
     return [
         {
             "user_id": row["user_id"],
-            "display_name": row["display_name"],
+            **display_names(names.get(row["user_id"])),
             "journey_id": row["journey_id"],
             "live_rank": row["live_rank"],
             "rank_basis": row["rank_basis"],
@@ -1683,7 +1692,7 @@ def _final_entries(database, expedition_id: int) -> list[dict]:
     rows = database.execute(
         """
         SELECT id, user_id, display_name, journey_id, final_rank,
-               checkpoint_name, captured_at
+               checkpoint_name, captured_at, trail_name_snapshot, profile_name_visible
         FROM expedition_result_entries
         WHERE expedition_id = ?
         ORDER BY final_rank NULLS LAST, display_name, user_id
@@ -1691,10 +1700,14 @@ def _final_entries(database, expedition_id: int) -> list[dict]:
         (expedition_id,),
     ).fetchall()
     metrics = _result_metrics(database, [row["id"] for row in rows])
+    names = social_names(database, [row["user_id"] for row in rows])
     return [
         {
             "user_id": row["user_id"],
-            "display_name": row["display_name"],
+            **display_names(names.get(row["user_id"]), captured=(
+                row["display_name"] if row["profile_name_visible"] else None,
+                row["trail_name_snapshot"],
+            )),
             "journey_id": row["journey_id"],
             "final_rank": row["final_rank"],
             "checkpoint_name": row["checkpoint_name"],
@@ -1707,11 +1720,15 @@ def _final_entries(database, expedition_id: int) -> list[dict]:
 
 def _updates_with_metrics(database, rows) -> list[dict]:
     metrics = _update_metrics(database, [row["id"] for row in rows])
+    names = social_names(database, [row["user_id"] for row in rows])
     return [
         {
             "id": row["id"],
             "user_id": row["user_id"],
-            "display_name": row["display_name"],
+            **display_names(names.get(row["user_id"]), captured=(
+                (row["profile_name_snapshot"], row["trail_name_snapshot"])
+                if row["name_capture_present"] else (row["display_name"], None)
+            )),
             "kind": row["kind"],
             "activity_id": row["activity_id"],
             "checkpoint_name": row["checkpoint_name"],
@@ -2245,14 +2262,14 @@ def _open_journey(
     return journey, decision
 
 
-def _finish_join_policy(database, user_id: int, journey, decision) -> list:
+def _finish_join_policy(database, user_id: int, journey, decision) -> dict:
     from .activities import apply_eligibility
     from .activity_policy import store_journey_policy
 
     if decision.get("born_restricted"):
         store_journey_policy(database, journey["id"], decision["policy"], None)
         refresh_governor(database, journey["id"], reason=None, former_id=None)
-        return []
+        return {"arrivals": []}
     if decision.get("change"):
         store_journey_policy(database, journey["id"], decision["policy"], None)
         refresh_governor(database, journey["id"], reason=None, former_id=None)
@@ -2263,9 +2280,12 @@ def _finish_join_policy(database, user_id: int, journey, decision) -> list:
             policy_changed=True,
             complete=bool(decision.get("complete")),
         )
-        return applied["arrivals"]
+        result = {"arrivals": applied["arrivals"]}
+        if applied["trail_name_reveal"] is not None:
+            result["trail_name_reveal"] = applied["trail_name_reveal"]
+        return result
     refresh_governor(database, journey["id"], reason=None, former_id=None)
-    return []
+    return {"arrivals": []}
 
 
 def _policy_error(exc: PolicyError) -> ExpeditionError:
@@ -2730,14 +2750,15 @@ def _profile(database, user_id: int, expedition, organization_brand=_UNSET) -> d
     }
 
 
-def _joined(database, expedition_id: int, participation, journey, arrivals=None) -> dict:
+def _joined(database, expedition_id: int, participation, journey, progress=None) -> dict:
     expedition = _expedition(database, expedition_id)
-    presented = None if journey is None else present_journey(database, journey["id"], arrivals or [])
+    progress = {"arrivals": []} if progress is None else progress
+    presented = None if journey is None else present_journey(database, journey["id"], progress["arrivals"])
     return {
         "expedition": _profile(database, participation["user_id"], expedition),
         "participation": participation,
         "journey": presented,
-        "arrivals": [] if arrivals is None else arrivals,
+        **progress,
     }
 
 

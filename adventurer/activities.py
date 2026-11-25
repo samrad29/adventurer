@@ -43,6 +43,7 @@ from .db import get_db
 from .journey_progress import CheckpointMark, assess_checkpoints, read_journey_progress
 from .metrics import FOOT_IN_METERS, MILE_IN_METERS, STORAGE_QUANTUM, MetricError, parse_measurement
 from .narrative import arrival_reveals
+from .trail_identity import assign_at_checkpoint, display_names, social_names
 
 MANUAL_EVENT_REASON = "Manual entry. Manual entries are not independently verified."
 TOKEN_TTL_SECONDS = 600
@@ -197,6 +198,7 @@ def create_activity(
             _sync_shares(database, journey, proposal["slots"], proposal["shares"], "reduce")
             _sync_shares(database, journey, proposal["slots"], proposal["shares"], "increase")
         reached = []
+        reveal = None
         if proposal["credits"] or proposal["will_complete"] or assigned:
             _touch_journey(
                 database,
@@ -212,11 +214,14 @@ def create_activity(
                 _totals_map(journey),
                 proposal["resulting"],
             )
+            reveal = assign_at_checkpoint(database, user_id, reached)
             _write_create_feed(database, user_id, activity_id, journey, proposal, reached)
         saved = _with_arrivals(
             _saved(database, activity_id, journey["id"] if assigned else None),
             arrival_reveals(database, journey["id"], reached),
         )
+        if reveal is not None:
+            saved["trail_name_reveal"] = reveal
         saved["no_credit_reason"] = _no_credit_reason(
             journey, measurements, proposal["credits"], changes["activity_type"]
         )
@@ -390,6 +395,7 @@ def update_activity(
             _totals_map(credit_journey),
             proposal["resulting"],
         )
+        reveal = assign_at_checkpoint(database, user_id, reached)
         if proposal["will_complete"]:
             _write_summit_feed(
                 database,
@@ -402,6 +408,8 @@ def update_activity(
             _saved(database, activity_id, journey_id),
             arrival_reveals(database, credit_journey["id"], reached),
         )
+        if reveal is not None:
+            saved["trail_name_reveal"] = reveal
         saved["no_credit_reason"] = _no_credit_reason(
             credit_journey, measurements, proposal["credits"], activity_type
         )
@@ -1441,16 +1449,19 @@ def apply_eligibility(
             inputs_changed=policy_changed and not changed and not finish,
         )
     arrivals = []
+    reveal = None
     if changed or finish:
         from .narrative import arrival_reveals
 
         reached = _newly_reached(
             database, journey["route_id"], _totals_map(journey), resulting
         )
+        reveal = assign_at_checkpoint(database, user_id, reached)
         arrivals = arrival_reveals(database, journey_id, reached)
     if finish:
         _write_summit_feed(database, user_id, None, journey, resulting)
-    return {"arrivals": arrivals, "completed": finish, "resulting": resulting}
+    return {"arrivals": arrivals, "completed": finish, "resulting": resulting,
+            "trail_name_reveal": reveal}
 
 
 def _bind_new_assignment(slots, assignment_id: int) -> None:
@@ -1880,13 +1891,15 @@ def _feed_row(
     positive = _positive_amounts(amounts)
     if not positive:
         return
+    names = display_names(social_names(database, [user_id]).get(user_id))
     row = database.execute(
         """
         INSERT INTO expedition_updates (
             expedition_id, user_id, participation_id, kind,
-            activity_id, checkpoint_name
+            activity_id, checkpoint_name, name_capture_present,
+            profile_name_snapshot, trail_name_snapshot
         )
-        VALUES (?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, true, ?, ?)
         RETURNING id
         """,
         (
@@ -1896,6 +1909,8 @@ def _feed_row(
             kind,
             activity_id,
             checkpoint_name,
+            names["profile_name"],
+            names["trail_name"],
         ),
     ).fetchone()
     for code in sorted(positive):

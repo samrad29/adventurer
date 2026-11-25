@@ -69,6 +69,8 @@ MEDIA_FIELDS = (
     "status",
 )
 KIND_ORDER = {"chapter": 0, "assignment": 1, "story": 2, "discovery": 3, "media": 4, "recommendations": 5}
+TRAIL_CHECKPOINTS = "trail_identity_checkpoint_slugs"
+KIND_ORDER["trail_identity"] = 6
 RIGHTS_NOTE = "matching text is not proof the license is authentic"
 
 
@@ -148,6 +150,7 @@ class Package:
     checkpoints: tuple[CheckpointDoc, ...]
     media: tuple[MediaDoc, ...]
     recommended_activity_types: tuple[str, ...]
+    trail_checkpoints: tuple[str, ...]
 
 
 @dataclass
@@ -159,6 +162,8 @@ class Catalog:
     discoveries: dict[tuple[int, str], dict]
     media: list[dict]
     recommended_activity_types: tuple[str, ...]
+    trail_checkpoints: set[str]
+    pool_size: int
 
 
 @dataclass(frozen=True)
@@ -231,6 +236,9 @@ def import_route(database: DB, root: Path, *, dry_run: bool = False) -> list[Cha
         raise
     except Exception as exc:
         database.rollback()
+        if getattr(getattr(exc, "diag", None), "constraint_name", None) == "trail_name_pool_capacity":
+            raise ContentRejected([ContentIssue("manifest.json", package.route_slug, TRAIL_CHECKPOINTS,
+                                               "the trail name pool requires two active names")]) from exc
         message = getattr(getattr(exc, "diag", None), "message_primary", None) or str(exc)
         if (
             "chapter checkpoints must form a contiguous span" in message
@@ -340,6 +348,55 @@ def open_database() -> DB:
     return DB(connection)
 
 
+def import_trail_name_pool(database: DB, path: Path) -> None:
+    values, issues = _read_json(path)
+    names: dict[str, str] = {}
+    if not issues:
+        if not isinstance(values, list) or any(
+            not isinstance(value, str) or not value.split() or any(
+                not char.isprintable() and not char.isspace() for char in value
+            ) for value in values
+        ):
+            issues.append(ContentIssue(path.name, "pool", "names", "must be an array of printable names"))
+        else:
+            for value in values:
+                name = " ".join(value.split())
+                key = name.casefold()
+                if key in names:
+                    issues.append(ContentIssue(path.name, "pool", "names", "duplicate normalized trail name"))
+                    break
+                names[key] = name
+    if issues:
+        raise ContentRejected(issues)
+    database.rollback()
+    try:
+        database.execute("SELECT pg_advisory_xact_lock(211701, 1)")
+        database.execute(
+            "UPDATE trail_name_pool SET active = false WHERE active AND NOT (name_key = ANY(?))",
+            (list(names),),
+        )
+        for key, name in names.items():
+            existing = database.execute(
+                "SELECT name FROM trail_name_pool WHERE name_key = ?", (key,)
+            ).fetchone()
+            if existing is not None and existing["name"] != name:
+                raise ContentRejected([ContentIssue(path.name, "pool", "names", "published name text is immutable")])
+            database.execute(
+                """
+                INSERT INTO trail_name_pool (name, name_key) VALUES (?, ?)
+                ON CONFLICT (name_key) DO UPDATE SET active = true WHERE NOT trail_name_pool.active
+                """,
+                (name, key),
+            )
+        database.commit()
+    except Exception as exc:
+        database.rollback()
+        if getattr(getattr(exc, "diag", None), "constraint_name", None) == "trail_name_pool_capacity":
+            raise ContentRejected([ContentIssue(path.name, "pool", "names",
+                                               "the trail name pool requires two active names")]) from exc
+        raise
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         prog="python -m adventurer.content_pipeline",
@@ -360,6 +417,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Print the plan and roll back.",
     )
+    commands.add_parser("import-trail-name-pool").add_argument("path")
     args = parser.parse_args(argv)
     database = None
     try:
@@ -374,6 +432,9 @@ def main(argv: list[str] | None = None) -> int:
             print("valid")
             return 0
         database = open_database()
+        if args.command == "import-trail-name-pool":
+            import_trail_name_pool(database, Path(args.path))
+            return 0
         plan = import_route(database, Path(args.path), dry_run=args.dry_run)
         print(format_plan(plan))
         return 0
@@ -408,6 +469,7 @@ def _load_package(root: Path) -> tuple[Package | None, list[ContentIssue]]:
     if manifest is None or not isinstance(manifest, dict):
         return None, issues
     recommendations = manifest.get("recommended_activity_types", [])
+    trail_checkpoints = manifest.get(TRAIL_CHECKPOINTS, [])
 
     chapters, chapter_issues = _load_chapters(root / "chapters.json")
     issues.extend(chapter_issues)
@@ -428,6 +490,8 @@ def _load_package(root: Path) -> tuple[Package | None, list[ContentIssue]]:
             checkpoints=tuple(checkpoints),
             media=tuple(media),
             recommended_activity_types=tuple(recommendations) if isinstance(recommendations, list) else (),
+            trail_checkpoints=tuple(slug for slug in trail_checkpoints if isinstance(slug, str))
+            if isinstance(trail_checkpoints, list) else (),
         ),
         issues,
     )
@@ -437,7 +501,13 @@ def _manifest_issues(manifest: object, directory: str) -> list[ContentIssue]:
     if not isinstance(manifest, dict):
         return [ContentIssue("manifest.json", "manifest", "json", "manifest must be an object")]
     field = "recommended_activity_types"
-    issues = _unknown_keys(manifest, {"format_version", "route_slug", field}, "manifest.json", "manifest")
+    issues = _unknown_keys(manifest, {"format_version", "route_slug", field, TRAIL_CHECKPOINTS}, "manifest.json", "manifest")
+    checkpoints = manifest.get(TRAIL_CHECKPOINTS, [])
+    if not isinstance(checkpoints, list) or any(
+        not isinstance(slug, str) or not SLUG.fullmatch(slug) for slug in checkpoints
+    ) or len(set(checkpoints)) != len(checkpoints):
+        issues.append(ContentIssue("manifest.json", "manifest", TRAIL_CHECKPOINTS,
+                                   "must be an array of unique checkpoint slugs"))
     types = manifest.get(field, [])
     if not isinstance(types, list) or any(
         not isinstance(item, str) or item not in SUPPORTED_TYPES for item in types
@@ -979,10 +1049,23 @@ def _read_catalog(database: DB, package: Package, *, lock: bool = False) -> tupl
         ).fetchall()
     )
     recommendations = recommendations_for_routes(database, [route["id"]])
+    trail_checkpoints = database.execute(
+        """
+        SELECT checkpoint.slug FROM trail_identity_checkpoints AS qualifying
+        JOIN route_checkpoints AS checkpoint ON checkpoint.id = qualifying.checkpoint_id
+        WHERE checkpoint.route_id = ?
+        """,
+        (route["id"],),
+    ).fetchall()
+    pool_size = database.execute(
+        "SELECT count(*) AS count FROM trail_name_pool WHERE active"
+    ).fetchone()["count"]
     return (
         Catalog(
             route["id"], checkpoints, chapters, stories, discoveries, media,
             tuple(recommendations.get(route["id"], [])),
+            {row["slug"] for row in trail_checkpoints},
+            pool_size,
         ),
         [],
     )
@@ -990,6 +1073,13 @@ def _read_catalog(database: DB, package: Package, *, lock: bool = False) -> tupl
 
 def _catalog_issues(package: Package, catalog: Catalog) -> list[ContentIssue]:
     issues: list[ContentIssue] = []
+    for slug in package.trail_checkpoints:
+        if slug not in catalog.checkpoints:
+            issues.append(ContentIssue("manifest.json", slug, TRAIL_CHECKPOINTS,
+                                       "checkpoint is not on this route"))
+    if package.trail_checkpoints and catalog.pool_size < 2:
+        issues.append(ContentIssue("manifest.json", "manifest", TRAIL_CHECKPOINTS,
+                                   "the trail name pool requires two active names"))
     for doc in package.checkpoints:
         if doc.slug not in catalog.checkpoints:
             issues.append(
@@ -1263,6 +1353,11 @@ def _media_position_issues(package: Package, catalog: Catalog) -> list[ContentIs
 
 def _plan(package: Package, catalog: Catalog) -> list[Change]:
     changes: list[Change] = []
+    if set(package.trail_checkpoints) != catalog.trail_checkpoints:
+        changes.append(Change(
+            "update", "trail_identity", package.route_slug, fields=(TRAIL_CHECKPOINTS,),
+            values=tuple(catalog.checkpoints[slug]["id"] for slug in package.trail_checkpoints),
+        ))
     if package.recommended_activity_types != catalog.recommended_activity_types:
         changes.append(Change(
             "update", "recommendations", package.route_slug,
@@ -1435,6 +1530,20 @@ def _plan(package: Package, catalog: Catalog) -> list[Change]:
 
 
 def _apply(database: DB, catalog: Catalog, plan: list[Change]) -> None:
+    for change in plan:
+        if change.kind != "trail_identity":
+            continue
+        database.execute(
+            """
+            DELETE FROM trail_identity_checkpoints
+            WHERE checkpoint_id IN (SELECT id FROM route_checkpoints WHERE route_id = ?)
+            """,
+            (catalog.route_id,),
+        )
+        database.execute(
+            "INSERT INTO trail_identity_checkpoints (checkpoint_id) SELECT unnest(?::bigint[])",
+            (list(change.values),),
+        )
     for change in plan:
         if change.kind != "recommendations":
             continue

@@ -24,6 +24,7 @@ from .metrics import MetricProgress, assess_metric
 from .narrative import pending_arrivals
 from .scene import select_scene
 from .services import read_adventurer
+from .trail_identity import owner_identity
 
 
 def compose_home(user_id: int) -> dict:
@@ -65,13 +66,14 @@ def compose_home(user_id: int) -> dict:
             None if active is None else active["id"],
         )
         invitations = _invitations(database, user_id)
+        identity = owner_identity(database, user_id)
     except JourneyError:
         database.rollback()
         raise
     finally:
         database.rollback()
     return {
-        "you": {"id": viewer["id"], "name": viewer["name"]},
+        "you": {"id": viewer["id"], "name": viewer["name"], **identity},
         "state": state,
         "next_actions": actions,
         "journey": journey_body,

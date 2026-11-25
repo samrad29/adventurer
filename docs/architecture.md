@@ -2015,7 +2015,7 @@ These consequences are accepted and are not open product choices:
 
 21. Trail Identity
 
-This is a proposed account and presentation contract. The server draws a trail name when the account first newly reaches an editorially configured qualifying checkpoint. The name belongs to the account across routes and attempts. The account may reroll once and may edit its display preference independently of that reroll.
+Migration `0017_trail_identity` and the Flask API implement this account and presentation contract. The server draws a trail name when the account first newly reaches an editorially configured qualifying checkpoint. The name belongs to the account across routes and attempts. The account may reroll once and may edit its display preference independently of that reroll. Launch names, qualifying route content, and mobile presentation remain pending.
 
 This supersedes the per-account draw and temporary board-label behavior described in the legacy `challenges.py` prose. Curated route and checkpoint names remain canonical in geography, stories, journal links, scenes, progress, feed checkpoint fields, and final results. Trail names are presentation labels. Account usernames and their normalized keys continue to identify logins, invitations, and membership or ownership operations.
 
@@ -2045,11 +2045,11 @@ The reveal acknowledgment is account-wide and returns its original timestamp on 
 
 Reroll requires an assigned identity, explicit confirmation, and a client-generated request key stable across retries. Under the user lock, check for a previously committed reroll before selecting. The same key returns the name already drawn without changing the reroll timestamp or drawing again. A different key after the first committed reroll fails. A new draw excludes the current normalized name even if it has been retired. Store the new name, pool ID, timestamp, and request key in one transaction. If the transaction fails or no different active name is available, the reroll remains unused. Preference edits, pool retirement, and journey or expedition changes cannot restore the reroll.
 
-21.4 Proposed HTTP and presentation contracts
+21.4 HTTP and presentation contracts
 
 These extensions use the existing cookie or bearer authentication and CSRF rules. The acting account comes from authentication. Profile writes recheck under the user lock that the account is active. Owner-only responses expose `trail_identity` as null until assignment and then as an object with `name`, `assigned_at`, `reroll_available`, and `reveal_acknowledged_at`. They expose `trail_name_display` even before assignment. A pending `trail_name_reveal` contains `name`, `route_slug`, and `checkpoint_slug`, and is null once acknowledged. Reroll request keys and pool IDs stay internal.
 
-| Surface | Proposed addition |
+| Surface | Addition |
 | --- | --- |
 | `GET /api/v1/session` and `GET /api/v1/home` | Owner identity, preference, and pending reveal in `you`. Home stays one read-only snapshot and supports the reveal without an active journey. |
 | `PATCH /api/v1/profile/trail-identity` | Set `trail_name_display` to one of the three values. Return the owner identity and preference. Repeating the same setting is a no-op. |
@@ -2058,7 +2058,7 @@ These extensions use the existing cookie or bearer authentication and CSRF rules
 | Committed progress writes and the owning journey's journal detail | A write that assigns the name adds `trail_name_reveal` to the successful response. Journal detail may expose the pending reveal only at the qualifying checkpoint under existing owner, reach, and publication checks. Identity recovery lives on home and session. |
 | Expedition roster, live and final leaderboard, and updates | Existing authorized rows expose preference-filtered `profile_name` and `trail_name` and a safe `display_name` label. Name fields do not grant board, roster, or feed access. |
 
-Return `400 invalid` for an unknown preference, missing reroll confirmation, or missing or invalid request key. Return `409 trail_identity_locked` for reroll or reveal acknowledgment before assignment, `409 trail_reroll_used` for a distinct request after reroll, and `503 trail_name_pool_unavailable` when a required draw cannot run. An exact reroll retry returns success even when the pool later changes.
+Return `400 invalid` for an unknown preference, missing reroll confirmation, or missing or invalid request key. A request key is 1–128 visible ASCII characters. Return `409 trail_identity_locked` for reroll or reveal acknowledgment before assignment, `409 trail_reroll_used` for a distinct request after reroll, and `503 trail_name_pool_unavailable` when a required draw cannot run. An exact reroll retry returns success even when the pool later changes.
 
 For an assigned account, `both` exposes both components, `trail_only` exposes only the trail name, and `hidden` hides the trail name while retaining ordinary profile-name presentation. Before assignment, show the ordinary profile name. Serialize suppressed components as null, and derive `display_name` from the visible components or the neutral label “Adventurer” when none is visible. Apply this projection to existing name fields and alternate representations on these surfaces. Never fall back to username, initials from a suppressed name, or a raw snapshot field. Access-controlled administrative account identification continues to follow its own contract. Display preferences govern presentation and give duplicate names no effect on identity, credits, ranking, or sorting.
 

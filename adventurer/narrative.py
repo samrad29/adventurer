@@ -18,6 +18,7 @@ import re
 from pathlib import Path
 
 from .db import get_db
+from .trail_identity import owner_identity
 from .journey_progress import ProgressError, read_journey_progress
 
 _PHOTOS_ROOT = Path(__file__).resolve().parent / "static" / "photos"
@@ -174,7 +175,13 @@ def journal_story(actor_id: int, journey_id: int, checkpoint_slug: str) -> dict:
         _require_actor(database, actor_id, lock=False)
         progress = _own_progress(database, actor_id, journey_id)
         checkpoint, story = _open_story(database, progress, checkpoint_slug)
-        return _story_payload(database, progress.journey_id, checkpoint, story)
+        body = _story_payload(database, progress.journey_id, checkpoint, story)
+        reveal = owner_identity(database, actor_id)["trail_name_reveal"]
+        if reveal and reveal["checkpoint_slug"] == checkpoint_slug:
+            route = database.execute("SELECT slug FROM routes WHERE id = ?", (progress.route_id,)).fetchone()
+            if route["slug"] == reveal["route_slug"]:
+                body["trail_name_reveal"] = reveal
+        return body
     except NarrativeError:
         raise
     finally:

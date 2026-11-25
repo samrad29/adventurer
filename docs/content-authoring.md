@@ -75,6 +75,10 @@ Import validates the whole package, then writes one route in one transaction. If
 
 The optional `recommended_activity_types` array lists supported activity type codes in display order. Each code may appear once. Import replaces the route's recommendation list. An omitted field or empty array clears the list. Recommendations are editorial and leave journey eligibility and progress unchanged.
 
+The optional `trail_identity_checkpoint_slugs` array lists distinct existing checkpoint slugs for this route. Import replaces its qualifying checkpoints. An omitted or empty array clears the configuration. Enabling any checkpoint requires at least two active trail names. Imports do not assign names to accounts that have already reached a checkpoint.
+
+Keep the reviewed trail name pool in a separate UTF-8 JSON array of strings. Run `python -m adventurer.content_pipeline import-trail-name-pool <path>` against the isolated test database. The importer trims and collapses whitespace, rejects casefolded duplicates, and preserves the spelling of published entries. The input is the full active pool. Omitted names become retired and retain their identity. A replacement must preserve at least two active names while qualifying checkpoints or unused rerolls exist.
+
 ## chapters.json
 
 ```json

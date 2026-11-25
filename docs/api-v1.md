@@ -21,6 +21,20 @@ Account deletion (`POST /api/v1/account/deletion`) is not implemented. The delet
 
 The achievement database and internal issuance foundation are implemented in architecture section 17. Achievement issuance and trophy case endpoints remain deferred.
 
+## Trail Identity
+
+Section 21 of `docs/architecture.md` defines the Trail Identity contract. Session and home include `trail_name_display`, `trail_identity`, and `trail_name_reveal` under `you`. A successful progress write that assigns the name returns `trail_name_reveal` at the top level. The same pending reveal can appear on the authorized, reached, published qualifying journal detail. The reveal contains the current name and the qualifying route and checkpoint slugs.
+
+| Method | Path | Body |
+| --- | --- | --- |
+| PATCH | `/api/v1/profile/trail-identity` | `trail_name_display` accepts `both`, `trail_only`, or `hidden`. |
+| POST | `/api/v1/profile/trail-identity/reroll` | Send `confirm: true` and a stable `request_key` of 1–128 visible ASCII characters. |
+| POST | `/api/v1/profile/trail-identity/reveal-acknowledgment` | Empty. Returns `acknowledged_at`. |
+
+The preference and reroll endpoints return the three owner fields. Reroll retries with the same key return the committed name. Errors include `409 trail_identity_locked`, `409 trail_reroll_used`, and `503 trail_name_pool_unavailable`. Cookie requests use the usual CSRF protection.
+
+Authorized expedition roster, leaderboard, and update rows include nullable `profile_name` and `trail_name` plus a preference-filtered `display_name`. Final results and new feed rows use their captured names with current visibility limits. Ranking and ordering still use their existing inputs.
+
 ## Response and errors
 
 Success is a JSON object. Resource bodies from the services are returned directly. `Decimal` values are decimal strings. Timestamps are ISO-8601. Home progress fields that the home contract names in feet are JSON numbers.

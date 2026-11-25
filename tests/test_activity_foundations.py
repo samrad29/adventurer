@@ -37,7 +37,7 @@ DAY = date(2026, 6, 1)
 def test_migration_accepts_cycling_types_and_backfills_origins(app):
     with app.app_context():
         version = get_db().execute("SELECT version_num FROM alembic_version").fetchone()
-        assert version["version_num"] == "0016_achievement_foundation"
+        assert version["version_num"] == "0017_trail_identity"
         definition = get_db().execute(
             """
             SELECT pg_get_constraintdef(oid) AS definition

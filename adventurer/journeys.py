@@ -243,7 +243,10 @@ def choose_activity_policy(user_id: int, journey_id: int, choice: str, confirmat
             policy_changed=True,
             complete=bool(decision.get("complete")),
         )
-        return present_journey(database, journey["id"], applied["arrivals"]), True
+        presented = present_journey(database, journey["id"], applied["arrivals"])
+        if applied["trail_name_reveal"] is not None:
+            presented["trail_name_reveal"] = applied["trail_name_reveal"]
+        return presented, True
 
     return _commit(write)
 
