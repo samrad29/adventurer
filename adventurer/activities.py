@@ -278,9 +278,14 @@ def update_activity(
             measurements.get("distance"),
         )
         credit_journey = journey if _credits_can_change(loaded, journey, changes) else None
+        policy_confirmation = bool(confirmation_token and confirmation_token.startswith(("p2|", "p3|")))
+        if policy_confirmation and (journey is None or journey["status"] == "completed"):
+            raise _stale_policy_confirmation()
         if credit_journey is not None and credit_journey["status"] == "completed":
             _reject_completed_progress_edit(loaded, changes)
             _reject_completed_eligibility_edit(credit_journey, loaded, changes)
+            if confirmation_token:
+                raise _confirmation(_preview_edit(database, user_id, loaded, changes))
             _apply_changes(database, activity_id, loaded, changes)
             saved = _with_arrivals(
                 _saved(database, activity_id, loaded["journey_id"]), []
@@ -303,6 +308,8 @@ def update_activity(
             or stays_unassigned
             or (not measurement_changed and not eligibility_changed)
         ):
+            if policy_confirmation:
+                raise _stale_policy_confirmation()
             if confirmation_token:
                 raise _confirmation(_preview_edit(database, user_id, loaded, changes))
             _apply_changes(database, activity_id, loaded, changes)
@@ -330,6 +337,8 @@ def update_activity(
             previous_credits=loaded["credits"],
             allocate_now=True,
         )
+        if policy_confirmation and not (eligibility_changed and proposal["will_complete"]):
+            raise _stale_policy_confirmation()
         if proposal["resume_required"]:
             raise ActivityError(
                 "resume_required",
@@ -584,6 +593,7 @@ def _policy_binding(user_id: int, journey: dict, proposal: dict) -> dict:
             _binding_database(), user_id, journey["id"]
         ),
         "lifecycle": "complete",
+        "journey_status": journey["status"],
         "allocation": policy_allocation_fingerprint(
             proposal["slots"], proposal["shares"], requirements
         ),
@@ -604,6 +614,12 @@ def _binding_database():
 def _issue_policy_token(user_id: int, journey: dict, proposal: dict) -> tuple[str, int]:
     token, expires = issue_token(**_policy_binding(user_id, journey, proposal))
     return token, expires
+
+
+def _stale_policy_confirmation() -> ActivityError:
+    return ActivityError(
+        "stale_preview", "That activity-rule preview is out of date.", status=409
+    )
 
 
 def _require_policy_completion(token, user_id: int, journey: dict, proposal: dict) -> None:

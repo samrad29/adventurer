@@ -550,6 +550,77 @@ def test_update_preserves_identity_progress_and_acknowledgments(client, app, tmp
         assert repeat.get_json()["acknowledged_at"] == seen_at
 
 
+@pytest.mark.parametrize("value", [None, "hike", ["fly"], [{}], ["hike", "hike"]])
+def test_invalid_manifest_recommendations_are_rejected(tmp_path, value):
+    package = _valid(tmp_path, "content-recommendations")
+    path = package / "manifest.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    manifest["recommended_activity_types"] = value
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    assert any(issue.field == "recommended_activity_types" for issue in validate_content(package))
+
+
+def test_recommendation_import_is_ordered_and_editorial(client, app, tmp_path):
+    slug = "content-recommendations"
+    field = "recommended_activity_types"
+    with app.app_context():
+        _geography(slug, ["gate", "camp", "summit"])
+        package = _valid(tmp_path, slug)
+        database = get_db()
+        import_route(database, package)
+        _user, token, _csrf = _register(client, "RecommendationEditor")
+        journey = _start(client, token, slug)
+        _credit(client, token, activity_type="walk", elevation_ft=200)
+
+        def progress():
+            return database.execute(
+                """
+                SELECT journey.progress_version, journey.status, journey.activity_policy,
+                       credit.assignment_id, credit.credited_amount
+                FROM route_journeys AS journey
+                JOIN journey_credits AS credit ON credit.journey_id = journey.id
+                WHERE journey.id = ?
+                ORDER BY credit.assignment_id
+                """,
+                (journey["id"],),
+            ).fetchall()
+
+        def recommendations():
+            listing = client.get("/api/v1/routes").get_json()["routes"]
+            route = next(row for row in listing if row["slug"] == slug)
+            detail = client.get(f"/api/v1/routes/{slug}").get_json()
+            assert route[field] == detail[field]
+            return detail[field]
+
+        before = progress()
+        assert len(before) == 1
+        path = package / "manifest.json"
+        manifest = json.loads(path.read_text(encoding="utf-8"))
+        manifest[field] = ["indoor_cycle", "hike"]
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        dry_run = import_route(database, package, dry_run=True)
+        assert any(change.fields == (field,) for change in dry_run)
+        assert recommendations() == []
+        assert import_route(database, package) == dry_run
+        assert recommendations() == ["indoor_cycle", "hike"]
+        assert all(change.action == "unchanged" for change in import_route(database, package))
+        assert progress() == before
+
+        _credit(client, token, activity_type="walk", elevation_ft=200)
+        after_walk = progress()
+        assert len(after_walk) == 2
+        assert after_walk[1]["credited_amount"] == feet_to_meters(Decimal("200"))
+        manifest[field].reverse()
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        import_route(database, package)
+        assert recommendations() == ["hike", "indoor_cycle"]
+        del manifest[field]
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        import_route(database, package)
+        assert recommendations() == []
+        assert progress() == after_walk
+
+
 def test_omitted_records_are_left_in_place(app, tmp_path):
     slug = "content-omit"
     with app.app_context():

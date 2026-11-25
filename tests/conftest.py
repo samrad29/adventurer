@@ -131,6 +131,10 @@ def _prepare_database() -> None:
                 ).fetchone()
                 is not None
                 and constraint is not None
+                and conn.execute(
+                    "SELECT to_regclass('adventurer.route_activity_recommendations')"
+                ).fetchone()[0]
+                is not None
                 and "expired" in constraint[0]
             )
     except psycopg.Error:
@@ -173,6 +177,7 @@ def _wipe(application) -> None:
         database.execute("DELETE FROM organizations")
         database.execute("DELETE FROM users")
         database.execute("DELETE FROM routes WHERE slug <> 'everest'")
+        database.execute("DELETE FROM route_activity_recommendations")
         database.execute(
             """
             DELETE FROM expedition_activity_types

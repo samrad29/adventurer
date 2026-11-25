@@ -58,8 +58,8 @@ def _hide_identity(monkeypatch, *, role: str) -> None:
     """
     real = pipeline._read_catalog
 
-    def wrapped(database, package):
-        catalog, issues = real(database, package)
+    def wrapped(database, package, *, lock=False):
+        catalog, issues = real(database, package, lock=lock)
         if catalog is not None:
             for row in catalog.media:
                 if row["role"] != role:

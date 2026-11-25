@@ -32,6 +32,7 @@ from adventurer.expeditions import (
     accept_invitation,
 )
 from adventurer.journeys import (
+    abandon_journey,
     active_journey,
     choose_activity_policy,
     restart_journey,
@@ -849,6 +850,114 @@ def test_a_narrowing_token_does_not_become_a_share(app):
             "SELECT 1 FROM expeditions WHERE slug = 'share-later'"
         ).fetchone() is None
         assert _policy(_journey_id(user_id))[1] == ("hike",)
+
+
+@pytest.mark.parametrize("transition", ["completed", "abandoned", "restarted"])
+def test_stale_policy_confirmation_cannot_activate_or_attach(app, transition):
+    with app.app_context():
+        user_id = _user("Lifecycle")
+        owner_id = _user("LifecycleOwner")
+        _org(app, user_id, "lifecycle-club", "LifecycleOwner")
+        route_id = _elevation_route("policy-lifecycle", "100")
+        slug = "lifecycle-restricted"
+        policy = {"mode": "restricted", "activity_types": ["hike"]}
+        expedition = create_organization_expedition(
+            owner_id, "lifecycle-club", slug=slug, name="Restricted",
+            route_slug="policy-lifecycle", enrollment="open", activity_policy=policy,
+        )
+        start_journey(user_id, route_id)
+        with pytest.raises(ExpeditionError) as preview:
+            join_expedition(user_id, slug)
+        assert preview.value.code == "confirmation_required"
+        token = preview.value.details["confirmation_token"]
+        if transition == "completed":
+            with pytest.raises(ExpeditionError) as narrowing:
+                create_private_expedition(
+                    user_id, slug="lifecycle-governor", name="Governor",
+                    route_slug="policy-lifecycle", activity_policy=policy,
+                )
+            create_private_expedition(
+                user_id, slug="lifecycle-governor", name="Governor",
+                route_slug="policy-lifecycle", activity_policy=policy,
+                confirmation_token=narrowing.value.details["confirmation_token"],
+            )
+            _log(user_id, "100")
+        else:
+            abandon_journey(user_id, route_id)
+            if transition == "restarted":
+                restart_journey(user_id, route_id)
+        current = _journey_id(user_id)
+        before = (_status(current), _policy(current), _version(current))
+        with pytest.raises(ExpeditionError) as stale:
+            join_expedition(
+                user_id, slug, confirmation_token=token,
+                confirm_new_attempt=transition == "abandoned",
+            )
+        assert stale.value.code == "stale_preview"
+        assert _journey_id(user_id) == current
+        assert (_status(current), _policy(current), _version(current)) == before
+        assert get_db().execute(
+            "SELECT 1 FROM expedition_participations WHERE expedition_id = ? AND user_id = ?",
+            (expedition["id"], user_id),
+        ).fetchone() is None
+
+
+def test_expansion_token_binds_status_when_lifecycle_effect_is_unchanged(app):
+    with app.app_context():
+        user_id = _user("ExpansionStatus")
+        route_id = _elevation_route("policy-expansion-status", "1000")
+        other_id = _elevation_route("policy-expansion-other", "1000")
+        created = create_private_expedition(
+            user_id, slug="expansion-feet", name="Feet", route_slug="policy-expansion-status",
+            activity_policy={"mode": "restricted", "activity_types": ["hike"]},
+        )
+        journey_id = created["journey"]["id"]
+        leave_expedition(user_id, "expansion-feet")
+        choose_activity_policy(user_id, journey_id, "keep", None)
+        with pytest.raises(Exception) as preview:
+            choose_activity_policy(user_id, journey_id, "expand", None)
+        assert preview.value.details["policy_preview"]["lifecycle"] is None
+        version = _version(journey_id)
+        start_journey(user_id, other_id)
+        assert _status(journey_id) == "paused"
+        assert _version(journey_id) == version
+        with pytest.raises(Exception) as stale:
+            choose_activity_policy(user_id, journey_id, "expand", preview.value.details["confirmation_token"])
+        assert stale.value.code == "stale_preview"
+        assert stale.value.details["policy_preview"]["lifecycle"] is None
+        assert _policy(journey_id)[0] == "restricted"
+        assert _version(journey_id) == version
+
+
+@pytest.mark.parametrize("transition", ["paused", "completed"])
+def test_activity_policy_confirmation_cannot_save_after_status_changes(app, transition):
+    with app.app_context():
+        user_id = _user("ActivityStatus")
+        _elevation_route("policy-activity-status", "100")
+        other_id = _elevation_route("policy-activity-other", "100")
+        created = create_private_expedition(
+            user_id, slug="activity-status-feet", name="Feet", route_slug="policy-activity-status",
+            activity_policy={"mode": "restricted", "activity_types": ["hike"]},
+        )
+        journey_id = created["journey"]["id"]
+        activity_id = _log(user_id, "100", "cycle")["activity"]["id"]
+        fields = {"activity_type": "hike"}
+        preview = preview_activity_update(user_id, activity_id, fields)
+        assert preview["will_complete"]
+        token = preview["confirmation_token"]
+        if transition == "completed":
+            update_activity(user_id, activity_id, fields, confirmation_token=token)
+        else:
+            start_journey(user_id, other_id)
+        assert _status(journey_id) == transition
+        before = (_ledger(journey_id), _version(journey_id))
+        with pytest.raises(ActivityError) as stale:
+            update_activity(user_id, activity_id, {**fields, "note": "stale"}, confirmation_token=token)
+        assert stale.value.code == "stale_preview"
+        assert (_ledger(journey_id), _version(journey_id)) == before
+        assert get_db().execute(
+            "SELECT note FROM activities WHERE id = ?", (activity_id,)
+        ).fetchone()["note"] != "stale"
 
 
 def test_a_policy_confirm_waits_out_an_activity_save_and_rejects_the_old_token(app):

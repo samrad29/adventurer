@@ -533,6 +533,7 @@ def issue_token(
     proposed: Policy,
     participation_ids: list[int],
     lifecycle: str,
+    journey_status: str,
     allocation: str,
     totals: str,
     progress_version: int,
@@ -543,7 +544,7 @@ def issue_token(
     expires = int(time.time()) + TOKEN_TTL
     payload = "|".join(
         [
-            "p2",
+            "p3",
             str(user_id),
             str(journey_id),
             operation,
@@ -558,6 +559,7 @@ def issue_token(
             "-" if activity_id is None else str(activity_id),
             activity_type or "-",
             measurements or "-",
+            journey_status,
             str(expires),
         ]
     )
@@ -569,16 +571,16 @@ def token_matches(token: str | None, **expected) -> bool:
     if not token or not isinstance(token, str):
         return False
     payload, separator, signature = token.rpartition("|")
-    if not separator or payload.count("|") != 15:
+    if not separator or payload.count("|") != 16:
         return False
     digest = hmac.new(_secret(), payload.encode("utf-8"), hashlib.sha256).hexdigest()
     if not hmac.compare_digest(digest, signature):
         return False
     parts = payload.split("|")
-    if parts[0] != "p2":
+    if parts[0] != "p3":
         return False
     try:
-        expires = int(parts[15])
+        expires = int(parts[16])
     except ValueError:
         return False
     if expires < int(time.time()):
@@ -601,6 +603,7 @@ def token_matches(token: str | None, **expected) -> bool:
         and parts[12] == activity
         and parts[13] == (expected.get("activity_type") or "-")
         and parts[14] == (expected.get("measurements") or "-")
+        and parts[15] == expected["journey_status"]
     )
 
 
@@ -881,6 +884,7 @@ def assert_join(
         "proposed": target,
         "participation_ids": participations,
         "lifecycle": lifecycle,
+        "journey_status": proposal["journey"]["status"],
         "allocation": policy_allocation_fingerprint(
             proposal["slots"], proposal["shares"], requirements
         ),

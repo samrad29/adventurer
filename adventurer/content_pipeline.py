@@ -1,8 +1,8 @@
 """Validate and import one route's curated narrative.
 
 GitHub holds the package. PostgreSQL holds the rows the journal API reads.
-The importer writes chapters, stories, discoveries, media, and checkpoint
-chapter assignments. It does not write route requirements, checkpoint
+The importer writes chapters, stories, discoveries, media, checkpoint
+chapter assignments, and route recommendations. It does not write route requirements, checkpoint
 thresholds, checkpoint positions, journeys, credits, standings, or
 arrival acknowledgments.
 
@@ -28,8 +28,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlparse
 
+from adventurer.allocation import SUPPORTED_TYPES
 from adventurer.db import DB
 from adventurer.narrative import _asset_is_readable, _photo_relative
+from adventurer.route_recommendations import recommendations_for_routes
 
 FORMAT_VERSION = 1
 SLUG = re.compile(r"^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$")
@@ -66,7 +68,7 @@ MEDIA_FIELDS = (
     "permission_note",
     "status",
 )
-KIND_ORDER = {"chapter": 0, "assignment": 1, "story": 2, "discovery": 3, "media": 4}
+KIND_ORDER = {"chapter": 0, "assignment": 1, "story": 2, "discovery": 3, "media": 4, "recommendations": 5}
 RIGHTS_NOTE = "matching text is not proof the license is authentic"
 
 
@@ -145,6 +147,7 @@ class Package:
     chapters: tuple[ChapterDoc, ...]
     checkpoints: tuple[CheckpointDoc, ...]
     media: tuple[MediaDoc, ...]
+    recommended_activity_types: tuple[str, ...]
 
 
 @dataclass
@@ -155,6 +158,7 @@ class Catalog:
     stories: dict[int, dict]
     discoveries: dict[tuple[int, str], dict]
     media: list[dict]
+    recommended_activity_types: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -202,7 +206,7 @@ def import_route(database: DB, root: Path, *, dry_run: bool = False) -> list[Cha
         raise ContentRejected(issues)
     database.rollback()
     try:
-        catalog, issues = _read_catalog(database, package)
+        catalog, issues = _read_catalog(database, package, lock=not dry_run)
         if catalog is not None:
             issues.extend(_catalog_issues(package, catalog))
         if issues or catalog is None:
@@ -403,6 +407,7 @@ def _load_package(root: Path) -> tuple[Package | None, list[ContentIssue]]:
             route_slug = manifest["route_slug"]
     if manifest is None or not isinstance(manifest, dict):
         return None, issues
+    recommendations = manifest.get("recommended_activity_types", [])
 
     chapters, chapter_issues = _load_chapters(root / "chapters.json")
     issues.extend(chapter_issues)
@@ -422,6 +427,7 @@ def _load_package(root: Path) -> tuple[Package | None, list[ContentIssue]]:
             chapters=tuple(chapters),
             checkpoints=tuple(checkpoints),
             media=tuple(media),
+            recommended_activity_types=tuple(recommendations) if isinstance(recommendations, list) else (),
         ),
         issues,
     )
@@ -430,7 +436,15 @@ def _load_package(root: Path) -> tuple[Package | None, list[ContentIssue]]:
 def _manifest_issues(manifest: object, directory: str) -> list[ContentIssue]:
     if not isinstance(manifest, dict):
         return [ContentIssue("manifest.json", "manifest", "json", "manifest must be an object")]
-    issues = _unknown_keys(manifest, {"format_version", "route_slug"}, "manifest.json", "manifest")
+    field = "recommended_activity_types"
+    issues = _unknown_keys(manifest, {"format_version", "route_slug", field}, "manifest.json", "manifest")
+    types = manifest.get(field, [])
+    if not isinstance(types, list) or any(
+        not isinstance(item, str) or item not in SUPPORTED_TYPES for item in types
+    ):
+        issues.append(ContentIssue("manifest.json", "manifest", field, "must be an array of supported activity types"))
+    elif len(set(types)) != len(types):
+        issues.append(ContentIssue("manifest.json", "manifest", field, "must not contain duplicate activity types"))
     version = manifest.get("format_version")
     if type(version) is not int or version != FORMAT_VERSION:
         issues.append(
@@ -879,9 +893,12 @@ def _path_problem(asset_path: str) -> str | None:
     return None
 
 
-def _read_catalog(database: DB, package: Package) -> tuple[Catalog | None, list[ContentIssue]]:
+def _read_catalog(database: DB, package: Package, *, lock: bool = False) -> tuple[Catalog | None, list[ContentIssue]]:
+    route_query = "SELECT id FROM routes WHERE slug = ?"
+    if lock:
+        route_query += " FOR NO KEY UPDATE"
     route = database.execute(
-        "SELECT id FROM routes WHERE slug = ?",
+        route_query,
         (package.route_slug,),
     ).fetchone()
     if route is None:
@@ -961,8 +978,12 @@ def _read_catalog(database: DB, package: Package) -> tuple[Catalog | None, list[
             (route["id"],),
         ).fetchall()
     )
+    recommendations = recommendations_for_routes(database, [route["id"]])
     return (
-        Catalog(route["id"], checkpoints, chapters, stories, discoveries, media),
+        Catalog(
+            route["id"], checkpoints, chapters, stories, discoveries, media,
+            tuple(recommendations.get(route["id"], [])),
+        ),
         [],
     )
 
@@ -1242,6 +1263,11 @@ def _media_position_issues(package: Package, catalog: Catalog) -> list[ContentIs
 
 def _plan(package: Package, catalog: Catalog) -> list[Change]:
     changes: list[Change] = []
+    if package.recommended_activity_types != catalog.recommended_activity_types:
+        changes.append(Change(
+            "update", "recommendations", package.route_slug,
+            fields=("recommended_activity_types",), values=package.recommended_activity_types,
+        ))
     for chapter in package.chapters:
         existing = catalog.chapters.get(chapter.slug)
         values = (chapter.slug, chapter.title, chapter.summary, chapter.position, chapter.status)
@@ -1409,6 +1435,20 @@ def _plan(package: Package, catalog: Catalog) -> list[Change]:
 
 
 def _apply(database: DB, catalog: Catalog, plan: list[Change]) -> None:
+    for change in plan:
+        if change.kind != "recommendations":
+            continue
+        database.execute(
+            "DELETE FROM route_activity_recommendations WHERE route_id = ?", (catalog.route_id,)
+        )
+        for position, activity_type in enumerate(change.values):
+            database.execute(
+                """
+                INSERT INTO route_activity_recommendations (route_id, activity_type, position)
+                VALUES (?, ?, ?)
+                """,
+                (catalog.route_id, activity_type, position),
+            )
     chapter_moves = [
         (change.record_id, change.values[3])
         for change in plan

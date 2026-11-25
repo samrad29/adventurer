@@ -2183,6 +2183,12 @@ def _open_journey(
         """,
         (user_id, expedition["route_id"]),
     ).fetchone()
+    if confirmation_token and (
+        current is None or current["status"] not in ("active", "paused")
+    ):
+        raise ExpeditionError(
+            "stale_preview", "That activity-rule preview is out of date.", status=409
+        )
     decision = {
         "change": False,
         "policy": receiver,

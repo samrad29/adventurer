@@ -85,6 +85,7 @@ from .narrative import (
     journal_timeline,
 )
 from .activity_policy import PolicyError
+from .route_recommendations import recommendations_for_routes
 from .services import AccountError, authenticate, create_adventurer, current_viewer, get_adventurer
 from .tokens import issue_token, revoke_all, revoke_token
 
@@ -347,6 +348,7 @@ def routes_list():
     route_ids = [row["id"] for row in rows]
     requirements = _requirements_by_route(database, route_ids)
     chapters = chapters_for_routes(database, route_ids)
+    recommendations = recommendations_for_routes(database, route_ids)
     database.rollback()
     return _ok(
         routes=[
@@ -357,6 +359,7 @@ def routes_list():
                 "summary": row["summary"],
                 "requirements": requirements.get(row["id"], []),
                 "chapters": chapters.get(row["id"], []),
+                "recommended_activity_types": recommendations.get(row["id"], []),
             }
             for row in rows
         ]
@@ -417,6 +420,7 @@ def routes_get(slug: str):
     requirements = _requirements_by_route(database, [route["id"]]).get(route["id"], [])
     checkpoint_bodies = _checkpoint_catalog(database, checkpoints)
     chapters = chapters_for_routes(database, [route["id"]]).get(route["id"], [])
+    recommendations = recommendations_for_routes(database, [route["id"]]).get(route["id"], [])
     database.rollback()
     journeys = []
     if g.get("actor_id"):
@@ -427,6 +431,7 @@ def routes_get(slug: str):
         region=route["region"],
         summary=route["summary"],
         requirements=requirements,
+        recommended_activity_types=recommendations,
         checkpoints=checkpoint_bodies,
         chapters=chapters,
         expeditions=[_enrollment_expedition(row) for row in expeditions],
